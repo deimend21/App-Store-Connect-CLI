@@ -147,7 +147,11 @@ func screenshotUploadRetryError(result asc.AppScreenshotUploadResult, progress s
 	}
 	err := fmt.Errorf("%s: %w", summary, cause)
 	fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
-	fmt.Fprintf(os.Stderr, "Hint: resume with `asc screenshots upload --resume \"%s\"`\n", shared.SanitizeTerminal(result.FailureArtifactPath))
+	if quotedPath, ok := shared.ShellQuote(result.FailureArtifactPath); ok {
+		fmt.Fprintf(os.Stderr, "Hint: resume with `asc screenshots upload --resume %s`\n", quotedPath)
+	} else {
+		fmt.Fprintln(os.Stderr, "Hint: use --resume with the failure artifact path from the JSON result.")
+	}
 	return shared.NewStderrReportedError(err)
 }
 

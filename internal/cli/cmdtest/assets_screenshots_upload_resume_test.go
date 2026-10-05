@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestRunScreenshotsUploadResumeRejectsSelectorFlags(t *testing.T) {
@@ -204,7 +206,11 @@ func TestRunScreenshotsUploadWritesFailureArtifactAndResumeCompletes(t *testing.
 	if !strings.Contains(stderr, "Error: screenshots upload: 2 of 3 file(s) not uploaded: ") || !strings.Contains(stderr, "upload create failed") {
 		t.Fatalf("expected partial failure and its cause on stderr, got %q", stderr)
 	}
-	if !strings.Contains(stderr, fmt.Sprintf("Hint: resume with `asc screenshots upload --resume \"%s\"`", firstResult.FailureArtifactPath)) {
+	quotedPath, ok := shared.ShellQuote(firstResult.FailureArtifactPath)
+	if !ok {
+		t.Fatalf("generated artifact path cannot be quoted: %q", firstResult.FailureArtifactPath)
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("Hint: resume with `asc screenshots upload --resume %s`", quotedPath)) {
 		t.Fatalf("expected resume hint on stderr, got %q", stderr)
 	}
 	if firstResult.Pending != 2 {
@@ -561,4 +567,58 @@ func screenshotsUploadJSONResponse(status int, body string) (*http.Response, err
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}, nil
+}
+
+func TestRunScreenshotsResumeKeepsLiteralFailureArtifactPath(t *testing.T) {
+	for _, name := range []string{"retry$NAME$(printf expanded)`printf backtick`'quote.json", "retry\x1b[2J\nforged.json"} {
+		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.ContainsAny(name, "\x1b\n") {
+				t.Skip("Windows does not permit control characters in filenames")
+			}
+			setupAuth(t)
+			t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+			t.Setenv("ASC_APP_ID", "")
+			path := filepath.Join(t.TempDir(), name)
+			artifact := `{"versionLocalizationId":"LOC_123","setId":"SET_123","cleanupFailures":[{"assetId":"SHOT_BAD"}]}`
+			if err := os.WriteFile(path, []byte(artifact), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			originalTransport := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			calls := 0
+			http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodDelete || req.URL.Path != "/v1/appScreenshots/SHOT_BAD" {
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
+				}
+				calls++
+				return screenshotsUploadJSONResponse(http.StatusBadRequest, `{"errors":[{"status":"400","code":"BAD_REQUEST","detail":"cleanup failed"}]}`)
+			})
+			stdout, stderr := captureOutput(t, func() {
+				if code := cmd.Run([]string{"screenshots", "upload", "--resume", path, "--output", "json"}, "1.2.3"); code != cmd.ExitHTTPBadRequest {
+					t.Fatalf("expected HTTP 400 exit %d, got %d", cmd.ExitHTTPBadRequest, code)
+				}
+			})
+			var result struct {
+				FailureArtifactPath string `json:"failureArtifactPath"`
+				Resumed             bool   `json:"resumed"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("invalid receipt: %v, %q", err, stdout)
+			}
+			if result.FailureArtifactPath != path || !result.Resumed || calls != 1 {
+				t.Fatalf("resume outcome changed: %+v, calls=%d", result, calls)
+			}
+			if !strings.Contains(stderr, "cleanup failed") || strings.Count(stderr, "Error:") != 1 {
+				t.Fatalf("failure cause not preserved: %q", stderr)
+			}
+			if quoted, ok := shared.ShellQuote(path); ok {
+				if !strings.Contains(stderr, "Hint: resume with `asc screenshots upload --resume "+quoted+"`\n") {
+					t.Fatalf("literal artifact path lost: %q", stderr)
+				}
+			} else if strings.Contains(stderr, "`asc screenshots upload --resume ") || !strings.Contains(stderr, "failure artifact path from the JSON result") {
+				t.Fatalf("unsafe filename must not be approximated: %q", stderr)
+			}
+		})
+	}
 }
