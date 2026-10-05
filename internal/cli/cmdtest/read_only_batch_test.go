@@ -10,8 +10,56 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
+
+func TestReadOnlyAppInfoEditBatchPreservesCreateAndUpdateRefusals(t *testing.T) {
+	setupAuth(t)
+	t.Setenv(readonly.EnvVar, "1")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+	t.Setenv("ASC_APP_ID", "")
+	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Errorf("mutation escaped read-only client: %s %s", req.Method, req.URL.Path)
+			return nil, io.ErrUnexpectedEOF
+		}
+		switch req.URL.Path {
+		case "/v1/appStoreVersions/ver-1":
+			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"app-1"}}}}}`)
+		case "/v1/appStoreVersions/ver-1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-en","attributes":{"locale":"en-US"}}]}`)
+		case "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, `{"data":[]}`)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+			return nil, io.ErrUnexpectedEOF
+		}
+	}))
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = cmd.Run([]string{"apps", "info", "edit", "--app", "app-1", "--version-id", "ver-1", "--locales", "en-US,de-DE", "--description", "Updated", "--output", "json"}, "1.0.0")
+	})
+	if code != cmd.ExitReadOnly {
+		t.Fatalf("exit=%d want %d; stderr=%q stdout=%q", code, cmd.ExitReadOnly, stderr, stdout)
+	}
+	var receipt asc.AppInfoSetBatchResult
+	if err := json.Unmarshal([]byte(stdout), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Total != 2 || receipt.Failed != 2 || receipt.Succeeded != 0 || len(receipt.Results) != 2 {
+		t.Fatalf("unexpected receipt: %+v", receipt)
+	}
+	for i, action := range []string{"create", "update"} {
+		item := receipt.Results[i]
+		if item.Action != action || item.Status != "failed" || !strings.Contains(item.Error, "ASC_READ_ONLY is set; refusing") {
+			t.Fatalf("result[%d]=%+v", i, item)
+		}
+	}
+	if strings.Count(stderr, "Error:") != 1 || !strings.Contains(stderr, "2 locale(s) failed") {
+		t.Fatalf("stderr=%q", stderr)
+	}
+}
 
 func TestReadOnlyVersionLocalizationImportPreservesCreateAndUpdateRefusals(t *testing.T) {
 	setupAuth(t)
