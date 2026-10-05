@@ -39,7 +39,7 @@ func BindVersionBuildSelector(fs *flag.FlagSet) *VersionBuildSelector {
 		fs:           fs,
 		buildID:      shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to attach"),
 		buildNumber:  fs.String("build-number", "", "Build number (CFBundleVersion) to attach from the version's app, version string, and platform"),
-		latest:       fs.Bool("latest", false, "Attach the most recently uploaded build for the version's app, version string, and platform"),
+		latest:       fs.Bool("latest", false, "Attach the most recently uploaded App Store eligible build for the version's app, version string, and platform"),
 		wait:         fs.Bool("wait", false, "Wait for the selected build to finish processing (VALID) before attaching"),
 		timeout:      fs.Duration("timeout", buildsWaitDefaultTimeout, "Maximum time to wait with --wait"),
 		pollInterval: fs.Duration("poll-interval", buildsWaitDefaultPollInterval, "Polling interval for --wait"),
@@ -100,11 +100,12 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 	}
 
 	selector := appBuildWaitSelector{
-		Latest:      *s.latest,
-		AppID:       scope.AppID,
-		Version:     scope.Version,
-		BuildNumber: s.buildNumberValue(),
-		Platform:    scope.Platform,
+		Latest:            *s.latest,
+		AppID:             scope.AppID,
+		Version:           scope.Version,
+		BuildNumber:       s.buildNumberValue(),
+		Platform:          scope.Platform,
+		BuildAudienceType: asc.BuildAudienceTypeAppStoreEligible,
 	}
 
 	if !*s.wait {
@@ -129,6 +130,9 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 		if err != nil {
 			return "", s.waitError(waitCtx, err, "a matching build to appear")
 		}
+		if err := requireAppStoreBuildAudience(buildResp); err != nil {
+			return "", err
+		}
 		reportSelectedVersionBuild(buildResp, selector)
 		buildID = strings.TrimSpace(buildResp.Data.ID)
 	}
@@ -138,8 +142,12 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 		ShortVersion: selector.Version,
 		Platform:     selector.Platform,
 	}
-	if _, err := waitForBuildProcessingState(waitCtx, client, buildID, *s.pollInterval, true, failure, nil); err != nil {
+	buildResp, err := waitForBuildProcessingState(waitCtx, client, buildID, *s.pollInterval, true, failure, nil)
+	if err != nil {
 		return "", s.waitError(waitCtx, err, fmt.Sprintf("build %s to finish processing", buildID))
+	}
+	if err := requireAppStoreBuildAudience(buildResp); err != nil {
+		return "", err
 	}
 	return buildID, nil
 }
@@ -170,7 +178,17 @@ func reportSelectedVersionBuild(buildResp *asc.BuildResponse, selector appBuildW
 	)
 }
 
+func requireAppStoreBuildAudience(buildResp *asc.BuildResponse) error {
+	if strings.EqualFold(strings.TrimSpace(string(buildResp.Data.Attributes.BuildAudienceType)), string(asc.BuildAudienceTypeInternalOnly)) {
+		return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("build %s (%s) is INTERNAL_ONLY and cannot be attached to an App Store version", buildResp.Data.Attributes.Version, buildResp.Data.ID)), shared.DiagnosticStateNotReady, "--build-id")
+	}
+	return nil
+}
+
 func requireValidBuild(buildResp *asc.BuildResponse) error {
+	if err := requireAppStoreBuildAudience(buildResp); err != nil {
+		return err
+	}
 	state := strings.ToUpper(strings.TrimSpace(buildResp.Data.Attributes.ProcessingState))
 	buildNumber := strings.TrimSpace(buildResp.Data.Attributes.Version)
 	buildID := strings.TrimSpace(buildResp.Data.ID)
