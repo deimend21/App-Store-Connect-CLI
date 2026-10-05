@@ -123,7 +123,9 @@ func parseRequest(positional []string, query []string, body, bodyFile string, bo
 	if len(positional) < 2 {
 		err := shared.UsageError("api: METHOD and PATH are required")
 		if len(positional) == 1 && (strings.HasPrefix(positional[0], "/") || strings.HasPrefix(positional[0], "https://")) {
-			fmt.Fprintf(os.Stderr, "Hint: pass the method first: asc api GET %s\n", shared.SanitizeTerminal(positional[0]))
+			if quoted, ok := shared.ShellQuote(positional[0]); ok {
+				fmt.Fprintf(os.Stderr, "Hint: pass the method first: asc api GET %s\n", quoted)
+			}
 		}
 		return rawRequest{}, err
 	}

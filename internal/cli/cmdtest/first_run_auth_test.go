@@ -89,7 +89,7 @@ func TestAuthLoginMissingPrivateKeyNamesGivenPath(t *testing.T) {
 		{
 			name: "unexpanded tilde",
 			args: []string{"--private-key", "~/AuthKey.p8"},
-			want: `private key file not found: "~/AuthKey.p8" (the shell did not expand ~; use "$HOME/AuthKey.p8")`,
+			want: `private key file not found: "~/AuthKey.p8" (the shell did not expand ~; use an absolute path)`,
 		},
 		{
 			name: "fix permissions",

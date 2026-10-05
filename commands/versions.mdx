@@ -278,7 +278,8 @@ Select the version with `--version-id`, or with `--app` and `--version`. Select
 the build with `--build-id`, `--build-number`, or `--latest`. `--build-number`
 and `--latest` only match builds of the version's app, version string, and
 platform, and the selected build must be `VALID` unless `--wait` waits for
-processing first.
+processing first. Internal-only builds cannot be used for App Store distribution;
+`--latest` selects the newest App Store eligible build in the train.
 
 <ParamField path="--version-id" type="string">
   App Store version ID
@@ -305,7 +306,7 @@ processing first.
 </ParamField>
 
 <ParamField path="--latest" type="boolean">
-  Attach the most recently uploaded build of the version's train. Right after an upload, prefer `--build-number`
+  Attach the most recently uploaded App Store eligible build of the version's train. Right after an upload, prefer `--build-number`
 </ParamField>
 
 <ParamField path="--wait" type="boolean">

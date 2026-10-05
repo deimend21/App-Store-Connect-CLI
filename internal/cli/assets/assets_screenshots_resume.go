@@ -147,7 +147,11 @@ func screenshotUploadRetryError(result asc.AppScreenshotUploadResult, progress s
 	}
 	err := fmt.Errorf("%s: %w", summary, cause)
 	fmt.Fprint(os.Stderr, errfmt.FormatStderr(err))
-	fmt.Fprintf(os.Stderr, "Hint: resume with `asc screenshots upload --resume \"%s\"`\n", result.FailureArtifactPath)
+	if quotedPath, ok := shared.ShellQuote(result.FailureArtifactPath); ok {
+		fmt.Fprintf(os.Stderr, "Hint: resume with `asc screenshots upload --resume %s`\n", quotedPath)
+	} else {
+		fmt.Fprintln(os.Stderr, "Hint: use --resume with the failure artifact path from the JSON result.")
+	}
 	return shared.NewStderrReportedError(err)
 }
 
@@ -165,7 +169,7 @@ func warnScreenshotFileNamesAlreadyInSet(files []string, existing []asc.Resource
 	if len(duplicates) == 0 {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Warning: screenshots upload: %d file(s) already in the target screenshot set (%s); uploading them again creates duplicates. Use --skip-existing to upload only missing files, --replace --confirm to replace the set, or --resume with the failure artifact to finish a failed upload.\n", len(duplicates), strings.Join(duplicates, ", "))
+	fmt.Fprintf(os.Stderr, "Warning: screenshots upload: %d file(s) already in the target screenshot set (%s); uploading them again creates duplicates. Use --skip-existing to upload only missing files, --replace --confirm to replace the set, or --resume with the failure artifact to finish a failed upload.\n", len(duplicates), shared.SanitizeTerminal(strings.Join(duplicates, ", ")))
 }
 
 func prepareAppScreenshotUpload(ctx context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult]) (screenshotUploadPreparedState, error) {

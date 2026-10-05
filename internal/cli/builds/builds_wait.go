@@ -215,12 +215,13 @@ Examples:
 }
 
 type appBuildWaitSelector struct {
-	Latest      bool
-	AppID       string
-	Version     string
-	BuildNumber string
-	Platform    string
-	Since       *time.Time
+	Latest            bool
+	AppID             string
+	Version           string
+	BuildNumber       string
+	Platform          string
+	Since             *time.Time
+	BuildAudienceType asc.BuildAudienceType
 }
 
 // buildWaitObservation is the latest state a wait has seen, kept so a wait
@@ -290,6 +291,7 @@ func resolveBuildForAppWait(
 			Version:               selector.Version,
 			Platform:              selector.Platform,
 			ProcessingStateValues: buildsWaitProcessingStates(),
+			BuildAudienceType:     selector.BuildAudienceType,
 		}, allowEmpty)
 		if err != nil {
 			return nil, err

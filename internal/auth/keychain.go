@@ -105,8 +105,8 @@ func privateKeyOpenError(path, action string, err error) error {
 		return newPrivateKeyError(kind, fmt.Errorf("%s: %w", action, err))
 	}
 	message := fmt.Sprintf("private key file not found: %q", path)
-	if rest, ok := strings.CutPrefix(path, "~/"); ok {
-		message += fmt.Sprintf(" (the shell did not expand ~; use %q)", "$HOME/"+rest)
+	if strings.HasPrefix(path, "~/") {
+		message += " (the shell did not expand ~; use an absolute path)"
 	}
 	return newPrivateKeyError(PrivateKeyNotFound, errors.New(message))
 }
