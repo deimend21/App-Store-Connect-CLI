@@ -932,10 +932,10 @@ func profileNotFoundMessage(profile string) string {
 	}
 	if len(names) > 0 {
 		slices.Sort(names)
-		return message + "; available profiles: " + strings.Join(names, ", ")
+		return SanitizeTerminal(message + "; available profiles: " + strings.Join(names, ", "))
 	}
 	if path, err := config.Path(); err == nil {
-		return message + "; no profiles are configured (config file: " + path + ")"
+		return SanitizeTerminal(message + "; no profiles are configured (config file: " + path + ")")
 	}
 	return message + "; no profiles are configured"
 }
