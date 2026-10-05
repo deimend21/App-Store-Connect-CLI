@@ -199,12 +199,14 @@ Examples:
 				summary.Results = append(summary.Results, result)
 			}
 
+			var failureArtifactErr error
 			if summary.Failed > 0 {
 				artifactPath, artifactErr := writeMetadataKeywordsPushFailureArtifact(summary)
 				if artifactErr != nil {
-					return fmt.Errorf("metadata keywords push: write failure artifact: %w", artifactErr)
+					failureArtifactErr = fmt.Errorf("metadata keywords push: write failure artifact: %w", artifactErr)
+				} else {
+					summary.FailureArtifactPath = artifactPath
 				}
-				summary.FailureArtifactPath = artifactPath
 			}
 
 			if err := shared.PrintOutputWithRenderers(
@@ -217,6 +219,12 @@ Examples:
 				return err
 			}
 
+			if failureArtifactErr != nil {
+				if refused != nil {
+					fmt.Fprintf(os.Stderr, "Warning: %s\n", shared.SanitizeTerminal(failureArtifactErr.Error()))
+				}
+				return shared.NewErrorWithCause(failureArtifactErr, refused)
+			}
 			if summary.Failed > 0 {
 				return shared.NewReportedError(shared.NewErrorWithCause(fmt.Errorf("metadata keywords push: %d locale(s) failed", summary.Failed), refused))
 			}

@@ -268,7 +268,11 @@ func executeMetadataKeywordsPlan(ctx context.Context, opts metadataKeywordsPlanO
 	result.Results = applySummary.Results
 	artifactPath, err := writeMetadataKeywordsApplyFailureArtifact(result, opts.FailureArtifactScope)
 	if err != nil {
-		return result, fmt.Errorf("write failure artifact: %w", err)
+		artifactErr := fmt.Errorf("write failure artifact: %w", err)
+		if result.refused != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", shared.SanitizeTerminal(artifactErr.Error()))
+		}
+		return result, shared.NewErrorWithCause(artifactErr, result.refused)
 	}
 	result.FailureArtifactPath = artifactPath
 	return result, nil
