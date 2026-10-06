@@ -38,7 +38,7 @@ func Command() *ffcli.Command {
 func group(name, help string, children ...*ffcli.Command) *ffcli.Command {
 	return &ffcli.Command{
 		Name: name, ShortHelp: help,
-		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image and video upload are supported.
+		LongHelp: help + ` The public image and video list filters are documented in Apple's OpenAPI 4.5.1. Image and video upload is supported.
 
 Use asc review items add with --item-type appAssetLibraryImages or
 appAssetLibraryVideos to add assets to a review submission, then use
@@ -85,9 +85,18 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 		fs.StringVar(&next, "next", "", "Fetch a links.next URL instead of selecting a resource")
 		fs.BoolVar(&paginate, "paginate", false, "Fetch all pages and aggregate the collection")
 	}
+	var filters *libraryListFilters
+	if name == "list" && selector == "library-id" {
+		filters = bindLibraryListFilters(fs)
+	}
+	longHelp := ""
+	if filters != nil {
+		longHelp = help + "\n\nFilter category, state, specification IDs, asset IDs and reference names using comma-separated tokens. State values are validated by Apple. Sort by referenceName, createdDate or lastModifiedDate; prefix a field with - for descending order. Filter and sort flags cannot be combined with --next."
+	}
 	output := shared.BindOutputFlags(fs)
 	return &ffcli.Command{
 		Name: name, ShortHelp: help, FlagSet: fs, UsageFunc: shared.DefaultUsageFunc,
+		LongHelp: longHelp,
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) != 0 {
 				return shared.UsageErrorf("asset-library %s: unexpected argument %q", name, args[0])
@@ -102,7 +111,19 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 				if err := shared.ValidateNextURL(next); err != nil {
 					return shared.UsageErrorf("asset-library: %v", err)
 				}
-				if err := shared.RejectNextFlagConflicts(fs, next, "asset-library", selector, "limit"); err != nil {
+				conflicts := []string{selector, "limit"}
+				if filters != nil {
+					conflicts = append(conflicts, libraryListFilterFlags...)
+				}
+				if err := shared.RejectNextFlagConflicts(fs, next, "asset-library", conflicts...); err != nil {
+					return err
+				}
+			}
+			query := url.Values{}
+			if filters != nil {
+				var err error
+				query, err = filters.query(fs)
+				if err != nil {
 					return err
 				}
 			}
@@ -122,8 +143,13 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 			}
 			if next != "" {
 				target = next
-			} else if limit > 0 {
-				target += "?limit=" + strconv.Itoa(limit)
+			} else {
+				if limit > 0 {
+					query.Set("limit", strconv.Itoa(limit))
+				}
+				if len(query) > 0 {
+					target += "?" + query.Encode()
+				}
 			}
 			client, err := shared.GetASCClient()
 			if err != nil {
