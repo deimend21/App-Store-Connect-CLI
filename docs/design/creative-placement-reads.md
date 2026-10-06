@@ -14,6 +14,11 @@ Apple's observed enum values, --include image,video, --sort
 placementGroupPosition, --limit, --next and --paginate. IDs are explicit;
 localization discovery remains `asc localizations list --version VERSION_ID`.
 
+A live public placement request with `limit=201` returned HTTP 400 with
+`PARAMETER_ERROR.INVALID` and "The maximum allowable limit is '200'".
+Both placement command paths accept 1-200, or 0 to omit the parameter and use
+the server default; values outside that range fail before authentication.
+
 Use the existing raw authenticated client and raw pagination so undocumented
 attributes, relationships, included resources, nulls, and top-level fields remain
 in JSON output. Table/Markdown summarize placement ID, media type, placement

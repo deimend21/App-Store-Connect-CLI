@@ -80,6 +80,21 @@ func TestCreativePlacementsUsage(t *testing.T) {
 	}
 }
 
+func TestCreativePlacementsRejectOverLimitBeforeAuth(t *testing.T) {
+	for _, path := range [][]string{
+		{"localizations", "placements", "list"},
+		{"product-pages", "custom-pages", "localizations", "placements", "list"},
+	} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			args := append(path, "--localization-id", "loc", "--limit", "201")
+			stdout, stderr, err := runCreativePlacements(t, args...)
+			if !isUsageClassError(err) || stdout != "" || !strings.Contains(stderr, "--limit") {
+				t.Fatalf("expected over-limit usage before auth, got stdout=%q stderr=%q error=%v", stdout, stderr, err)
+			}
+		})
+	}
+}
+
 func TestCreativePlacementsPaginateEmptyAndAPIError(t *testing.T) {
 	setupAuth(t)
 	original := http.DefaultTransport

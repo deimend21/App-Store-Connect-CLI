@@ -27,7 +27,7 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 	kind := fs.String("placement-type", "", "Filter by placement types, comma-separated: PRODUCT_PAGE_HEADER_ASSET, APP_STORE_SEARCH_RESULTS_ASSET, APP_SCREENSHOT, APP_PREVIEW, IMESSAGE_APP_SCREENSHOT")
 	include := fs.String("include", "", "Include related media, comma-separated: image, video")
 	sort := fs.String("sort", "", "Sort by placementGroupPosition")
-	limit := fs.Int("limit", 0, "Maximum results per page (0 uses server default)")
+	limit := fs.Int("limit", 0, "Maximum results per page (1-200; 0 uses server default)")
 	next := fs.String("next", "", "Fetch a links.next URL instead of selecting a localization")
 	paginate := fs.Bool("paginate", false, "Fetch all pages and aggregate the collection")
 	output := BindOutputFlags(fs)
@@ -42,8 +42,8 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 			if err := ValidateBoundOutputFlags(fs); err != nil {
 				return UsageErrorf(prefix+" placements list: %v", err)
 			}
-			if *limit < 0 {
-				return UsageError(prefix + " placements list: --limit must be zero or a positive integer")
+			if *limit < 0 || *limit > 200 {
+				return UsageError(prefix + " placements list: --limit must be between 1 and 200 (0 uses server default)")
 			}
 			if err := ValidateNextURL(*next); err != nil {
 				return UsageErrorf(prefix+" placements list: %v", err)
