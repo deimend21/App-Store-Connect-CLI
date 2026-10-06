@@ -18,6 +18,7 @@ func imagesUploadCommand() *ffcli.Command {
 	fs := flag.NewFlagSet("images upload", flag.ExitOnError)
 	libraryID := shared.BindResourceIDFlag(fs, "library-id", "appAssetLibraries", "Asset Library ID")
 	path := fs.String("file", "", "Image file to upload")
+	category := fs.String("category", "CREATIVE_ASSETS", "Asset category: CREATIVE_ASSETS or APP_SCREENSHOTS_AND_PREVIEWS")
 	output := shared.BindOutputFlags(fs)
 	return &ffcli.Command{
 		Name: "upload", ShortUsage: "asc asset-library images upload --library-id ID --file image.png [flags]",
@@ -37,6 +38,10 @@ Examples:
 			}
 			if err := shared.ValidateBoundOutputFlags(fs); err != nil {
 				return shared.UsageErrorf("asset-library images upload: %v", err)
+			}
+			selectedCategory, categoryErr := normalizeAssetCategory(*category)
+			if categoryErr != nil {
+				return shared.UsageErrorf("asset-library images upload: %v", categoryErr)
 			}
 			id := strings.TrimSpace(*libraryID)
 			if id == "" {
@@ -66,6 +71,9 @@ Examples:
 			if err := asc.ValidateAssetFileInfo(filePath, info); err != nil {
 				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
 			}
+			if info.Size() > 524288000 {
+				return shared.UsageError("asset-library images upload: file exceeds 500 MiB")
+			}
 			format, err := asc.ReadAppStoreImageFormatFrom(file)
 			if err != nil {
 				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
@@ -85,7 +93,7 @@ Examples:
 			}
 			uploadCtx, cancel := shared.ContextWithUploadTimeout(ctx)
 			defer cancel()
-			result, uploadErr := client.UploadAssetLibraryImage(uploadCtx, id, filepath.Base(filePath), file, info.Size(), shared.ContextWithTimeout)
+			result, uploadErr := client.UploadAssetLibraryImageWithCategory(uploadCtx, id, filepath.Base(filePath), file, info.Size(), selectedCategory, shared.ContextWithTimeout)
 			if uploadErr == nil || result.ImageID != "" {
 				if err := shared.PrintOutput(&result, *output.Output, *output.Pretty); err != nil {
 					return err

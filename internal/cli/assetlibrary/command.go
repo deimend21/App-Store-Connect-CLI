@@ -18,14 +18,15 @@ import (
 
 // Command returns the Asset Library command group.
 func Command() *ffcli.Command {
-	return group("asset-library", "Inspect Asset Library media and specifications, and upload images.",
+	return group("asset-library", "Inspect Asset Library media and specifications, and upload images and videos.",
 		readCommand("view", "Read an app's Asset Library.", "app", "/v1/apps/%s/assetLibrary", false),
 		group("images", "Inspect and upload Asset Library images.",
 			imagesUploadCommand(),
 			readCommand("list", "List images in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/images", true),
 			readCommand("view", "Read an Asset Library image.", "id", "/v1/appAssetLibraryImages/%s", false),
 			readCommand("placements", "List where an Asset Library image is used.", "id", "/v1/appAssetLibraryImages/%s/placements", true)),
-		group("videos", "Inspect Asset Library videos.",
+		group("videos", "Inspect and upload Asset Library videos.",
+			videosUploadCommand(),
 			readCommand("list", "List videos in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/videos", true)),
 		readCommand("specs", "Read Apple's current asset dimensions and placement policies.", "", "/v1/appAssetLibraryRefData", false))
 }
@@ -33,7 +34,7 @@ func Command() *ffcli.Command {
 func group(name, help string, children ...*ffcli.Command) *ffcli.Command {
 	return &ffcli.Command{
 		Name: name, ShortHelp: help,
-		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image upload is supported.
+		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image and video upload are supported.
 
 Use asc review items add with --item-type appAssetLibraryImages or
 appAssetLibraryVideos to add assets to a review submission, then use

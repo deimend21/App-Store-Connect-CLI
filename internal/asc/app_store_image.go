@@ -20,26 +20,35 @@ func ReadAppStoreImageFormatFrom(source io.ReadSeeker) (string, error) {
 	if _, err := source.Seek(0, io.SeekStart); err != nil {
 		return "", err
 	}
+	// Bound metadata work even when the file declares oversized ancillary chunks.
+	metadata := &io.LimitedReader{R: source, N: 16 << 20}
 	var signature [8]byte
-	if _, err := io.ReadFull(source, signature[:]); err != nil {
+	if _, err := io.ReadFull(metadata, signature[:]); err != nil {
 		return "", err
 	}
 	for {
+		if metadata.N < 8 {
+			return "", fmt.Errorf("PNG metadata exceeds 16 MiB limit")
+		}
 		var header [8]byte
-		if _, err := io.ReadFull(source, header[:]); err != nil {
+		if _, err := io.ReadFull(metadata, header[:]); err != nil {
 			return "", fmt.Errorf("read PNG metadata: %w", err)
 		}
 		length := binary.BigEndian.Uint32(header[:4])
 		if length > 0x7fffffff {
 			return "", fmt.Errorf("invalid PNG chunk length %d", length)
 		}
-		switch string(header[4:]) {
+		chunkType := string(header[4:])
+		if chunkType != "IDAT" && chunkType != "IEND" && int64(length)+4 > metadata.N {
+			return "", fmt.Errorf("PNG metadata exceeds 16 MiB limit")
+		}
+		switch chunkType {
 		case "IHDR":
 			if length != 13 {
 				return "", fmt.Errorf("invalid PNG header length %d", length)
 			}
 			var ihdr [13]byte
-			if _, err := io.ReadFull(source, ihdr[:]); err != nil {
+			if _, err := io.ReadFull(metadata, ihdr[:]); err != nil {
 				return "", err
 			}
 			if ihdr[9] == 4 || ihdr[9] == 6 {
@@ -51,7 +60,7 @@ func ReadAppStoreImageFormatFrom(source io.ReadSeeker) (string, error) {
 		case "IDAT", "IEND":
 			return format, nil
 		}
-		if _, err := io.CopyN(io.Discard, source, int64(length)+4); err != nil {
+		if _, err := io.CopyN(io.Discard, metadata, int64(length)+4); err != nil {
 			return "", fmt.Errorf("read PNG metadata: %w", err)
 		}
 	}

@@ -7,6 +7,7 @@ package asc
 // do not pay the ~450-type registration cost at process start.
 func registerAllOutputRenderers() {
 	registerRows(assetLibraryImageUploadRows)
+	registerRows(assetLibraryVideoUploadRows)
 	registerRows(creativePlacementCreateResultRows)
 	registerRows(creativePlacementDeleteResultRows)
 	registerRows(notarizationStapleResultRows)
