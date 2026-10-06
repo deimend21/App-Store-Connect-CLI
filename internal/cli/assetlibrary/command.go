@@ -24,10 +24,14 @@ func Command() *ffcli.Command {
 			imagesUploadCommand(),
 			readCommand("list", "List images in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/images", true),
 			readCommand("view", "Read an Asset Library image.", "id", "/v1/appAssetLibraryImages/%s", false),
-			readCommand("placements", "List where an Asset Library image is used.", "id", "/v1/appAssetLibraryImages/%s/placements", true)),
+			readCommand("placements", "List where an Asset Library image is used.", "id", "/v1/appAssetLibraryImages/%s/placements", true),
+			lifecycleCommand("rename", "appAssetLibraryImages"), lifecycleCommand("archive", "appAssetLibraryImages"), lifecycleCommand("unarchive", "appAssetLibraryImages"), lifecycleCommand("delete", "appAssetLibraryImages")),
 		group("videos", "Inspect and upload Asset Library videos.",
 			videosUploadCommand(),
-			readCommand("list", "List videos in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/videos", true)),
+			readCommand("list", "List videos in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/videos", true),
+			readCommand("view", "Read an Asset Library video.", "id", "/v1/appAssetLibraryVideos/%s", false),
+			readCommand("placements", "List where an Asset Library video is used.", "id", "/v1/appAssetLibraryVideos/%s/placements", true),
+			lifecycleCommand("rename", "appAssetLibraryVideos"), lifecycleCommand("archive", "appAssetLibraryVideos"), lifecycleCommand("unarchive", "appAssetLibraryVideos"), lifecycleCommand("delete", "appAssetLibraryVideos"), lifecycleCommand("set-poster-frame", "appAssetLibraryVideos")),
 		readCommand("specs", "Read Apple's current asset dimensions and placement policies.", "", "/v1/appAssetLibraryRefData", false))
 }
 
@@ -67,6 +71,9 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 			resourceType = "apps"
 		case "id":
 			resourceType = "appAssetLibraryImages"
+			if strings.Contains(path, "/appAssetLibraryVideos/") {
+				resourceType = "appAssetLibraryVideos"
+			}
 		}
 		id = shared.BindResourceIDFlag(fs, selector, resourceType, "Resource ID or API self-link (use asset-library view --app to find the library ID)")
 	}

@@ -8,6 +8,7 @@ package asc
 func registerAllOutputRenderers() {
 	registerRows(assetLibraryImageUploadRows)
 	registerRows(assetLibraryVideoUploadRows)
+	registerRows(assetLibraryMutationRows)
 	registerRows(creativePlacementCreateResultRows)
 	registerRows(creativePlacementDeleteResultRows)
 	registerRows(notarizationStapleResultRows)
