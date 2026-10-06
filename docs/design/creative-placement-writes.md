@@ -1,5 +1,6 @@
 # Header and search image assignment
 
+This note records the initial shipped scope. The shared placement commands are extended by [Library asset reuse](library-asset-reuse.md).
 Current `asc localizations placements --help` exposes only `list`. Add `create`
 and confirmed `delete` on this version-localization group. Creation supports only
 version-localization images; CPP/PPO assignments, video assignment, reordering,

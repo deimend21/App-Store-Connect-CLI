@@ -11,6 +11,9 @@ func registerAllOutputRenderers() {
 	registerRows(assetLibraryMutationRows)
 	registerRows(creativePlacementCreateResultRows)
 	registerRows(creativePlacementDeleteResultRows)
+	registerRows(creativePlacementReorderResultRows)
+	registerRows(creativePlacementSwapResultRows)
+	registerRows(creativePlacementBulkDeleteResultRows)
 	registerRows(notarizationStapleResultRows)
 	registerRows(notarizationValidateResultRows)
 	registerDirect(func(v *DeveloperSystemStatusReport, render func([]string, [][]string)) error {

@@ -16,15 +16,26 @@ import (
 
 var placementLocalizationID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// CreativePlacementsCommand returns a live-verified placement read group.
+// CreativePlacementsCommand manages reusable library placements for a localization.
 func CreativePlacementsCommand(resource, prefix, label string) *ffcli.Command {
-	return &ffcli.Command{Name: "placements", ShortHelp: "Inspect localized product page and search asset placements.", FlagSet: flag.NewFlagSet("placements", flag.ExitOnError), UsageFunc: DefaultUsageFunc, Subcommands: []*ffcli.Command{creativePlacementsListCommand(resource, prefix, label)}, Exec: func(context.Context, []string) error { return flag.ErrHelp }}
+	subcommands := []*ffcli.Command{creativePlacementsListCommand(resource, prefix, label), creativePlacementCreateCommand(resource, prefix, label)}
+	// Official ordering requests accept version, CPP, and PPO parents only.
+	if resource != "appEventLocalizations" {
+		subcommands = append(subcommands, creativePlacementReorderCommand(resource, prefix, label))
+	}
+	subcommands = append(subcommands, creativePlacementSwapCommand(resource, prefix, label), creativePlacementDeleteCommand(prefix))
+	return &ffcli.Command{Name: "placements", ShortHelp: "Manage localized asset library placements.", FlagSet: flag.NewFlagSet("placements", flag.ExitOnError), UsageFunc: DefaultUsageFunc, Subcommands: subcommands, Exec: func(context.Context, []string) error { return flag.ErrHelp }}
 }
 
 func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Command {
 	fs := flag.NewFlagSet("placements list", flag.ExitOnError)
 	id := BindResourceIDFlag(fs, "localization-id", resource, label+" ID or API self-link")
-	kind := fs.String("placement-type", "", "Filter by placement types, comma-separated: PRODUCT_PAGE_HEADER_ASSET, APP_STORE_SEARCH_RESULTS_ASSET, APP_SCREENSHOT, APP_PREVIEW, IMESSAGE_APP_SCREENSHOT")
+	listTypes := creativePlacementTypes(resource)
+	if resource == "appCustomProductPageLocalizations" {
+		listTypes = append(listTypes, "IMESSAGE_APP_SCREENSHOT")
+	}
+	kind := fs.String("placement-type", "", "Filter by placement types, comma-separated: "+strings.Join(listTypes, ", "))
+	group := fs.String("placement-group", "", "Filter by placement group IDs, comma-separated")
 	include := fs.String("include", "", "Include related media, comma-separated: image, video")
 	sort := fs.String("sort", "", "Sort by placementGroupPosition")
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200; 0 uses server default)")
@@ -34,7 +45,7 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 	return &ffcli.Command{
 		Name: "list", ShortHelp: "List asset placements for " + label + ".",
 		ShortUsage: "asc " + prefix + " placements list [flags]", FlagSet: fs, UsageFunc: DefaultUsageFunc,
-		LongHelp: "List asset placements for " + label + ". These public GET endpoints and header/search filters are live-verified but absent from Apple's published OpenAPI 4.5. Empty data means no matching asset is assigned. JSON preserves Apple's full envelope and included media.\n\nExamples:\n  asc " + prefix + " placements list --localization-id ID --placement-type PRODUCT_PAGE_HEADER_ASSET\n  asc " + prefix + " placements list --localization-id ID --placement-type APP_STORE_SEARCH_RESULTS_ASSET --include image,video\n  asc " + prefix + " placements list --localization-id ID --paginate --output table",
+		LongHelp: "List asset placements for " + label + ". These placement reads are documented in Apple's published OpenAPI 4.5.1. Apple enforces availability and permissions for the selected localization. Empty data means no matching asset is assigned. JSON preserves Apple's full envelope and included media.\n\nExamples:\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[0] + "\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[1] + " --include image,video\n  asc " + prefix + " placements list --localization-id ID --paginate --output table",
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) != 0 {
 				return UsageErrorf(prefix+" placements list: unexpected argument %q", args[0])
@@ -48,12 +59,16 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 			if err := ValidateNextURL(*next); err != nil {
 				return UsageErrorf(prefix+" placements list: %v", err)
 			}
-			if err := RejectNextFlagConflicts(fs, *next, prefix+" placements list", "localization-id", "placement-type", "include", "sort", "limit"); err != nil {
+			if err := RejectNextFlagConflicts(fs, *next, prefix+" placements list", "localization-id", "placement-type", "placement-group", "include", "sort", "limit"); err != nil {
 				return err
 			}
-			kinds, err := validatedPlacementCSV(*kind, []string{"PRODUCT_PAGE_HEADER_ASSET", "APP_STORE_SEARCH_RESULTS_ASSET", "APP_SCREENSHOT", "APP_PREVIEW", "IMESSAGE_APP_SCREENSHOT"})
+			kinds, err := validatedPlacementCSV(*kind, listTypes)
 			if err != nil {
 				return UsageErrorf(prefix+" placements list: --placement-type %v", err)
+			}
+			groups, err := placementIDsCSV(*group)
+			if err != nil {
+				return UsageErrorf(prefix+" placements list: --placement-group %v", err)
 			}
 			includes, err := validatedPlacementCSV(*include, []string{"image", "video"})
 			if err != nil {
@@ -75,6 +90,9 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 				q := url.Values{}
 				if kinds != "" {
 					q.Set("filter[placementType]", kinds)
+				}
+				if len(groups) > 0 {
+					q.Set("filter[placementGroup]", strings.Join(groups, ","))
 				}
 				if includes != "" {
 					q.Set("include", includes)

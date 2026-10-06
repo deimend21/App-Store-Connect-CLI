@@ -1,5 +1,6 @@
 # Product-page header and search-result placement reads
 
+This note records the initial shipped scope. The shared placement commands are extended by [Library asset reuse](library-asset-reuse.md).
 On 2026-10-06 the ASC Test app's signed-in browser requested
 GET /iris/v1/appStoreVersionLocalizations/{id}/placements with
 filter[placementType]=PRODUCT_PAGE_HEADER_ASSET,APP_STORE_SEARCH_RESULTS_ASSET.
