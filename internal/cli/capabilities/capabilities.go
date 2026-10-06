@@ -224,7 +224,8 @@ func knownAreas() map[string]struct{} {
 
 func capabilityRows() []Capability {
 	return []Capability{
-		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryPlacements", "appAssetLibraryRefData"}, Notes: []string{"Public reads and image upload verified live; absent from published OpenAPI 4.5. Review submission is not exposed."}},
+		{Area: "metadata", Capability: "Localized header and search image assignment", Status: statusCLISupported, Commands: []string{"asc localizations placements create", "asc localizations placements delete --confirm"}, APIResources: []string{"appAssetLibraryPlacements"}, Notes: []string{"Creation supports App Store version localization images in DEFAULT_PROFILE; no submission, video, CPP, or PPO assignments. Deletion removes the explicitly selected placement by ID."}},
+		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryPlacements", "appAssetLibraryRefData"}, Notes: []string{"Public reads and image upload verified live; absent from published OpenAPI 4.5. Review submission is not exposed; version-localization image assignment is available through asc localizations placements create."}},
 		{
 			Area:       "release",
 			Capability: "App Store release submission",
