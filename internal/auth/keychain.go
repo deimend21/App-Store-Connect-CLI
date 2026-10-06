@@ -291,7 +291,16 @@ var keyringOpener = func() (keyring.Keyring, error) {
 }
 
 var legacyKeyringOpener = func() (keyring.Keyring, error) {
-	return keyring.Open(keyringConfig(legacyKeychain))
+	return openLegacyKeyringForOS(runtime.GOOS, keyring.Open)
+}
+
+func openLegacyKeyringForOS(goos string, open func(keyring.Config) (keyring.Keyring, error)) (keyring.Keyring, error) {
+	// Only macOS has a distinct legacy named keychain. Other native
+	// backends ignore KeychainName and would alias the current store.
+	if goos != "darwin" {
+		return nil, keyring.ErrNoAvailImpl
+	}
+	return open(keyringConfig(legacyKeychain))
 }
 
 // ValidateKeyFile validates that the private key file exists and is valid

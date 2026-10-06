@@ -64,6 +64,19 @@ asc auth login \
   When using keychain storage, the CLI stores the encrypted key material so commands work even if the original `.p8` file is removed.
 </Note>
 
+On Windows, normal `asc auth login` uses Windows Credential Manager. `asc auth
+status --output json` reports these profiles as `storedIn: "keychain"`. Default
+profile selection and non-secret metadata can still appear in `config.json`;
+their presence does not mean the private key is stored there.
+
+To move a config-backed Windows profile into Credential Manager, run `asc auth
+login` again with the same `--name`, key ID, issuer ID, and `.p8` path, without
+`--bypass-keychain`. After secure storage succeeds, the matching credential fields
+are removed from the active config. `--bypass-keychain` and
+`ASC_BYPASS_KEYCHAIN=1` retain config storage; add `--local` to write a repo-local
+config. The original
+`.p8` file remains under your control; login does not delete it.
+
 #### Verify storage
 
 ```bash  theme={null}
