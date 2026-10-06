@@ -1,0 +1,100 @@
+package assetlibrary
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
+)
+
+func imagesUploadCommand() *ffcli.Command {
+	fs := flag.NewFlagSet("images upload", flag.ExitOnError)
+	libraryID := shared.BindResourceIDFlag(fs, "library-id", "appAssetLibraries", "Asset Library ID")
+	path := fs.String("file", "", "Image file to upload")
+	output := shared.BindOutputFlags(fs)
+	return &ffcli.Command{
+		Name: "upload", ShortUsage: "asc asset-library images upload --library-id ID --file image.png [flags]",
+		ShortHelp: "Upload an image to the Asset Library and wait for processing.",
+		LongHelp: `Upload an image to the Asset Library without assigning it to a placement or submitting review.
+
+The command waits for processed image data under ASC_UPLOAD_TIMEOUT. On failure
+after reservation, it prints a partial receipt with the image ID for inspection
+or cleanup. It never automatically deletes the reserved image.
+
+Examples:
+  asc asset-library images upload --library-id LIBRARY_ID --file ./header.png`,
+		FlagSet: fs, UsageFunc: shared.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			if len(args) != 0 {
+				return shared.UsageErrorf("asset-library images upload: unexpected argument %q", args[0])
+			}
+			if err := shared.ValidateBoundOutputFlags(fs); err != nil {
+				return shared.UsageErrorf("asset-library images upload: %v", err)
+			}
+			id := strings.TrimSpace(*libraryID)
+			if id == "" {
+				return shared.UsageError("asset-library images upload: --library-id is required")
+			}
+			if !resourceIDPattern.MatchString(id) {
+				return shared.UsageError("asset-library images upload: --library-id must be a resource ID")
+			}
+			filePath := strings.TrimSpace(*path)
+			if filePath == "" {
+				return shared.UsageError("asset-library images upload: --file is required")
+			}
+			switch strings.ToLower(filepath.Ext(filePath)) {
+			case ".png", ".jpg", ".jpeg":
+			default:
+				return shared.UsageError("asset-library images upload: --file must have a .png, .jpg, or .jpeg extension")
+			}
+			file, err := rootfs.OpenFile(filePath)
+			if err != nil {
+				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
+			}
+			defer file.Close()
+			info, err := file.Stat()
+			if err != nil {
+				return fmt.Errorf("asset-library images upload: stat file: %w", err)
+			}
+			if err := asc.ValidateAssetFileInfo(filePath, info); err != nil {
+				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
+			}
+			format, err := asc.ReadImageFormatFrom(file)
+			if err != nil {
+				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
+			}
+			if format != "png" && format != "jpeg" {
+				return shared.UsageError("asset-library images upload: --file must be a PNG or JPEG image")
+			}
+			if err := asc.ValidateImageFormatMatchesExtension(filePath, format); err != nil {
+				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("asset-library images upload: rewind file: %w", err)
+			}
+			client, err := shared.GetASCClient()
+			if err != nil {
+				return fmt.Errorf("asset-library images upload: %w", err)
+			}
+			uploadCtx, cancel := shared.ContextWithUploadTimeout(ctx)
+			defer cancel()
+			result, uploadErr := client.UploadAssetLibraryImage(uploadCtx, id, filepath.Base(filePath), file, info.Size(), shared.ContextWithTimeout)
+			if uploadErr == nil || result.ImageID != "" {
+				if err := shared.PrintOutput(&result, *output.Output, *output.Pretty); err != nil {
+					return err
+				}
+			}
+			if uploadErr != nil {
+				return fmt.Errorf("asset-library images upload: %w", uploadErr)
+			}
+			return nil
+		},
+	}
+}

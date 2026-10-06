@@ -177,7 +177,7 @@ func NewCatalog(version string) *Catalog {
 		commandFactory("metadata", "Manage app metadata with deterministic workflows and keyword tooling.", metadata.MetadataCommand),
 		commandFactory("screenshots", "Upload and manage App Store screenshots, including local capture, framing, and matrices.", screenshots.ScreenshotsCommand),
 		commandFactory("video-previews", "Manage App Store app preview videos.", videopreviews.VideoPreviewsCommand),
-		commandFactory("asset-library", "Inspect App Store Asset Library media and specifications.", assetlibrary.Command),
+		commandFactory("asset-library", "Inspect Asset Library media and specifications, and upload images.", assetlibrary.Command),
 		commandFactory("background-assets", "Manage background assets.", backgroundassets.BackgroundAssetsCommand),
 		commandFactory("build-localizations", "Manage build release notes localizations.", buildlocalizations.BuildLocalizationsCommand),
 		commandFactory("sandbox", "Manage sandbox testers in App Store Connect.", sandbox.SandboxCommand),
