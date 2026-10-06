@@ -30,7 +30,15 @@ type assetLibraryImageUploadResponse struct {
 // A partial result retains the reserved ID when a later operation fails.
 // The caller validates the image and owns the overall upload timeout.
 func (c *Client) UploadAssetLibraryImage(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, requestContext RequestContextFunc) (AssetLibraryImageUploadResult, error) {
-	result := AssetLibraryImageUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize}
+	return c.UploadAssetLibraryImageWithCategory(ctx, libraryID, fileName, file, fileSize, "CREATIVE_ASSETS", requestContext)
+}
+
+// UploadAssetLibraryImageWithCategory uploads an independently managed image.
+func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, category string, requestContext RequestContextFunc) (AssetLibraryImageUploadResult, error) {
+	result := AssetLibraryImageUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize, Category: category}
+	if category != "CREATIVE_ASSETS" && category != "APP_SCREENSHOTS_AND_PREVIEWS" {
+		return result, fmt.Errorf("unsupported asset category %q", category)
+	}
 	if file == nil {
 		return result, fmt.Errorf("image file is required")
 	}
@@ -51,7 +59,7 @@ func (c *Client) UploadAssetLibraryImage(ctx context.Context, libraryID, fileNam
 		} `json:"data"`
 	}{}
 	payload.Data.Type = "appAssetLibraryImages"
-	payload.Data.Attributes.FileSize, payload.Data.Attributes.FileName, payload.Data.Attributes.Category = fileSize, fileName, "CREATIVE_ASSETS"
+	payload.Data.Attributes.FileSize, payload.Data.Attributes.FileName, payload.Data.Attributes.Category = fileSize, fileName, category
 	payload.Data.Relationships.AssetLibrary.Data = ResourceData{Type: "appAssetLibraries", ID: libraryID}
 	body, err := json.Marshal(payload)
 	if err != nil {

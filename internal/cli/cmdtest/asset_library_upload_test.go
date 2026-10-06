@@ -31,7 +31,7 @@ func creativeUploadFile(t *testing.T) (string, []byte) {
 }
 
 func TestAssetLibraryImageUpload(t *testing.T) {
-	for _, mode := range []string{"success", "transient-processing", "table", "invalid-reservation", "upload-failure", "commit-failure", "processing-failed", "processing-timeout"} {
+	for _, mode := range []string{"success", "standalone", "transient-processing", "table", "invalid-reservation", "upload-failure", "commit-failure", "processing-failed", "processing-timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			setupAuth(t)
 			t.Setenv("ASC_UPLOAD_TIMEOUT", "5s")
@@ -40,6 +40,10 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			}
 			if mode == "processing-failed" {
 				t.Setenv("ASC_UPLOAD_TIMEOUT", "1s")
+			}
+			category := "CREATIVE_ASSETS"
+			if mode == "standalone" {
+				category = "APP_SCREENSHOTS_AND_PREVIEWS"
 			}
 			path, content := creativeUploadFile(t)
 			original := http.DefaultTransport
@@ -65,7 +69,7 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 						t.Fatal(err)
 					}
-					if body.Data.Type != "appAssetLibraryImages" || body.Data.Attributes.FileName != "creative.png" || body.Data.Attributes.FileSize != int64(len(content)) || body.Data.Attributes.Category != "CREATIVE_ASSETS" || body.Data.Relationships.AssetLibrary.Data.Type != "appAssetLibraries" || body.Data.Relationships.AssetLibrary.Data.ID != "lib" {
+					if body.Data.Type != "appAssetLibraryImages" || body.Data.Attributes.FileName != "creative.png" || body.Data.Attributes.FileSize != int64(len(content)) || body.Data.Attributes.Category != category || body.Data.Relationships.AssetLibrary.Data.Type != "appAssetLibraries" || body.Data.Relationships.AssetLibrary.Data.ID != "lib" {
 						t.Fatalf("wrong reservation: %+v", body)
 					}
 					if mode == "invalid-reservation" {
@@ -132,7 +136,7 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			if mode == "table" {
 				output = "table"
 			}
-			stdout, stderr, err := runAssetLibrary(t, "asset-library", "images", "upload", "--library-id", "lib", "--file", path, "--output", output)
+			stdout, stderr, err := runAssetLibrary(t, "asset-library", "images", "upload", "--library-id", "lib", "--file", path, "--output", output, "--category", category)
 			if mode == "table" {
 				if err != nil || !strings.Contains(stdout, "Image ID") || !strings.Contains(stdout, "creative.png") || !strings.Contains(stdout, "PREPARE_FOR_SUBMISSION") || !strings.Contains(stdout, "true") {
 					t.Fatalf("human output=%q err=%v", stdout, err)
@@ -159,7 +163,7 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			if strings.Contains(stdout+stderr+stringError(err), "secret-signed") {
 				t.Fatal("signed URL leaked")
 			}
-			if mode == "success" || mode == "transient-processing" {
+			if mode == "success" || mode == "standalone" || mode == "transient-processing" {
 				if err != nil || !receipt.Ready || !receipt.Uploaded || receipt.State != "PREPARE_FOR_SUBMISSION" || receipt.Width != 2 || receipt.Height != 2 || reads != 2 || uploaded != 2 {
 					t.Fatalf("receipt=%+v err=%v calls=%d", receipt, err, calls)
 				}
