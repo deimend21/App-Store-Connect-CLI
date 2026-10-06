@@ -102,7 +102,7 @@ func assetsPreviewsUploadCommandWithDependencies(deps previewUploadDependencies)
 
 	localizationID := shared.BindResourceIDFlag(fs, "version-localization", "appStoreVersionLocalizations", "App Store version localization ID")
 	path := fs.String("path", "", "Path to preview file or directory")
-	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65)")
+	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_DUO or IPHONE_65)")
 	skipExisting := fs.Bool("skip-existing", false, "Skip files whose MD5 checksum already exists in the target preview set")
 	replace := fs.Bool("replace", false, "Delete all existing previews from the target set before uploading (requires --confirm)")
 	confirm := fs.Bool("confirm", false, "Confirm the deletions performed by --replace (required with --replace)")
@@ -122,6 +122,7 @@ It is not the locale code such as en-US.
 Each preview set supports at most three files.
 
 Examples:
+  asc video-previews upload --version-localization "VERSION_LOCALIZATION_ID" --path "./previews/duo.mp4" --device-type "IPHONE_DUO"
   asc video-previews upload --version-localization "VERSION_LOCALIZATION_ID" --path "./previews" --device-type "IPHONE_65"
   asc video-previews upload --version-localization "VERSION_LOCALIZATION_ID" --path "./previews/preview.mov" --device-type "IPHONE_65"
   asc video-previews upload --version-localization "VERSION_LOCALIZATION_ID" --path "./previews" --device-type "IPHONE_65" --skip-existing
