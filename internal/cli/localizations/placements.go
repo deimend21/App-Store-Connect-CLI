@@ -5,7 +5,9 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-// LocalizationsPlacementsCommand exposes localized header and search placement reads.
+// LocalizationsPlacementsCommand exposes localized header and search placements.
 func LocalizationsPlacementsCommand() *ffcli.Command {
-	return shared.CreativePlacementsCommand("appStoreVersionLocalizations", "localizations", "an App Store version localization")
+	cmd := shared.CreativePlacementsCommand("appStoreVersionLocalizations", "localizations", "an App Store version localization")
+	cmd.Subcommands = append(cmd.Subcommands, localizationsPlacementCreateCommand(), localizationsPlacementDeleteCommand())
+	return cmd
 }
