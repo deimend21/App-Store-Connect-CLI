@@ -66,7 +66,7 @@ Examples:
 			if err := asc.ValidateAssetFileInfo(filePath, info); err != nil {
 				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
 			}
-			format, err := asc.ReadImageFormatFrom(file)
+			format, err := asc.ReadAppStoreImageFormatFrom(file)
 			if err != nil {
 				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
 			}
