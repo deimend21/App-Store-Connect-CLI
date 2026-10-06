@@ -33,12 +33,19 @@ func Command() *ffcli.Command {
 func group(name, help string, children ...*ffcli.Command) *ffcli.Command {
 	return &ffcli.Command{
 		Name: name, ShortHelp: help,
-		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image upload is supported. Review submission is not exposed.
+		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image upload is supported.
+
+Use asc review items add with --item-type appAssetLibraryImages or
+appAssetLibraryVideos to add assets to a review submission, then use
+asc review submissions-submit --id SUBMISSION_ID --confirm to submit it.
+Separate asset review requires an approved app version. For the first app
+version, submit assets with that version.
 
 Examples:
   asc asset-library view --app APP_ID
   asc asset-library images list --library-id LIBRARY_ID --paginate
   asc asset-library images view --id IMAGE_ID
+  asc asset-library images upload --library-id LIBRARY_ID --file ./header.png
   asc asset-library images placements --id IMAGE_ID
   asc asset-library videos list --library-id LIBRARY_ID
   asc asset-library specs`,
