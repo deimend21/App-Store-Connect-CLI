@@ -114,3 +114,22 @@ func AssetLibraryRows(payload []byte) ([]string, [][]string, error) {
 	}
 	return headers, rows, nil
 }
+
+// AssetLibraryImageUploadResult reports upload and processing independently.
+// ImageID is retained in a partial result after reservation.
+type AssetLibraryImageUploadResult struct {
+	ImageID   string `json:"imageId"`
+	LibraryID string `json:"libraryId"`
+	FileName  string `json:"fileName"`
+	FileSize  int64  `json:"fileSize"`
+	Uploaded  bool   `json:"uploaded"`
+	Ready     bool   `json:"ready"`
+	State     string `json:"state,omitempty"`
+	SpecID    string `json:"specId,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+}
+
+func assetLibraryImageUploadRows(result *AssetLibraryImageUploadResult) ([]string, [][]string) {
+	return []string{"Image ID", "Library ID", "File", "Uploaded", "Ready", "State", "Dimensions"}, [][]string{{result.ImageID, result.LibraryID, result.FileName, fmt.Sprint(result.Uploaded), fmt.Sprint(result.Ready), result.State, fmt.Sprintf("%d x %d", result.Width, result.Height)}}
+}

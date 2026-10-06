@@ -1,4 +1,4 @@
-// Package assetlibrary exposes live-verified public Asset Library reads.
+// Package assetlibrary exposes live-verified public Asset Library operations.
 package assetlibrary
 
 import (
@@ -18,9 +18,10 @@ import (
 
 // Command returns the Asset Library command group.
 func Command() *ffcli.Command {
-	return group("asset-library", "Inspect App Store Asset Library media and specifications.",
+	return group("asset-library", "Inspect Asset Library media and specifications, and upload images.",
 		readCommand("view", "Read an app's Asset Library.", "app", "/v1/apps/%s/assetLibrary", false),
-		group("images", "Inspect Asset Library images.",
+		group("images", "Inspect and upload Asset Library images.",
+			imagesUploadCommand(),
 			readCommand("list", "List images in an Asset Library.", "library-id", "/v1/appAssetLibraries/%s/images", true),
 			readCommand("view", "Read an Asset Library image.", "id", "/v1/appAssetLibraryImages/%s", false),
 			readCommand("placements", "List where an Asset Library image is used.", "id", "/v1/appAssetLibraryImages/%s/placements", true)),
@@ -32,7 +33,7 @@ func Command() *ffcli.Command {
 func group(name, help string, children ...*ffcli.Command) *ffcli.Command {
 	return &ffcli.Command{
 		Name: name, ShortHelp: help,
-		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Upload, assignment, and submission are not exposed.
+		LongHelp: help + ` These public GET endpoints are live-verified but absent from Apple's published OpenAPI 4.5. Image upload is supported. Review submission is not exposed.
 
 Examples:
   asc asset-library view --app APP_ID

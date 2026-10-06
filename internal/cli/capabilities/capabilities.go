@@ -224,7 +224,7 @@ func knownAreas() map[string]struct{} {
 
 func capabilityRows() []Capability {
 	return []Capability{
-		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryPlacements", "appAssetLibraryRefData"}, Notes: []string{"Read-only public endpoints verified live; absent from published OpenAPI 4.5. Upload, assignment, and review submission are not exposed."}},
+		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryPlacements", "appAssetLibraryRefData"}, Notes: []string{"Public reads and image upload verified live; absent from published OpenAPI 4.5. Review submission is not exposed."}},
 		{
 			Area:       "release",
 			Capability: "App Store release submission",

@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-func TestAssetLibraryCapabilitiesAreReadOnly(t *testing.T) {
+func TestAssetLibraryCapabilitiesIncludeImageUpload(t *testing.T) {
 	for _, c := range capabilityRows() {
 		if c.Capability == "Asset Library media and specifications" {
-			if c.Status != statusCLISupported || !strings.Contains(strings.Join(c.Notes, " "), "Read-only") {
+			if c.Status != statusCLISupported || !strings.Contains(strings.Join(c.Notes, " "), "image upload") {
 				t.Fatalf("incorrect scope: %+v", c)
 			}
 			return
