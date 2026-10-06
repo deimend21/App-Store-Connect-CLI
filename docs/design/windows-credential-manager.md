@@ -13,7 +13,9 @@ enters legacy migration, removes the supposed duplicate, and deletes the current
 credential. The regression reaches RED on the first lookup with an aliased
 backend; it asserts repeated resolution and listing retain the secure entry.
 
-Limit legacy-store opening to macOS. Retain native backend selection, credential
+Limit legacy-store opening to macOS and treat an unavailable legacy store as empty
+during named logout, while preserving real legacy-listing errors. Retain native
+backend selection, credential
 targets, config fallback, explicit bypass flags, and macOS migration. Login stores
 the private key payload securely; config can retain default selection and public
 metadata. Re-login without bypass migrates a matching config-backed profile only

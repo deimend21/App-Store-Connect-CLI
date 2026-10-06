@@ -1316,7 +1316,7 @@ func RemoveCredentialsWithOptions(name string, opts RemoveOptions) error {
 			return err
 		}
 		legacy, err := normalizedKeychainItems(legacyKeyringOpener, name, true, "legacy keychain")
-		if err != nil {
+		if err != nil && !isKeyringUnavailable(err) {
 			return err
 		}
 		removed, err = removeKeychainItems(append(current, legacy...))

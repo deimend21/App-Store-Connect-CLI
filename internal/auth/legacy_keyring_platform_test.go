@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -38,6 +39,18 @@ func TestLegacyMigrationPreservesNonMacOSCredentials(t *testing.T) {
 				if err != nil || len(credentials) != 1 {
 					t.Fatalf("listing %d lost secure credential: %+v %v", attempt, credentials, err)
 				}
+			}
+			if err := kr.Set(keyring.Item{Key: keyringKey("other"), Data: payload}); err != nil {
+				t.Fatal(err)
+			}
+			if err := RemoveCredentials("fixture"); err != nil {
+				t.Fatalf("named logout with absent legacy store failed: %v", err)
+			}
+			if _, err := kr.Get(keyringKey("fixture")); !errors.Is(err, keyring.ErrKeyNotFound) {
+				t.Fatal("named logout retained the selected credential")
+			}
+			if _, err := kr.Get(keyringKey("other")); err != nil {
+				t.Fatal("named logout removed another profile")
 			}
 		})
 	}
