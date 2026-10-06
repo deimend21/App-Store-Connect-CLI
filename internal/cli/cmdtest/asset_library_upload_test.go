@@ -20,7 +20,11 @@ import (
 func creativeUploadFile(t *testing.T) (string, []byte) {
 	t.Helper()
 	var data bytes.Buffer
-	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 255
+	}
+	if err := png.Encode(&data, img); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "creative.png")

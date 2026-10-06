@@ -53,3 +53,14 @@ Fixed dimensions remain authoritative for rounded sizes such as 3840x1646.
 Invalid individual ratio values cannot poison decoding of the entire envelope.
 
 Live acceptance correction: a processing deadline controlled by `ASC_UPLOAD_TIMEOUT` originally rendered the generic `ASC_TIMEOUT` hint. The command now marks only an expired overall upload context as an upload operation, preserving request-timeout hints for child request deadlines. The existing pending-processing test reproduces the wrong hint before the change and passes afterward; a separate reservation-request deadline verifies the narrower request hint.
+
+## PNG preflight integration
+
+Merging the image transparency preflight exposed an unbounded ancillary PNG
+metadata scan before image-data chunks. A cumulative 16 MiB metadata budget
+now rejects oversized declared chunks before reading their payload and limits
+numerous small chunks. Regression tests establish the old EOF/accepted-file
+behavior before the fix and verify the corrected error and bounded reads.
+Compressed image-data chunks are not drained; existing RGB/JPEG acceptance and
+encoded alpha rejection remain covered. PNGs with unusually large pre-IDAT
+metadata must be re-exported with that metadata removed.

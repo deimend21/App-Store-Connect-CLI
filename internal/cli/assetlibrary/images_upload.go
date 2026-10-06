@@ -74,7 +74,7 @@ Examples:
 			if info.Size() > 524288000 {
 				return shared.UsageError("asset-library images upload: file exceeds 500 MiB")
 			}
-			format, err := asc.ReadImageFormatFrom(file)
+			format, err := asc.ReadAppStoreImageFormatFrom(file)
 			if err != nil {
 				return shared.UsageErrorf("asset-library images upload: --file: %v", err)
 			}
