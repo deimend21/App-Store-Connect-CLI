@@ -12,6 +12,10 @@ returned chunk operations with the shared uploader, and commits only the observe
 `uploaded: true` attribute. It waits under the upload timeout for processed image
 data in PREPARE_FOR_SUBMISSION, rather than legacy screenshot COMPLETE/checksum.
 Each ASC HTTP request receives a fresh normal request timeout within that budget.
+The owner verified GET 200 responses with state FAILED and null imageAsset on
+2026-10-06. That state now ends processing immediately with an unsuccessful partial
+receipt preserving the image ID, uploaded flag, and FAILED state. Other unknown
+states remain pending until readiness or the upload timeout.
 
 The JSON mutation receipt has imageId, libraryId, fileName, fileSize, uploaded,
 and ready, plus state, specId, width, and height when known. uploaded means commit was accepted;

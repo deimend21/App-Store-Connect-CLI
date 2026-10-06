@@ -112,6 +112,9 @@ func (c *Client) UploadAssetLibraryImage(ctx context.Context, libraryID, fileNam
 		}
 		attrs := current.Data.Attributes
 		result.State, result.SpecID = attrs.State, attrs.SpecID
+		if attrs.State == "FAILED" {
+			return struct{}{}, false, fmt.Errorf("image processing reached FAILED")
+		}
 		if attrs.ImageAsset != nil {
 			result.Width, result.Height = attrs.ImageAsset.Width, attrs.ImageAsset.Height
 		}

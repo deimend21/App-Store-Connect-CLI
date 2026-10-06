@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"image/gif"
@@ -30,12 +31,15 @@ func creativeUploadFile(t *testing.T) (string, []byte) {
 }
 
 func TestAssetLibraryImageUpload(t *testing.T) {
-	for _, mode := range []string{"success", "transient-processing", "table", "invalid-reservation", "upload-failure", "commit-failure", "processing-timeout"} {
+	for _, mode := range []string{"success", "transient-processing", "table", "invalid-reservation", "upload-failure", "commit-failure", "processing-failed", "processing-timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			setupAuth(t)
 			t.Setenv("ASC_UPLOAD_TIMEOUT", "5s")
 			if mode == "processing-timeout" {
 				t.Setenv("ASC_UPLOAD_TIMEOUT", "100ms")
+			}
+			if mode == "processing-failed" {
+				t.Setenv("ASC_UPLOAD_TIMEOUT", "1s")
 			}
 			path, content := creativeUploadFile(t)
 			original := http.DefaultTransport
@@ -106,10 +110,16 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 					return jsonResponse(200, `{"data":{"type":"appAssetLibraryImages","id":"image","attributes":{"imageAsset":null}}}`)
 				case req.Method == "GET" && req.URL.Path == "/v1/appAssetLibraryImages/image":
 					reads++
+					if mode == "processing-failed" {
+						return jsonResponse(200, `{"data":{"type":"appAssetLibraryImages","id":"image","attributes":{"state":"FAILED","imageAsset":null}}}`)
+					}
 					if mode == "transient-processing" && reads == 1 {
 						return nil, context.DeadlineExceeded
 					}
-					if reads == 1 || mode == "processing-timeout" {
+					if mode == "processing-timeout" {
+						return jsonResponse(200, `{"data":{"type":"appAssetLibraryImages","id":"image","attributes":{"state":"FUTURE_PROCESSING","imageAsset":null}}}`)
+					}
+					if reads == 1 {
 						return jsonResponse(200, `{"data":{"type":"appAssetLibraryImages","id":"image","attributes":{"state":"PROCESSING","imageAsset":null}}}`)
 					}
 					return jsonResponse(200, `{"data":{"type":"appAssetLibraryImages","id":"image","attributes":{"state":"PREPARE_FOR_SUBMISSION","specId":"spec","imageAsset":{"width":2,"height":2}}}}`)
@@ -156,8 +166,13 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			} else if err == nil || receipt.Ready {
 				t.Fatalf("false success receipt=%+v err=%v", receipt, err)
 			}
-			if mode == "processing-timeout" && !receipt.Uploaded {
-				t.Fatal("accepted commit lost")
+			if mode == "processing-timeout" && (!receipt.Uploaded || receipt.State != "FUTURE_PROCESSING" || !errors.Is(err, context.DeadlineExceeded)) {
+				t.Fatalf("unknown state did not remain pending: receipt=%+v err=%v", receipt, err)
+			}
+			if mode == "processing-failed" {
+				if !receipt.Uploaded || receipt.State != "FAILED" || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(stringError(err), "FAILED") || reads != 1 || uploaded != 2 || calls != 5 {
+					t.Fatalf("processing failure did not stop with partial receipt: receipt=%+v err=%v reads=%d calls=%d stderr=%q", receipt, err, reads, calls, stderr)
+				}
 			}
 			if mode == "invalid-reservation" && calls != 1 {
 				t.Fatalf("invalid reservation continued: %d calls", calls)
