@@ -1,5 +1,7 @@
 # Header and search image assignment
 
+Historical implementation scope and probe evidence are preserved below. For the current integrated workflow and OpenAPI 4.5.1 contract, see the [Asset Library guide](../../guides/asset-library.mdx).
+
 This note records the initial shipped scope. The shared placement commands are extended by [Library asset reuse](library-asset-reuse.md).
 Current `asc localizations placements --help` exposes only `list`. Add `create`
 and confirmed `delete` on this version-localization group. Creation supports only

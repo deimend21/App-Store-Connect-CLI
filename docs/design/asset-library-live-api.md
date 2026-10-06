@@ -1,5 +1,7 @@
 # Asset Library public reads
 
+Historical implementation scope and probe evidence are preserved below. For the current integrated workflow and OpenAPI 4.5.1 contract, see the [Asset Library guide](../../guides/asset-library.mdx).
+
 Apple's published OpenAPI 4.5 has no Asset Library operations. On 2026-10-06,
 read-only requests authenticated with an App Store Connect API key returned 200
 for these operations on the owner's ASC Test app:

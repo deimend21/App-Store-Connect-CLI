@@ -34,8 +34,9 @@ func TestAssetLibraryCapabilitiesExposeStandaloneReview(t *testing.T) {
 			}
 		}
 		notes := strings.Join(c.Notes, " ")
-		if strings.Contains(notes, "Review submission is not exposed") || !strings.Contains(notes, "public review-item POST") || !strings.Contains(notes, "App Review acceptance remain unverified") {
-			t.Errorf("misleading verification scope: %s", notes)
+		// Keep the review prerequisite discoverable without snapshotting audit prose.
+		if strings.Contains(notes, "Review submission is not exposed") || !strings.Contains(notes, "approved app version") {
+			t.Errorf("missing standalone review prerequisite or misleading availability: %s", notes)
 		}
 		return
 	}
