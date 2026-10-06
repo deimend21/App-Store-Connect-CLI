@@ -21,12 +21,16 @@ and explicitly allows GET_INSTANCE only.
 
 Expose `asc asset-library view --app APP_ID`, `images list --library-id ID`,
 `videos list --library-id ID`, `images view --id ID`, `images placements --id ID`,
-and `specs`. Collection reads accept --limit, --next, and --paginate. --next
+and `specs`. Collection reads accept --limit (1–200, or 0 for the server default), --next,
+and --paginate. Live reads on images, videos, and image placements accepted
+200 and rejected 201 with HTTP 400. --next
 replaces resource selection and conflicts with selectors and --limit.
 
 Preserve the complete Apple JSON envelope using the existing raw client and
 raw pagination. Table and Markdown summarize media IDs, names, categories,
 states, and placement types; specs display Apple's dimensions and compatibility.
+Aspect ratios display known strings directly and opaque values as compact JSON,
+without assuming a schema; absent and null values remain blank.
 There are no upload, assignment, deletion, or review-submission commands in this
 change. They need independently verified mutation contracts and authorized live
 verification. Do not fabricate entries in the official OpenAPI snapshot.

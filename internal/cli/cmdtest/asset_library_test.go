@@ -74,6 +74,9 @@ func TestAssetLibraryValidationBeforeAuth(t *testing.T) {
 		{"images", "list"},
 		{"images", "view"},
 		{"images", "list", "--library-id", "lib", "--limit", "-1"},
+		{"images", "list", "--library-id", "lib", "--limit", "201"},
+		{"videos", "list", "--library-id", "lib", "--limit", "201"},
+		{"images", "placements", "--id", "img", "--limit", "201"},
 		{"images", "list", "--next", "https://evil.example/v1/apps"},
 		{"images", "list", "--library-id", "lib", "--next", "https://api.appstoreconnect.apple.com/v1/apps"},
 		{"images", "view", "--id", "../apps"},
@@ -134,5 +137,19 @@ func TestAssetLibrarySpecsPreserveUnmodeledJSONAndRenderObservedDimensions(t *te
 	stdout, _, err = runAssetLibrary(t, "asset-library", "specs", "--output", "json")
 	if err != nil || !strings.Contains(stdout, `"aspectRatio":{"width":21,"height":9}`) {
 		t.Fatalf("unmodeled JSON lost: %s %v", stdout, err)
+	}
+}
+
+func TestAssetLibrarySpecsRenderOpaqueAspectRatio(t *testing.T) {
+	setupAuth(t)
+	original := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = original })
+	body := `{"data":[{"type":"appAssetLibraryRefData","id":"1","attributes":{"imageSpecs":[{"specId":"header","aspectRatio": { "width":21, "height":9 }}],"videoSpecs":[]}}]}`
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) { return jsonResponse(200, body) })
+	for _, format := range []string{"table", "markdown"} {
+		stdout, _, err := runAssetLibrary(t, "asset-library", "specs", "--output", format)
+		if err != nil || !strings.Contains(stdout, `{"width":21,"height":9}`) {
+			t.Fatalf("opaque ratio not rendered (%s): %s %v", format, stdout, err)
+		}
 	}
 }

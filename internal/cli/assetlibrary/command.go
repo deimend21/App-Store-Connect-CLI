@@ -65,7 +65,7 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 	var next string
 	var paginate bool
 	if collection {
-		fs.IntVar(&limit, "limit", 0, "Maximum results per page (0 uses server default)")
+		fs.IntVar(&limit, "limit", 0, "Maximum results per page (1-200; 0 uses server default)")
 		fs.StringVar(&next, "next", "", "Fetch a links.next URL instead of selecting a resource")
 		fs.BoolVar(&paginate, "paginate", false, "Fetch all pages and aggregate the collection")
 	}
@@ -79,8 +79,8 @@ func readCommand(name, help, selector, path string, collection bool) *ffcli.Comm
 			if err := shared.ValidateBoundOutputFlags(fs); err != nil {
 				return shared.UsageErrorf("asset-library %s: %v", name, err)
 			}
-			if limit < 0 {
-				return shared.UsageError("asset-library: --limit must be zero or a positive integer")
+			if limit < 0 || limit > 200 {
+				return shared.UsageError("asset-library: --limit must be between 1 and 200 (or 0 for server default)")
 			}
 			if next != "" {
 				if err := shared.ValidateNextURL(next); err != nil {

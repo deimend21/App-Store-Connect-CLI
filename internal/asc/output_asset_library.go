@@ -71,9 +71,9 @@ func AssetLibraryRows(payload []byte) ([]string, [][]string, error) {
 			headers = []string{"Media", "Spec ID", "Dimensions", "Aspect Ratio", "Placements"}
 			for _, media := range []string{"image", "video"} {
 				var specs []struct {
-					ID         string   `json:"specId"`
-					Ratio      string   `json:"aspectRatio"`
-					Placements []string `json:"compatiblePlacementTypes"`
+					ID         string          `json:"specId"`
+					Ratio      json.RawMessage `json:"aspectRatio"`
+					Placements []string        `json:"compatiblePlacementTypes"`
 					Dimensions struct {
 						MinWidth  int `json:"minWidth"`
 						MaxWidth  int `json:"maxWidth"`
@@ -88,7 +88,15 @@ func AssetLibraryRows(payload []byte) ([]string, [][]string, error) {
 				}
 				for _, spec := range specs {
 					d := spec.Dimensions
-					rows = append(rows, []string{media, spec.ID, fmt.Sprintf("%d-%d x %d-%d", d.MinWidth, d.MaxWidth, d.MinHeight, d.MaxHeight), spec.Ratio, strings.Join(spec.Placements, ", ")})
+					var ratio string
+					if err := json.Unmarshal(spec.Ratio, &ratio); err != nil && len(spec.Ratio) > 0 {
+						var compact bytes.Buffer
+						if err := json.Compact(&compact, spec.Ratio); err != nil {
+							return nil, nil, fmt.Errorf("asset-library: invalid aspect ratio: %w", err)
+						}
+						ratio = compact.String()
+					}
+					rows = append(rows, []string{media, spec.ID, fmt.Sprintf("%d-%d x %d-%d", d.MinWidth, d.MaxWidth, d.MinHeight, d.MaxHeight), ratio, strings.Join(spec.Placements, ", ")})
 				}
 			}
 			continue
