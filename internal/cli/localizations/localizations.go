@@ -30,6 +30,7 @@ Examples:
   asc localizations create --version "VERSION_ID" --locale "ja"
   asc localizations supported-locales --version "VERSION_ID"
   asc localizations search-keywords list --localization-id "LOCALIZATION_ID"
+  asc localizations placements list --localization-id "LOCALIZATION_ID" --placement-type PRODUCT_PAGE_HEADER_ASSET
   asc localizations preview-sets list --localization-id "LOCALIZATION_ID"
   asc localizations preview-sets view --id "PREVIEW_SET_ID"
   asc localizations screenshot-sets view --id "SCREENSHOT_SET_ID"
@@ -43,6 +44,7 @@ Examples:
 			LocalizationsUpdateCommand(),
 			LocalizationsSupportedLocalesCommand(),
 			LocalizationsSearchKeywordsCommand(),
+			LocalizationsPlacementsCommand(),
 			LocalizationsPreviewSetsCommand(),
 			LocalizationsScreenshotSetsCommand(),
 			LocalizationsDownloadCommand(),
