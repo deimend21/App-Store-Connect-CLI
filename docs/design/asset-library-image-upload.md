@@ -20,7 +20,9 @@ states remain pending until readiness or the upload timeout.
 The JSON mutation receipt has imageId, libraryId, fileName, fileSize, uploaded,
 and ready, plus state, specId, width, and height when known. uploaded means commit was accepted;
 ready means processing reached the verified usable state. Table/Markdown show
-that same result. An error after reservation prints the partial receipt before
+that same result. `ready` does not mean App Review approved the asset. To assign
+images to an approved live version, follow the [standalone review workflow](asset-library-review.md)
+and wait for `APPROVED` before creating placements. An error after reservation prints the partial receipt before
 returning unsuccessful status, retaining the ID for inspection or cleanup. The
 command never silently deletes reservations, repeats an uncertain POST, or
 prints signed upload operations. Required/invalid flags fail before side effects

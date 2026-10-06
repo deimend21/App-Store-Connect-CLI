@@ -25,6 +25,18 @@ confirmed resource operation. Reads keep raw envelopes;
 writes return exported camelCase receipts with registered table/Markdown
 renderers. Usage validation precedes auth; API failures print no success receipt.
 
+The maintainer POST/GET/DELETE probes above used the disposable app's draft
+version; they do not prove placement acceptance on an approved live version.
+A [community report on October 6, 2026](https://github.com/rorkai/App-Store-Connect-CLI/pull/2932#issuecomment-6013396808)
+found that placement creation on a version in `WAITING_FOR_REVIEW` was rejected
+because the version's state did not permit creation. On a live version, an
+unapproved asset was rejected because an approved parent requires an `APPROVED`
+asset. Follow the [standalone image review workflow](asset-library-review.md):
+upload, submit the images for review, wait for `APPROVED`, then create placements
+on the live version's localization. Image processing readiness and
+`WAITING_FOR_REVIEW` do not satisfy this requirement. The report had not yet
+verified approval, successful live-version placement, or live App Store display.
+
 CLI RED/GREEN tests assert both exact payloads, required and unsupported inputs,
 confirm-before-auth, create response-derived ID/state, deletion receipts,
 human output, and API failures. Run repository gates and mandated reviews before
