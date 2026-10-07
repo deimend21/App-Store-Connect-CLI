@@ -26,6 +26,9 @@ func TestMain(m *testing.M) {
 
 	_ = os.Setenv("ASC_CONFIG_PATH", testConfigPath)
 	_ = os.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	// Mock HTTP fixtures keep production pacing enabled at its minimum; the
+	// core web package separately tests the default and rate-limit behavior.
+	_ = os.Setenv("ASC_WEB_MIN_REQUEST_INTERVAL", "200ms")
 	_ = os.Setenv("ASC_MAX_RETRIES", "0")
 	_ = os.Setenv("ASC_TELEMETRY_DISABLED", "1")
 	_ = os.Setenv("HOME", tempDir)
