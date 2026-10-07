@@ -614,7 +614,7 @@ Examples:
 				}
 			}
 
-			assetPlan, assetWarnings, err := storeassets.ExportPlan(ctx, client, strings.TrimSpace(*versionID), "metadata", true, true)
+			assetPlan, assetWarnings, err := storeassets.ExportPlanWithVersionLocalizations(ctx, client, strings.TrimSpace(*versionID), "metadata", true, true, localizations)
 			if err != nil {
 				return fmt.Errorf("migrate export: %w", err)
 			}
