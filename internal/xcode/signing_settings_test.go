@@ -7780,7 +7780,7 @@ func TestSigningPlanRejectsHiddenConditionalExternalXCConfigWithoutFilesystemAcc
 	}
 }
 
-func attachSigningWidgetXCConfig(t *testing.T, project, contents string) string {
+func attachSigningWidgetXCConfig(t testing.TB, project, contents string) string {
 	t.Helper()
 	projectRoot := filepath.Dir(project)
 	configDir := filepath.Join(projectRoot, "Configs")

@@ -2181,7 +2181,7 @@ func containsPathSuffix(paths []string, suffix string) bool {
 	return false
 }
 
-func mustReadVersionTestFile(t *testing.T, path string) string {
+func mustReadVersionTestFile(t testing.TB, path string) string {
 	t.Helper()
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -2199,7 +2199,7 @@ func mustStatVersionTestFile(t *testing.T, path string) os.FileInfo {
 	return info
 }
 
-func writeStructuredVersionProject(t *testing.T, xcconfigBacked bool) string {
+func writeStructuredVersionProject(t testing.TB, xcconfigBacked bool) string {
 	t.Helper()
 	root := t.TempDir()
 	projectPath := filepath.Join(root, "Demo.xcodeproj")
