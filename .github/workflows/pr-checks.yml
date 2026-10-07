@@ -104,6 +104,15 @@ jobs:
         if: steps.go-tools-cache.outputs.cache-hit != 'true'
         run: make tools
 
+      - name: Cache lint analysis
+        if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.golangci-cache
+          key: golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-
+
       - parallel:
           - name: Check formatting
             run: |

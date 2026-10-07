@@ -783,7 +783,25 @@ def assert_go_tool_cache_identity() -> None:
         assert "'Makefile', 'go.mod'" in key, f"{path}: tool cache must include tool and Go versions"
 
 
+def assert_lint_analysis_cache() -> None:
+    prefix = "golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-"
+    for path in (PR_WORKFLOW, MAIN_WORKFLOW):
+        quality = job_block(path.read_text(), "quality-checks")
+        cache = re.search(r"- name: Cache lint analysis\n(.*?)(?=\n      - )", quality, re.DOTALL)
+        assert cache is not None, f"{path}: persist the actual lint analysis cache"
+        block = cache.group(1)
+        assert "if: contains(fromJSON('[\"telemetry\", \"full\"]'), needs.changes.outputs.scope)" in block
+        assert "uses: actions/cache@v6" in block
+        assert "path: ${{ github.workspace }}/.golangci-cache" in block
+        assert "key: " + prefix + "${{ github.sha }}" in block
+        assert "restore-keys: |\n            " + prefix in block
+        lint = re.search(r"- name: Run lint\n(.*?)(?=\n          - name:|\Z)", quality, re.DOTALL)
+        assert lint is not None and "make lint" in lint.group(1)
+        assert "cache-hit" not in lint.group(1), f"{path}: restored analysis must not skip lint"
+
+
 def main() -> None:
+    assert_lint_analysis_cache()
     assert_test_result_cache_disabled()
     assert_go_tool_cache_identity()
     assert_lint_timeout_budget()

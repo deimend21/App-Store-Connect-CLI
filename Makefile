@@ -155,7 +155,6 @@ format:
 		echo "$(YELLOW)gofumpt not found; install with: make tools (or: $(GO) install mvdan.cc/gofumpt@latest)$(NC)"; \
 		exit 1; \
 	fi
-	$(GO) fmt ./...
 	gofumpt -w .
 
 .PHONY: format-check
@@ -237,8 +236,7 @@ generate-command-docs:
 check-command-docs:
 	@echo "$(BLUE)Checking command docs sync...$(NC)"
 	python3 ./scripts/test_generate_command_docs.py
-	python3 ./scripts/generate-command-docs.py --check
-	python3 ./scripts/check-commands-docs.py
+	python3 ./scripts/check-commands-docs.py --check-generated
 
 .PHONY: check-repo-docs
 check-repo-docs:

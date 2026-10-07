@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -289,7 +291,7 @@ class WebsiteCommandChecksTest(unittest.TestCase):
     def test_help_subprocesses_disable_telemetry(self) -> None:
         run = mock.Mock(return_value=mock.Mock(stderr="", stdout=""))
 
-        check_website_commands.path_help.cache_clear()
+        check_website_commands.clear_help_cache()
         with mock.patch.object(check_website_commands.subprocess, "run", run):
             check_website_commands.command_help(Path("/tmp/asc-doc-check"), ("apps",))
             check_website_commands.path_help(Path("/tmp/asc-doc-check"), ("builds",))
@@ -1463,6 +1465,69 @@ class HookChecksTest(unittest.TestCase):
                 code, calls = self.run_hook([path])
                 self.assertEqual(code, 0)
                 self.assertEqual(calls, [expected])
+
+
+class WebsiteHelpCacheTests(unittest.TestCase):
+    def setUp(self) -> None:
+        check_website_commands.clear_help_cache()
+
+    def test_checked_help_is_reused_by_deprecation_probe(self) -> None:
+        proc = subprocess.CompletedProcess([], 0, "help text", "")
+        with mock.patch.object(check_website_commands.subprocess, "run", return_value=proc) as run:
+            self.assertEqual(check_website_commands.command_help(Path("/tmp/binary"), ("apps",)), "help text")
+            self.assertEqual(check_website_commands.path_help(Path("/tmp/binary"), ("apps",)), "help text")
+        self.assertEqual(run.call_count, 1)
+
+    def test_unchecked_failure_still_raises_when_checked(self) -> None:
+        proc = subprocess.CompletedProcess(["binary", "broken", "--help"], 2, "", "bad help")
+
+        def fake_run(*args, **kwargs):
+            if kwargs.get("check"):
+                proc.check_returncode()
+            return proc
+
+        with mock.patch.object(check_website_commands.subprocess, "run", side_effect=fake_run) as run:
+            self.assertEqual(check_website_commands.path_help(Path("/tmp/binary"), ("broken",)), "bad help")
+            with self.assertRaises(subprocess.CalledProcessError):
+                check_website_commands.command_help(Path("/tmp/binary"), ("broken",))
+        self.assertEqual(run.call_count, 1)
+
+    def test_full_tree_checks_undocumented_command_help(self) -> None:
+        root = subprocess.CompletedProcess([], 0, "UTILITY COMMANDS\n  undocumented:  Not used in examples.\n", "")
+        child = subprocess.CompletedProcess(["binary", "undocumented", "--help"], 2, "", "bad help")
+
+        def fake_run(args, **kwargs):
+            result = root if args[-2:] != ["undocumented", "--help"] else child
+            if kwargs.get("check"):
+                result.check_returncode()
+            return result
+
+        with mock.patch.object(check_website_commands.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(subprocess.CalledProcessError):
+                check_website_commands.build_command_index(Path("/tmp/binary"))
+
+    def test_main_clears_failed_help_before_next_invocation(self) -> None:
+        help_results = iter([
+            subprocess.CompletedProcess(["binary", "--help"], 2, "", "bad help"),
+            subprocess.CompletedProcess(["binary", "--help"], 0, "USAGE\n  asc <subcommand> [flags]\n", ""),
+        ])
+
+        def fake_run(args, **kwargs):
+            if args[0] == "go":
+                return subprocess.CompletedProcess(args, 0, "", "")
+            return next(help_results)
+
+        with mock.patch.object(check_website_commands.tempfile, "TemporaryDirectory") as directory, \
+             mock.patch.object(check_website_commands.subprocess, "run", side_effect=fake_run) as run, \
+             mock.patch.object(check_website_commands, "collect_errors", return_value=[]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            directory.return_value.__enter__.return_value = "/tmp/rebuilt-doc-binary"
+            with self.assertRaises(subprocess.CalledProcessError):
+                check_website_commands.main([])
+            self.assertEqual(check_website_commands.help_process.cache_info().currsize, 0)
+            self.assertEqual(check_website_commands.main([]), 0)
+            self.assertEqual(check_website_commands.help_process.cache_info().currsize, 0)
+        self.assertEqual(run.call_count, 4)
 
 
 if __name__ == "__main__":
