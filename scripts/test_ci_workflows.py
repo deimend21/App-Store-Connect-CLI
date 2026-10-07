@@ -766,7 +766,26 @@ def assert_security_target_contract() -> None:
         assert "Install gosec for security checks" not in success.stdout
 
 
+def assert_test_result_cache_disabled() -> None:
+    makefile = MAKEFILE.read_text()
+    for target in ("test", "test-short"):
+        recipe = re.search(rf"^{target}:\n(.*?)(?=^\S|\Z)", makefile, re.MULTILINE | re.DOTALL)
+        assert recipe is not None
+        assert "-count=1" in recipe.group(1), f"{target} must run tests without cached results"
+        assert "run_isolated_tests" in recipe.group(1), f"{target} must retain isolated test environment"
+
+
+def assert_go_tool_cache_identity() -> None:
+    for path in (PR_WORKFLOW, MAIN_WORKFLOW):
+        workflow = path.read_text()
+        key = next(line for line in workflow.splitlines() if "key:" in line and "go-tools" in line)
+        assert "runner.arch" in key, f"{path}: tool cache must include architecture"
+        assert "'Makefile', 'go.mod'" in key, f"{path}: tool cache must include tool and Go versions"
+
+
 def main() -> None:
+    assert_test_result_cache_disabled()
+    assert_go_tool_cache_identity()
     assert_lint_timeout_budget()
     assert_go_toolchain_source_accepts_normalized_scalars()
     assert_go_toolchain_source_rejects_step_local_violations()

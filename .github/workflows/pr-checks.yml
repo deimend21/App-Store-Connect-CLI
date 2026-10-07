@@ -98,7 +98,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/go/bin
-          key: ${{ runner.os }}-go-tools-${{ hashFiles('Makefile') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-tools-${{ hashFiles('Makefile', 'go.mod') }}
 
       - name: Install tooling
         if: steps.go-tools-cache.outputs.cache-hit != 'true'

@@ -100,17 +100,19 @@ build-all: clean
 build-debug:
 	$(GO) build -gcflags="all=-N -l" -o $(BINARY_NAME)-debug .
 
+# Per-run config isolation and high-volume filesystem logs make test-result
+# caching costly. Disable result caching while retaining Go's compile cache.
 # Run tests
 .PHONY: test
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
-	$(call run_isolated_tests,-v ./...)
+	$(call run_isolated_tests,-count=1 -v ./...)
 
 # Run the short test suite (used by the pre-commit hook)
 .PHONY: test-short
 test-short:
 	@echo "$(BLUE)Running short tests...$(NC)"
-	$(call run_isolated_tests,-short ./...)
+	$(call run_isolated_tests,-count=1 -short ./...)
 
 # Run tests with parallel package compilation
 # Defaults to GOMAXPROCS; set PARALLEL to override (e.g. PARALLEL=4)

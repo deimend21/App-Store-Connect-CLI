@@ -1388,7 +1388,7 @@ class DocLinksTest(unittest.TestCase):
 
 
 class HookChecksTest(unittest.TestCase):
-    def run_hook(self, paths: list[str], fail_target: str = "") -> tuple[int, list[str]]:
+    def run_hook(self, paths: list[str], fail_target: str = "", unstaged_changes: bool = False) -> tuple[int, list[str]]:
         hook = Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1396,7 +1396,8 @@ class HookChecksTest(unittest.TestCase):
                 "git": '\n'.join([
                     '#!/usr/bin/env bash',
                     'if [ "$1" = rev-parse ]; then pwd;',
-                    'elif [ "$2" = --cached ]; then printf "%s\\n" "$HOOK_PATHS"; fi',
+                    'elif [ "$2" = --cached ]; then printf "%s\\n" "$HOOK_PATHS";',
+                    'elif [ "$1" = diff ] && [ "$2" = --quiet ]; then [ "$HOOK_UNSTAGED" != 1 ]; fi',
                 ]),
                 "go": '#!/usr/bin/env bash\nif [ "$1" = env ]; then pwd; else echo "go $*" >> "$HOOK_LOG"; fi\n',
                 "make": '#!/usr/bin/env bash\necho "make $*" >> "$HOOK_LOG"\n[ "$1" != "$HOOK_FAIL" ]\n',
@@ -1410,9 +1411,22 @@ class HookChecksTest(unittest.TestCase):
                 ["bash", str(hook)], cwd=root, capture_output=True, text=True,
                 env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                      "HOOK_PATHS": "\n".join(paths), "HOOK_LOG": str(log),
-                     "HOOK_FAIL": fail_target},
+                     "HOOK_FAIL": fail_target, "HOOK_UNSTAGED": "1" if unstaged_changes else "0"},
             )
             return result.returncode, log.read_text().splitlines() if log.exists() else []
+
+    def test_format_check_allows_unrelated_unstaged_changes(self) -> None:
+        code, calls = self.run_hook(["main.go"], unstaged_changes=True)
+        self.assertEqual(code, 0)
+        self.assertIn("make format-check", calls)
+        self.assertIn("make lint", calls)
+        self.assertIn("make test-short", calls)
+
+    def test_format_check_failure_blocks_lint_and_tests(self) -> None:
+        code, calls = self.run_hook(["main.go"], fail_target="format-check")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("make lint", calls)
+        self.assertNotIn("make test-short", calls)
 
     def test_instruction_docs_run_validators_without_go_gates(self) -> None:
         for path in ["AGENTS.md", ".agents/skills/watch-asc-pr/SKILL.md",
@@ -1430,7 +1444,7 @@ class HookChecksTest(unittest.TestCase):
             with self.subTest(paths=paths):
                 code, calls = self.run_hook(paths)
                 self.assertEqual(code, 0)
-                self.assertIn("make format", calls)
+                self.assertIn("make format-check", calls)
                 self.assertIn("make lint", calls)
                 self.assertIn("make test-short", calls)
 
@@ -1439,7 +1453,7 @@ class HookChecksTest(unittest.TestCase):
             with self.subTest(target=target):
                 code, calls = self.run_hook(["AGENTS.md"], target)
                 self.assertNotEqual(code, 0)
-                self.assertNotIn("make format", calls)
+                self.assertNotIn("make format-check", calls)
 
     def test_website_and_wall_fast_paths_remain_separate(self) -> None:
         for path, expected in [("index.mdx", "make check-website-docs"),
