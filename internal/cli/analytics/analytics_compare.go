@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -233,39 +234,93 @@ func normalizeAnalyticsCompareReportSubType(value string) (asc.SalesReportSubTyp
 	}
 }
 
+const salesReportFetchConcurrency = 4
+
+type salesReportFetchResult struct {
+	metrics insights.SalesMetrics
+	err     error
+}
+
 func fetchAndAggregate(ctx context.Context, client *asc.Client, vendor string, scope insights.SalesScope, dates []string, salesType asc.SalesReportType, subType asc.SalesReportSubType, freq asc.SalesReportFrequency) (insights.SalesMetrics, int, error) {
 	var aggregate insights.SalesMetrics
 	found := 0
 	missingDates := make([]string, 0)
+	workCtx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
 
-	for _, date := range dates {
-		download, err := client.GetSalesReport(ctx, asc.SalesReportParams{
-			VendorNumber:  vendor,
-			ReportType:    salesType,
-			ReportSubType: subType,
-			Frequency:     freq,
-			ReportDate:    date,
-			Version:       defaultSalesReportVersion(salesType, subType, freq),
-		})
-		if err != nil {
-			if asc.IsNotFound(err) {
+	results := make([]chan salesReportFetchResult, len(dates))
+	for index := range results {
+		results[index] = make(chan salesReportFetchResult, 1)
+	}
+	jobs := make(chan int)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		defer close(jobs)
+		for index := range dates {
+			select {
+			case jobs <- index:
+			case <-workCtx.Done():
+				return
+			}
+		}
+	}()
+	for range min(salesReportFetchConcurrency, len(dates)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if workCtx.Err() != nil {
+					return
+				}
+				date := dates[index]
+				download, err := client.GetSalesReport(workCtx, asc.SalesReportParams{
+					VendorNumber:  vendor,
+					ReportType:    salesType,
+					ReportSubType: subType,
+					Frequency:     freq,
+					ReportDate:    date,
+					Version:       defaultSalesReportVersion(salesType, subType, freq),
+				})
+				if err != nil {
+					results[index] <- salesReportFetchResult{err: fmt.Errorf("download report %s: %w", date, err)}
+					continue
+				}
+				metrics, parseErr := insights.ParseSalesReportMetrics(download.Body, scope)
+				_ = download.Body.Close()
+				if parseErr != nil {
+					parseErr = fmt.Errorf("parse report %s: %w", date, parseErr)
+				}
+				results[index] <- salesReportFetchResult{metrics: metrics, err: parseErr}
+			}
+		}()
+	}
+
+	// Reduce in date order so completion timing cannot change totals or errors.
+	for index, date := range dates {
+		var result salesReportFetchResult
+		select {
+		case result = <-results[index]:
+		case <-ctx.Done():
+			return aggregate, found, fmt.Errorf("download report %s: %w", date, ctx.Err())
+		}
+		if result.err != nil {
+			if asc.IsNotFound(result.err) {
 				missingDates = append(missingDates, date)
 				continue
 			}
-			return aggregate, found, fmt.Errorf("download report %s: %w", date, err)
-		}
-
-		metrics, parseErr := insights.ParseSalesReportMetrics(download.Body, scope)
-		_ = download.Body.Close()
-		if parseErr != nil {
-			return aggregate, found, fmt.Errorf("parse report %s: %w", date, parseErr)
+			return aggregate, found, result.err
 		}
 
 		// Seed from the first parsed report so availability flags reflect real coverage.
 		if found == 0 {
-			aggregate = metrics
+			aggregate = result.metrics
 		} else {
-			aggregate = aggregateSalesMetrics(aggregate, metrics)
+			aggregate = aggregateSalesMetrics(aggregate, result.metrics)
 		}
 		found++
 	}

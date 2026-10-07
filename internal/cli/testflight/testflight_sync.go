@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 	"gopkg.in/yaml.v3"
@@ -235,15 +236,18 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 	buildConfigs := make(map[string]*TestFlightBuildConfig)
 	groupBuilds := make(map[string][]string)
 	if opts.includeBuilds {
-		for _, group := range filteredGroups {
-			buildFirstPage, err := client.GetBetaGroupBuilds(ctx, group.ID, asc.WithBetaGroupBuildsLimit(200))
+		groupResponses, err := fetchTestFlightGroupPages(ctx, filteredGroups, func(ctx context.Context, groupID string) (*asc.BuildsResponse, error) {
+			firstPage, err := client.GetBetaGroupBuilds(ctx, groupID, asc.WithBetaGroupBuildsLimit(200))
 			if err != nil {
-				return nil, fmt.Errorf("fetch beta group builds: %w", err)
+				return nil, err
 			}
-			buildResp, err := paginateBetaGroupBuilds(ctx, client, group.ID, buildFirstPage)
-			if err != nil {
-				return nil, fmt.Errorf("fetch beta group builds: %w", err)
-			}
+			return paginateBetaGroupBuilds(ctx, client, groupID, firstPage)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fetch beta group builds: %w", err)
+		}
+		for i, group := range filteredGroups {
+			buildResp := groupResponses[i]
 			for _, build := range buildResp.Data {
 				groupBuilds[group.ID] = append(groupBuilds[group.ID], build.ID)
 				cfg := buildConfigs[build.ID]
@@ -267,15 +271,18 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 
 	testerConfigs := make(map[string]*TestFlightTesterConfig)
 	if opts.includeTesters {
-		for _, group := range filteredGroups {
-			testerFirstPage, err := client.GetBetaGroupTesters(ctx, group.ID, asc.WithBetaGroupTestersLimit(200))
+		groupResponses, err := fetchTestFlightGroupPages(ctx, filteredGroups, func(ctx context.Context, groupID string) (*asc.BetaTestersResponse, error) {
+			firstPage, err := client.GetBetaGroupTesters(ctx, groupID, asc.WithBetaGroupTestersLimit(200))
 			if err != nil {
-				return nil, fmt.Errorf("fetch beta group testers: %w", err)
+				return nil, err
 			}
-			testerResp, err := paginateBetaGroupTesters(ctx, client, group.ID, testerFirstPage)
-			if err != nil {
-				return nil, fmt.Errorf("fetch beta group testers: %w", err)
-			}
+			return paginateBetaGroupTesters(ctx, client, groupID, firstPage)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("fetch beta group testers: %w", err)
+		}
+		for i, group := range filteredGroups {
+			testerResp := groupResponses[i]
 			for _, tester := range testerResp.Data {
 				cfg := testerConfigs[tester.ID]
 				if cfg == nil {
@@ -336,6 +343,44 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 	}
 
 	return config, nil
+}
+
+// fetchTestFlightGroupPages overlaps independent group reads in bounded waves.
+// Each group's cursor chain remains sequential. Indexed results preserve the
+// original group precedence and first-error order when the caller merges them.
+func fetchTestFlightGroupPages[T any](ctx context.Context, groups []asc.Resource[asc.BetaGroupAttributes], fetch func(context.Context, string) (T, error)) ([]T, error) {
+	const concurrency = 4
+	pages := make([]T, len(groups))
+	for start := 0; start < len(groups); start += concurrency {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		end := min(start+concurrency, len(groups))
+		waveCtx, cancel := context.WithCancel(ctx)
+		completions := make([]chan error, end-start)
+		var workers sync.WaitGroup
+		for i := start; i < end; i++ {
+			done := make(chan error, 1)
+			completions[i-start] = done
+			workers.Go(func() {
+				page, err := fetch(waveCtx, groups[i].ID)
+				pages[i] = page
+				done <- err
+			})
+		}
+		// Await in input order so a fast later error cannot replace an earlier
+		// group's error. Cancel outstanding peers once that error is known.
+		for _, done := range completions {
+			if err := <-done; err != nil {
+				cancel()
+				workers.Wait()
+				return nil, err
+			}
+		}
+		cancel()
+		workers.Wait()
+	}
+	return pages, nil
 }
 
 func paginateBetaGroups(ctx context.Context, client testFlightSyncClient, appID string, firstPage *asc.BetaGroupsResponse) (*asc.BetaGroupsResponse, error) {
