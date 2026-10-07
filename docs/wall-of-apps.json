@@ -484,6 +484,11 @@
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/c9/fa/8b/c9fa8b9f-1ec9-3612-2cb6-a0dbb610468d/AppIcon-0-0-85-220-0-0-5-0-2x-0-0-0.png/512x512bb.png"
   },
   {
+    "app": "Devotion: Daily Bible",
+    "link": "https://apps.apple.com/us/app/devotion-daily-bible/id6789295449?uo=4",
+    "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/06/b0/6c/06b06ce2-ce56-0e00-040d-374ff0a7d0eb/Icon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
+  },
+  {
     "app": "DevTutor: Learn Swift, SwiftUl",
     "link": "https://apps.apple.com/us/app/devtutor-learn-swift-swiftul/id6471227008?uo=4",
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/a0/5e/d3/a05ed356-a8d1-47ec-b464-f1422a717a75/AppIcon-0-0-1x_U007epad-0-0-0-1-0-85-220.png/512x512bb.jpg"
@@ -1174,6 +1179,11 @@
     "app": "Morning Pages",
     "link": "https://apps.apple.com/us/app/morning-pages/id6738604034",
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/c5/ec/37/c5ec371e-e920-33ec-1541-74d05fc067c2/app-icon-0-0-1x_U007epad-0-1-sRGB-85-220.png/512x512bb.jpg"
+  },
+  {
+    "app": "MorseKit: Morse Code Trainer",
+    "link": "https://apps.apple.com/us/app/morsekit-morse-code-trainer/id6761839923?uo=4",
+    "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/5f/b0/81/5fb081cd-fcd6-998e-cbb2-3c84816d6e6b/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
   },
   {
     "app": "MultiPods Audio",
@@ -2298,6 +2308,11 @@
     "app": "YouInMeme: Face Swap Memes",
     "link": "https://apps.apple.com/us/app/youinmeme-face-swap-memes/id6760035781?uo=4",
     "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple221/v4/0e/38/cb/0e38cb41-820e-8d78-2547-eb2f945a66b2/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
+  },
+  {
+    "app": "Your Next Tours: Audio Guide",
+    "link": "https://apps.apple.com/us/app/your-next-tours-audio-guide/id6783743090?uo=4",
+    "icon": "https://is1-ssl.mzstatic.com/image/thumb/Purple211/v4/a2/9a/cb/a29acbaa-94ac-05f9-3c76-84b654782781/AppIcon-0-0-1x_U007epad-0-1-85-220.png/512x512bb.jpg"
   },
   {
     "app": "Zen Flip Clock - Minimal Timer",
