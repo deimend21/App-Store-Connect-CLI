@@ -273,7 +273,11 @@ check-openapi:
 	python3 ./scripts/generate-schema-index.py --check
 
 .PHONY: check-docs
-check-docs: check-command-docs check-repo-docs check-website-docs check-agent-skills check-openapi
+check-docs: check-repo-docs check-agent-skills check-openapi
+	python3 ./scripts/test_generate_command_docs.py
+	python3 ./scripts/test_check_docs_commands.py
+	python3 ./scripts/check_website_docs.py
+	python3 ./scripts/check_docs_commands.py
 
 .PHONY: check-wall-of-apps
 check-wall-of-apps:

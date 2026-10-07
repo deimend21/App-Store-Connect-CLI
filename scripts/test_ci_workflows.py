@@ -278,7 +278,7 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
     assert "python3 scripts/go_test_shard.py" in tests, f"{path}: {test_job} must run the sharded Go test suite"
     assert "--packages ./..." in tests, f"{path}: {test_job} must cover every package"
     assert "go test" in tests, f"{path}: {test_job} must invoke go test"
-    assert "ASC_BYPASS_KEYCHAIN=1" in tests, f"{path}: {test_job} must bypass the keychain"
+    assert 'ASC_BYPASS_KEYCHAIN: "1"' in tests, f"{path}: {test_job} must bypass the keychain for all commands"
 
     build_platforms = job_block(workflow, "build-platforms")
     assert "needs.changes.outputs.scope == 'full'" in build_platforms
@@ -339,6 +339,7 @@ def assert_optimized_workflow_rejects_weakened_checks() -> None:
             "python3 scripts/go_test_shard.py",
             "--packages ./...",
             "ASC_BYPASS_KEYCHAIN=1",
+            'ASC_BYPASS_KEYCHAIN: "1"',
             'export CGO_CFLAGS="-O2 -g -mmacosx-version-min=13.0"',
             'export CGO_LDFLAGS="-O2 -g -mmacosx-version-min=13.0"',
             "MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build",
@@ -807,7 +808,44 @@ def assert_lint_analysis_cache() -> None:
         assert "cache-hit" not in lint.group(1), f"{path}: restored analysis must not skip lint"
 
 
+def assert_workload_cache_action(action: str) -> None:
+    assert "go-version-file: go.mod" in action
+    assert "cache: false" in action, "setup-go must not race to save its shared cache"
+    assert "go env GOCACHE" in action and "go env GOMODCACHE" in action
+    prefix = "go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ inputs.workload }}-${{ hashFiles('go.mod', 'go.sum') }}-"
+    assert "key: " + prefix + "${{ github.sha }}" in action, "save newly compiled source entries"
+    assert "restore-keys: |\n          " + prefix in action, "restore only a compatible workload cache"
+    assert "uses: actions/cache@v6" in action
+
+
+def assert_ci_workload_caches() -> None:
+    action_path = ROOT / ".github/actions/setup-go-cache/action.yml"
+    assert action_path.is_file(), "missing workload-scoped Go cache action"
+    action = action_path.read_text()
+    assert_workload_cache_action(action)
+    assert_go_toolchain_workflows([(action_path, action)])
+    for token in ("runner.os", "runner.arch", "steps.go.outputs.go-version", "inputs.workload", "'go.sum'", "github.sha"):
+        try:
+            assert_workload_cache_action(action.replace(token, "removed"))
+        except AssertionError:
+            continue
+        raise AssertionError(f"cache accepts missing identity {token}")
+    for path, test_job in ((PR_WORKFLOW, "unit-test-shards"), (MAIN_WORKFLOW, "test-shards")):
+        workflow = path.read_text()
+        for job, workload in (("quality-checks", "quality"), (test_job, "test-${{ matrix.name }}"), ("build-platforms", "build-${{ matrix.name }}")):
+            block = job_block(workflow, job)
+            assert "uses: ./.github/actions/setup-go-cache" in block, f"{path}: {job} must own its compiled cache"
+            assert "workload: " + workload in block
+        quality = job_block(workflow, "quality-checks")
+        assert "- parallel:" not in quality, f"{path}: Go producers must not contend on one quality runner"
+        shards = job_block(workflow, test_job)
+        assert 'ASC_BYPASS_KEYCHAIN: "1"' in shards, f"{path}: bypass must cover every command in a shard"
+        assert "run: ${{ matrix.command }}" in shards
+        assert "cache-hit" not in shards, f"{path}: cache restoration must never skip tests"
+
+
 def main() -> None:
+    assert_ci_workload_caches()
     assert_lint_analysis_cache()
     assert_test_result_cache_disabled()
     assert_go_tool_cache_identity()

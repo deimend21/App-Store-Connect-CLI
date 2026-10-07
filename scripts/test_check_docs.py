@@ -1471,6 +1471,16 @@ class WebsiteHelpCacheTests(unittest.TestCase):
     def setUp(self) -> None:
         check_website_commands.clear_help_cache()
 
+    def test_main_uses_explicit_binary_without_building(self) -> None:
+        with mock.patch.object(check_website_commands.subprocess, "run") as run, \
+             mock.patch.object(check_website_commands, "build_command_index", return_value={}) as index, \
+             mock.patch.object(check_website_commands, "collect_errors", return_value=[]) as collect, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(check_website_commands.main(["--binary", "/tmp/current-asc"]), 0)
+        run.assert_not_called()
+        index.assert_called_once_with(Path("/tmp/current-asc").resolve())
+        self.assertEqual(collect.call_args.args[2], Path("/tmp/current-asc").resolve())
+
     def test_checked_help_is_reused_by_deprecation_probe(self) -> None:
         proc = subprocess.CompletedProcess([], 0, "help text", "")
         with mock.patch.object(check_website_commands.subprocess, "run", return_value=proc) as run:
