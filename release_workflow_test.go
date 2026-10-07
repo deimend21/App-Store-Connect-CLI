@@ -226,8 +226,13 @@ func TestReleaseWorkflowEnablesCGOForEveryMacOSArchitecture(t *testing.T) {
 		t.Fatalf("read release workflow: %v", err)
 	}
 	workflow := string(data)
+	for _, setting := range []string{`CGO_CFLAGS: "-O2 -g -mmacosx-version-min=13.0"`, `CGO_LDFLAGS: "-O2 -g -mmacosx-version-min=13.0"`} {
+		if !strings.Contains(workflow, setting) {
+			t.Fatalf("release workflow must include its macOS minimum in the CGO cache key: %s", setting)
+		}
+	}
 	for _, arch := range []string{"amd64", "arm64"} {
-		want := "CGO_ENABLED=1 GOOS=darwin GOARCH=" + arch + " go build"
+		want := "MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=" + arch + " go build"
 		if !strings.Contains(workflow, want) {
 			t.Fatalf("release workflow missing cgo-enabled macOS %s build: %q", arch, want)
 		}
@@ -813,5 +818,16 @@ func TestReleaseWorkflowSignsMacOSBinariesWithStableCodeSigningIdentifier(t *tes
 		if !strings.Contains(line, `--identifier "${ASC_CODESIGN_IDENTIFIER}"`) {
 			t.Errorf("codesign invocation must pin the identifier: %s", strings.TrimSpace(line))
 		}
+	}
+}
+
+func TestReleaseWorkflowHomebrewRequiresVentura(t *testing.T) {
+	data, err := readReleaseWorkflow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := releaseWorkflowJobBlock(t, string(data), "homebrew")
+	if !strings.Contains(job, "depends_on macos: :ventura") || strings.Contains(job, "depends_on :macos") {
+		t.Fatal("Go 1.27 release formula must require macOS Ventura or later")
 	}
 }

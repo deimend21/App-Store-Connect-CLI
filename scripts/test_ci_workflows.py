@@ -297,8 +297,13 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
     assert "ASC_BYPASS_KEYCHAIN=1 ASC_WINDOWS_CREDENTIAL_SMOKE=1 ASC_WINDOWS_SMOKE_BINARY=../../../build/asc_dev_windows_amd64.exe go test -count=1 ./internal/cli/auth -run '^TestWindowsCredentialManagerNativeRoundTrip$'" in windows, (
         f"{path}: missing opt-in native Windows Credential Manager smoke"
     )
+    macos = matrix_command_for_runner(build_platforms, "macos-latest")
+    for variable in ("CGO_CFLAGS", "CGO_LDFLAGS"):
+        assert f'export {variable}="-O2 -g -mmacosx-version-min=13.0"' in macos, (
+            f"{path}: Darwin minimum must participate in the CGO build cache key"
+        )
     for arch in ("amd64", "arm64"):
-        command = f"CGO_ENABLED=1 GOOS=darwin GOARCH={arch} go build"
+        command = f"MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH={arch} go build"
         assert command in build_platforms, f"{path}: missing cgo-enabled Darwin {arch} build"
         assert f"asc_dev_macos_{arch}" in build_platforms
     for os_name, arch in (("linux", "amd64"), ("linux", "arm64"), ("windows", "amd64")):
@@ -334,8 +339,10 @@ def assert_optimized_workflow_rejects_weakened_checks() -> None:
             "python3 scripts/go_test_shard.py",
             "--packages ./...",
             "ASC_BYPASS_KEYCHAIN=1",
-            "CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build",
-            "CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build",
+            'export CGO_CFLAGS="-O2 -g -mmacosx-version-min=13.0"',
+            'export CGO_LDFLAGS="-O2 -g -mmacosx-version-min=13.0"',
+            "MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build",
+            "MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build",
             "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build",
             "CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build",
             "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build",

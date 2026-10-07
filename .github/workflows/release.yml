@@ -408,11 +408,14 @@ jobs:
 
       - name: Build macOS binaries
         if: steps.candidate_artifact.outputs.reused != 'true'
+        env:
+          CGO_CFLAGS: "-O2 -g -mmacosx-version-min=13.0"
+          CGO_LDFLAGS: "-O2 -g -mmacosx-version-min=13.0"
         run: |
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(git show -s --format=%cI HEAD)
-          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" -o "release/asc_${VERSION}_macOS_amd64" .
-          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" -o "release/asc_${VERSION}_macOS_arm64" .
+          MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" -o "release/asc_${VERSION}_macOS_amd64" .
+          MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" -o "release/asc_${VERSION}_macOS_arm64" .
 
       - name: Build for Linux
         if: steps.candidate_artifact.outputs.reused != 'true'
@@ -755,7 +758,7 @@ jobs:
                 version '{version}'
                 license 'MIT'
 
-                depends_on :macos
+                depends_on macos: :ventura
 
                 on_macos do
                   if Hardware::CPU.arm?
