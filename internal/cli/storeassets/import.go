@@ -428,7 +428,7 @@ func preparePreviews(ctx context.Context, c *asc.Client, p *ImportPlan) (*Import
 			group = &previewGroup{Locale: preview.Locale, Device: strings.ToUpper(preview.DeviceType), LocalizationID: locIDs[preview.Locale]}
 			p.previewGroups[key] = group
 			if locID := locIDs[preview.Locale]; locID != "" {
-				sets, err := previewSets(ctx, c, locID)
+				sets, included, err := previewSets(ctx, c, locID)
 				if err != nil {
 					return nil, err
 				}
@@ -438,7 +438,12 @@ func preparePreviews(ctx context.Context, c *asc.Client, p *ImportPlan) (*Import
 						break
 					}
 				}
-				if group.SetID != "" {
+				if items, ok := included[group.SetID]; ok {
+					group.Existing = items
+					for _, item := range items {
+						group.CurrentOrder = append(group.CurrentOrder, item.ID)
+					}
+				} else if group.SetID != "" {
 					group.CurrentOrder, err = previewOrder(ctx, c, group.SetID)
 					if err != nil {
 						return nil, err
