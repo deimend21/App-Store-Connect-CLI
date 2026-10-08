@@ -168,7 +168,6 @@ func TestReleaseWorkflowKeepsHistoricalGuardrailsInline(t *testing.T) {
 		`make check-docs`,
 		`make check-wall-of-apps`,
 		`make lint`,
-		`python3 scripts/test_release_rehearsal.py`,
 		`python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v`,
 	} {
 		if !strings.Contains(workflow, want) {

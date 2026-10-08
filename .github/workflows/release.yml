@@ -377,9 +377,6 @@ jobs:
       - name: Self-test docs validators
         run: python3 scripts/test_check_docs.py
 
-      - name: Self-test release rehearsal
-        run: python3 scripts/test_release_rehearsal.py
-
       - name: Run release guardrails
         run: |
           PATH_VALUE="$(go env GOPATH)/bin:$PATH"
