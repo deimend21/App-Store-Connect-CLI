@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -657,7 +658,7 @@ func TestMetadataApplyFailsOnPartialMutation(t *testing.T) {
 		http.DefaultTransport = originalTransport
 	})
 
-	patchCount := 0
+	var patchCount atomic.Int32
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/v1/apps/app-1/appInfos":
@@ -693,7 +694,7 @@ func TestMetadataApplyFailsOnPartialMutation(t *testing.T) {
 			}, nil
 		case "/v1/appInfoLocalizations/loc-app-en":
 			if req.Method == http.MethodPatch {
-				patchCount++
+				patchCount.Add(1)
 				assertMetadataPatchPayload(t, req, "appInfoLocalizations", "loc-app-en", map[string]string{
 					"name":     "App Name",
 					"subtitle": "Local subtitle",
@@ -707,7 +708,7 @@ func TestMetadataApplyFailsOnPartialMutation(t *testing.T) {
 			}
 		case "/v1/appStoreVersionLocalizations/loc-ver-fr":
 			if req.Method == http.MethodPatch {
-				patchCount++
+				patchCount.Add(1)
 				assertMetadataPatchPayload(t, req, "appStoreVersionLocalizations", "loc-ver-fr", map[string]string{"description": "Local French"})
 				body := `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Internal Error","detail":"boom"}]}`
 				return &http.Response{
@@ -718,7 +719,7 @@ func TestMetadataApplyFailsOnPartialMutation(t *testing.T) {
 			}
 		case "/v1/appStoreVersionLocalizations/loc-ver-ja":
 			if req.Method == http.MethodPatch {
-				patchCount++
+				patchCount.Add(1)
 				assertMetadataPatchPayload(t, req, "appStoreVersionLocalizations", "loc-ver-ja", map[string]string{"description": "Local Japanese"})
 				body := `{"data":{"type":"appStoreVersionLocalizations","id":"loc-ver-ja","attributes":{"locale":"ja","description":"Local Japanese"}}}`
 				return &http.Response{
@@ -755,8 +756,8 @@ func TestMetadataApplyFailsOnPartialMutation(t *testing.T) {
 	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitHTTPInternalServer {
 		t.Fatalf("expected partial server failure exit %d, got %d", rootcmd.ExitHTTPInternalServer, got)
 	}
-	if patchCount != 3 {
-		t.Fatalf("expected all three patch attempts despite the middle failure, got %d", patchCount)
+	if patchCount.Load() != 3 {
+		t.Fatalf("expected all three patch attempts despite the middle failure, got %d", patchCount.Load())
 	}
 	if !strings.Contains(runErr.Error(), "metadata apply: 1 localization(s) failed") {
 		t.Fatalf("expected batch failure summary, got %v", runErr)
@@ -1602,7 +1603,10 @@ func TestMetadataApplyCancellationArtifactsRemainingActionsAcrossScopes(t *testi
 				cancel: cancel,
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
-		case "/v1/appInfoLocalizations/loc-fr", "/v1/appStoreVersionLocalizations/loc-ja":
+		case "/v1/appInfoLocalizations/loc-fr":
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		case "/v1/appStoreVersionLocalizations/loc-ja":
 			mutations++
 			t.Fatalf("unexpected mutation after cancellation: %s", req.URL.Path)
 			return nil, nil

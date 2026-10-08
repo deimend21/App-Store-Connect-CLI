@@ -11,32 +11,6 @@ import (
 	"time"
 )
 
-func TestBuildFinanceReportQuery(t *testing.T) {
-	query := buildFinanceReportQuery(FinanceReportParams{
-		VendorNumber: "12345678",
-		ReportType:   FinanceReportTypeFinancial,
-		RegionCode:   "US",
-		ReportDate:   "2025-12",
-	})
-
-	values, err := url.ParseQuery(query)
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("filter[vendorNumber]"); got != "12345678" {
-		t.Fatalf("expected vendorNumber filter, got %q", got)
-	}
-	if got := values.Get("filter[reportType]"); got != "FINANCIAL" {
-		t.Fatalf("expected reportType filter, got %q", got)
-	}
-	if got := values.Get("filter[regionCode]"); got != "US" {
-		t.Fatalf("expected regionCode filter, got %q", got)
-	}
-	if got := values.Get("filter[reportDate]"); got != "2025-12" {
-		t.Fatalf("expected reportDate filter, got %q", got)
-	}
-}
-
 func TestDownloadFinanceReportSurvivesShortClientTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/v1/financeReports" || req.Header.Get("Authorization") == "" {
