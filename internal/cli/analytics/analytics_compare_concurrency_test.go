@@ -76,6 +76,11 @@ func compareDates(count int) []string {
 	return dates
 }
 
+func fetchAndAggregateOne(ctx context.Context, client *asc.Client, dates []string, salesType asc.SalesReportType) (insights.SalesMetrics, int, error) {
+	result := fetchAndAggregate(ctx, client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, [][]string{dates}, salesType, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)[0]
+	return result.metrics, result.found, result.err
+}
+
 func TestFetchAndAggregateConcurrentBounded(t *testing.T) {
 	fixture := compareGzipFixture(t, compareSalesReportTSV())
 	started := make(chan struct{}, 12)
@@ -99,7 +104,7 @@ func TestFetchAndAggregateConcurrentBounded(t *testing.T) {
 	})
 	done := make(chan error, 1)
 	go func() {
-		metrics, found, err := fetchAndAggregate(context.Background(), client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, compareDates(12), asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+		metrics, found, err := fetchAndAggregateOne(context.Background(), client, compareDates(12), asc.SalesReportTypeSales)
 		if err == nil && (found != 12 || metrics.UnitsTotal != 24) {
 			err = fmt.Errorf("found=%d units=%v", found, metrics.UnitsTotal)
 		}
@@ -124,6 +129,35 @@ func TestFetchAndAggregateConcurrentBounded(t *testing.T) {
 	}
 	if got := maximum.Load(); got != 4 {
 		t.Fatalf("max in flight=%d, want 4", got)
+	}
+}
+
+func TestFetchAndAggregateSharesPoolAcrossPeriods(t *testing.T) {
+	fixture := compareGzipFixture(t, compareSalesReportTSV())
+	var arrived atomic.Int32
+	release := make(chan struct{})
+	client := newCompareTestClient(t, func(req *http.Request) (*http.Response, error) {
+		if arrived.Add(1) == 4 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s did not overlap across periods", req.URL.Query().Get("filter[reportDate]"))
+		}
+		body := io.NopCloser(bytes.NewReader(fixture))
+		if req.URL.Query().Get("filter[reportDate]") == "2026-01-01" {
+			body = io.NopCloser(strings.NewReader("invalid gzip"))
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req, Body: body}, nil
+	})
+	dates := compareDates(4)
+	periods := fetchAndAggregate(context.Background(), client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, [][]string{dates[:1], dates[1:]}, asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+	if periods[0].err == nil || !strings.Contains(periods[0].err.Error(), "parse report 2026-01-01:") {
+		t.Fatalf("baseline err=%v", periods[0].err)
+	}
+	if periods[1].err != nil || periods[1].found != 3 {
+		t.Fatalf("comparison found=%d err=%v", periods[1].found, periods[1].err)
 	}
 }
 
@@ -175,7 +209,7 @@ func TestFetchAndAggregateReducesInDateOrder(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	metrics, found, err := fetchAndAggregate(ctx, client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, compareDates(3), asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+	metrics, found, err := fetchAndAggregateOne(ctx, client, compareDates(3), asc.SalesReportTypeSales)
 	if err != nil || found != 3 || metrics.UnitsTotal != 1 {
 		t.Fatalf("found=%d units=%v err=%v", found, metrics.UnitsTotal, err)
 	}
@@ -229,7 +263,7 @@ func TestFetchAndAggregateFirstDateErrorCancelsAndJoins(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	metrics, found, err := fetchAndAggregate(ctx, client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, compareDates(12), asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+	metrics, found, err := fetchAndAggregateOne(ctx, client, compareDates(12), asc.SalesReportTypeSales)
 	if err == nil || !strings.Contains(err.Error(), "parse report 2026-01-02:") {
 		t.Fatalf("expected first date error, got %v", err)
 	}
@@ -255,7 +289,7 @@ func TestFetchAndAggregateContextCancellationJoins(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := fetchAndAggregate(ctx, client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, compareDates(12), asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+		_, _, err := fetchAndAggregateOne(ctx, client, compareDates(12), asc.SalesReportTypeSales)
 		done <- err
 	}()
 	for range 4 {
@@ -318,7 +352,7 @@ func TestFetchAndAggregateErrorClosesBlockedBodies(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, _, err := fetchAndAggregate(ctx, client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, compareDates(12), asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+	_, _, err := fetchAndAggregateOne(ctx, client, compareDates(12), asc.SalesReportTypeSales)
 	if err == nil || !strings.Contains(err.Error(), "parse report 2026-01-01:") {
 		t.Fatalf("expected earliest parse error, got %v", err)
 	}
@@ -342,7 +376,7 @@ func BenchmarkFetchAndAggregateHTTP(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, found, err := fetchAndAggregate(context.Background(), client, "V", insights.SalesScope{AppID: "123", AppSKU: "APP"}, dates, asc.SalesReportTypeSales, asc.SalesReportSubTypeSummary, asc.SalesReportFrequencyDaily)
+		_, found, err := fetchAndAggregateOne(context.Background(), client, dates, asc.SalesReportTypeSales)
 		if err != nil || found != 16 {
 			b.Fatalf("found=%d err=%v", found, err)
 		}
