@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -353,6 +354,7 @@ func BuildSigningPlan(opts SigningPlanOptions) (*SigningPlan, error) {
 }
 
 func buildSigningPlan(opts SigningPlanOptions) (*signingPlanBuild, error) {
+	defer beginSigningPlanRootScope()()
 	if strings.TrimSpace(opts.ProjectPath) == "" {
 		return nil, fmt.Errorf("--project is required")
 	}
@@ -4012,21 +4014,21 @@ func validateSigningXCConfigPath(project *structuredVersionProject, path string,
 	if !signingPathLexicallyContained(project, path) && !allowExternal {
 		return fmt.Errorf("xcconfig path %s is outside the project directory: %w", path, rootfs.ErrEscapesRoot)
 	}
-	root, err := rootfs.New(project.rootDir)
+	root, release, err := openSigningRoot(project.rootDir)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer release()
 	if err := root.AllowingInternalSymlinks().CheckContained(path); err == nil {
 		return nil
 	} else if !allowExternal {
 		return err
 	}
-	externalRoot, err := rootfs.New(filepath.Dir(path))
+	externalRoot, releaseExternal, err := openSigningRoot(filepath.Dir(path))
 	if err != nil {
 		return err
 	}
-	defer externalRoot.Close()
+	defer releaseExternal()
 	return externalRoot.CheckContained(filepath.Base(path))
 }
 
@@ -4048,12 +4050,80 @@ func readSigningRegularFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := rootfs.New(filepath.Dir(absolute))
+	root, release, err := openSigningRoot(filepath.Dir(absolute))
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer release()
 	return root.ReadFileLimited(filepath.Base(absolute), limit)
+}
+
+// signingPlanRoots lets one signing plan build reuse the Root selected for each
+// directory instead of reselecting it for every xcconfig read or stat. Every
+// rooted operation still reopens the selected directory without following
+// symlinks and verifies its pinned identity, so a replaced directory fails
+// closed rather than redirecting a read.
+var signingPlanRoots struct {
+	sync.Mutex
+	scopes   int
+	borrowed int
+	roots    map[string]rootfs.Root
+}
+
+func beginSigningPlanRootScope() func() {
+	signingPlanRoots.Lock()
+	signingPlanRoots.scopes++
+	signingPlanRoots.Unlock()
+	return func() {
+		signingPlanRoots.Lock()
+		defer signingPlanRoots.Unlock()
+		signingPlanRoots.scopes--
+		closeIdleSigningPlanRootsLocked()
+	}
+}
+
+func releaseSigningPlanRoot() {
+	signingPlanRoots.Lock()
+	defer signingPlanRoots.Unlock()
+	signingPlanRoots.borrowed--
+	closeIdleSigningPlanRootsLocked()
+}
+
+func closeIdleSigningPlanRootsLocked() {
+	if signingPlanRoots.scopes > 0 || signingPlanRoots.borrowed > 0 {
+		return
+	}
+	for _, root := range signingPlanRoots.roots {
+		_ = root.Close()
+	}
+	signingPlanRoots.roots = nil
+}
+
+func openSigningRoot(directory string) (rootfs.Root, func(), error) {
+	signingPlanRoots.Lock()
+	if signingPlanRoots.scopes == 0 {
+		signingPlanRoots.Unlock()
+		root, err := rootfs.New(directory)
+		if err != nil {
+			return rootfs.Root{}, nil, err
+		}
+		return root, func() { _ = root.Close() }, nil
+	}
+	defer signingPlanRoots.Unlock()
+	root, ok := signingPlanRoots.roots[directory]
+	if !ok {
+		var err error
+		root, err = rootfs.New(directory)
+		if err != nil {
+			return rootfs.Root{}, nil, err
+		}
+		if signingPlanRoots.roots == nil {
+			signingPlanRoots.roots = make(map[string]rootfs.Root)
+		}
+		signingPlanRoots.roots[directory] = root
+	}
+	signingPlanRoots.borrowed++
+	return root, releaseSigningPlanRoot, nil
 }
 
 // signingXCConfigReadFileFn keeps configuration reads behind the same rooted
@@ -4080,11 +4150,11 @@ func signingRegularFileInfo(path string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	root, err := rootfs.New(filepath.Dir(absolute))
+	root, release, err := openSigningRoot(filepath.Dir(absolute))
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer release()
 	if err := root.CheckCreateNewFile(filepath.Base(absolute)); err == nil {
 		return nil, os.ErrNotExist
 	} else if !errors.Is(err, os.ErrExist) {

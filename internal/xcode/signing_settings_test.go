@@ -8658,3 +8658,24 @@ func writeSigningTestEntitlements(t *testing.T, projectRoot, relative string) {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 }
+
+func TestSigningPlanRootStaysOpenWhileBorrowedAfterScopeEnds(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.xcconfig"), []byte("A = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endScope := beginSigningPlanRootScope()
+	root, release, err := openSigningRoot(dir)
+	if err != nil {
+		endScope()
+		t.Fatal(err)
+	}
+	endScope()
+	if _, err := root.ReadFileLimited("a.xcconfig", 64); err != nil {
+		t.Fatalf("borrowed root closed when its scope ended: %v", err)
+	}
+	release()
+	if _, err := root.ReadFileLimited("a.xcconfig", 64); err == nil {
+		t.Fatal("expected the cached root to close after its last borrower released it")
+	}
+}
