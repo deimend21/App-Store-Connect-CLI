@@ -29,6 +29,8 @@ type PreviewLayout struct {
 	checksum       string
 	existingID     string
 	sourceChecksum string
+	reference      bool
+	referenceID    string
 	Locale         string `json:"locale"`
 	DeviceType     string `json:"deviceType"`
 	FileName       string `json:"fileName"`

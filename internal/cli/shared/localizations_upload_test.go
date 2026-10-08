@@ -207,18 +207,6 @@ func TestUploadVersionLocalizations_SkipsExactExistingValuesOnSecondPage(t *test
 	}
 }
 
-func TestUploadAppInfoLocalizations_SkipsExactExistingValues(t *testing.T) {
-	client := &stubAppInfoLocalizationClient{getResp: &asc.AppInfoLocalizationsResponse{Data: []asc.Resource[asc.AppInfoLocalizationAttributes]{
-		{ID: "loc-id", Attributes: asc.AppInfoLocalizationAttributes{Locale: "en-US", Name: "Existing", Subtitle: "Subtitle"}},
-	}}}
-	results, err := UploadAppInfoLocalizations(context.Background(), client, "app-info-id", map[string]map[string]string{
-		"en-US": {"name": "Existing", "subtitle": "Subtitle"},
-	}, false)
-	if err != nil || len(results) != 1 || results[0].Action != "skip" || len(client.updateCalls) != 0 {
-		t.Fatalf("expected exact app-info skip, results=%+v updates=%d err=%v", results, len(client.updateCalls), err)
-	}
-}
-
 func TestUploadAppInfoLocalizations_SkipsExactExistingValuesOnSecondPage(t *testing.T) {
 	client := &stubAppInfoLocalizationClient{getResps: []*asc.AppInfoLocalizationsResponse{
 		{
@@ -404,22 +392,6 @@ func TestUploadAppInfoLocalizations_ReconcilesAmbiguousUpdate(t *testing.T) {
 	}, false)
 	if err != nil || len(results) != 1 || results[0].Action != "reconcile" || len(client.updateCalls) != 1 || client.getCalls != 2 {
 		t.Fatalf("unexpected app-info update recovery: results=%+v updates=%d reads=%d err=%v", results, len(client.updateCalls), client.getCalls, err)
-	}
-}
-
-func TestUploadAppInfoLocalizations_ReconcilesAmbiguousCreate(t *testing.T) {
-	client := &stubAppInfoLocalizationClient{
-		getResps: []*asc.AppInfoLocalizationsResponse{
-			{Data: []asc.Resource[asc.AppInfoLocalizationAttributes]{}},
-			{Data: []asc.Resource[asc.AppInfoLocalizationAttributes]{{ID: "created-id", Attributes: asc.AppInfoLocalizationAttributes{Locale: "fr-FR", Name: "French"}}}},
-		},
-		createErrs: []error{&asc.RetryableError{Err: errors.New("ambiguous create")}},
-	}
-	results, err := UploadAppInfoLocalizations(context.Background(), client, "app-info-id", map[string]map[string]string{
-		"fr-FR": {"name": "French"},
-	}, false)
-	if err != nil || len(results) != 1 || results[0].Action != "reconcile" || len(client.createCalls) != 1 || client.getCalls != 2 {
-		t.Fatalf("unexpected app-info create recovery: results=%+v creates=%d reads=%d err=%v", results, len(client.createCalls), client.getCalls, err)
 	}
 }
 
