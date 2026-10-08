@@ -210,44 +210,78 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 		return nil, fmt.Errorf("client is required")
 	}
 
-	appResp, err := client.GetApp(ctx, appID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch app: %w", err)
+	type appResult struct {
+		resp *asc.AppResponse
+		err  error
+	}
+	appDone := make(chan appResult, 1)
+	go func() {
+		resp, err := client.GetApp(ctx, appID)
+		appDone <- appResult{resp, err}
+	}()
+
+	groupFirstPage, groupErr := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
+	var groupResp *asc.BetaGroupsResponse
+	if groupErr == nil {
+		groupResp, groupErr = paginateBetaGroups(ctx, client, appID, groupFirstPage)
+	}
+	app := <-appDone
+	if app.err != nil {
+		return nil, fmt.Errorf("fetch app: %w", app.err)
 	}
 	appConfig := TestFlightAppConfig{
-		ID:       appResp.Data.ID,
-		Name:     appResp.Data.Attributes.Name,
-		BundleID: appResp.Data.Attributes.BundleID,
+		ID:       app.resp.Data.ID,
+		Name:     app.resp.Data.Attributes.Name,
+		BundleID: app.resp.Data.Attributes.BundleID,
 	}
-
-	groupFirstPage, err := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
-	if err != nil {
-		return nil, fmt.Errorf("fetch beta groups: %w", err)
-	}
-	groupResp, err := paginateBetaGroups(ctx, client, appID, groupFirstPage)
-	if err != nil {
-		return nil, fmt.Errorf("fetch beta groups: %w", err)
+	if groupErr != nil {
+		return nil, fmt.Errorf("fetch beta groups: %w", groupErr)
 	}
 	filteredGroups, err := filterBetaGroups(groupResp.Data, opts.groupFilter)
 	if err != nil {
 		return nil, err
 	}
 
+	// Builds tasks come before testers tasks so the lowest failing index keeps
+	// the serial error precedence while both phases share one bounded pool.
+	var tasks []func(context.Context) error
+	buildResponses := make([]*asc.BuildsResponse, len(filteredGroups))
+	testerResponses := make([]*asc.BetaTestersResponse, len(filteredGroups))
+	if opts.includeBuilds {
+		for i, group := range filteredGroups {
+			tasks = append(tasks, func(ctx context.Context) error {
+				firstPage, err := client.GetBetaGroupBuilds(ctx, group.ID, asc.WithBetaGroupBuildsLimit(200))
+				if err != nil {
+					return err
+				}
+				buildResponses[i], err = paginateBetaGroupBuilds(ctx, client, group.ID, firstPage)
+				return err
+			})
+		}
+	}
+	buildTaskCount := len(tasks)
+	if opts.includeTesters {
+		for i, group := range filteredGroups {
+			tasks = append(tasks, func(ctx context.Context) error {
+				firstPage, err := client.GetBetaGroupTesters(ctx, group.ID, asc.WithBetaGroupTestersLimit(200))
+				if err != nil {
+					return err
+				}
+				testerResponses[i], err = paginateBetaGroupTesters(ctx, client, group.ID, firstPage)
+				return err
+			})
+		}
+	}
+	failedTask, fetchErr := runTestFlightGroupFetches(ctx, tasks)
+	if fetchErr != nil && failedTask < buildTaskCount {
+		return nil, fmt.Errorf("fetch beta group builds: %w", fetchErr)
+	}
+
 	buildConfigs := make(map[string]*TestFlightBuildConfig)
 	groupBuilds := make(map[string][]string)
 	if opts.includeBuilds {
-		groupResponses, err := fetchTestFlightGroupPages(ctx, filteredGroups, func(ctx context.Context, groupID string) (*asc.BuildsResponse, error) {
-			firstPage, err := client.GetBetaGroupBuilds(ctx, groupID, asc.WithBetaGroupBuildsLimit(200))
-			if err != nil {
-				return nil, err
-			}
-			return paginateBetaGroupBuilds(ctx, client, groupID, firstPage)
-		})
-		if err != nil {
-			return nil, fmt.Errorf("fetch beta group builds: %w", err)
-		}
 		for i, group := range filteredGroups {
-			buildResp := groupResponses[i]
+			buildResp := buildResponses[i]
 			for _, build := range buildResp.Data {
 				groupBuilds[group.ID] = append(groupBuilds[group.ID], build.ID)
 				cfg := buildConfigs[build.ID]
@@ -268,21 +302,14 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 			return nil, err
 		}
 	}
+	if fetchErr != nil {
+		return nil, fmt.Errorf("fetch beta group testers: %w", fetchErr)
+	}
 
 	testerConfigs := make(map[string]*TestFlightTesterConfig)
 	if opts.includeTesters {
-		groupResponses, err := fetchTestFlightGroupPages(ctx, filteredGroups, func(ctx context.Context, groupID string) (*asc.BetaTestersResponse, error) {
-			firstPage, err := client.GetBetaGroupTesters(ctx, groupID, asc.WithBetaGroupTestersLimit(200))
-			if err != nil {
-				return nil, err
-			}
-			return paginateBetaGroupTesters(ctx, client, groupID, firstPage)
-		})
-		if err != nil {
-			return nil, fmt.Errorf("fetch beta group testers: %w", err)
-		}
 		for i, group := range filteredGroups {
-			testerResp := groupResponses[i]
+			testerResp := testerResponses[i]
 			for _, tester := range testerResp.Data {
 				cfg := testerConfigs[tester.ID]
 				if cfg == nil {
@@ -345,42 +372,41 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 	return config, nil
 }
 
-// fetchTestFlightGroupPages overlaps independent group reads in bounded waves.
-// Each group's cursor chain remains sequential. Indexed results preserve the
-// original group precedence and first-error order when the caller merges them.
-func fetchTestFlightGroupPages[T any](ctx context.Context, groups []asc.Resource[asc.BetaGroupAttributes], fetch func(context.Context, string) (T, error)) ([]T, error) {
-	const concurrency = 4
-	pages := make([]T, len(groups))
-	for start := 0; start < len(groups); start += concurrency {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		end := min(start+concurrency, len(groups))
-		waveCtx, cancel := context.WithCancel(ctx)
-		completions := make([]chan error, end-start)
-		var workers sync.WaitGroup
-		for i := start; i < end; i++ {
-			done := make(chan error, 1)
-			completions[i-start] = done
-			workers.Go(func() {
-				page, err := fetch(waveCtx, groups[i].ID)
-				pages[i] = page
-				done <- err
-			})
-		}
-		// Await in input order so a fast later error cannot replace an earlier
-		// group's error. Cancel outstanding peers once that error is known.
-		for _, done := range completions {
-			if err := <-done; err != nil {
-				cancel()
-				workers.Wait()
-				return nil, err
-			}
-		}
+const testFlightGroupFetchConcurrency = 4
+
+// runTestFlightGroupFetches runs tasks on a bounded worker pool and returns the
+// lowest-index error, so completion timing cannot change error precedence.
+func runTestFlightGroupFetches(ctx context.Context, tasks []func(context.Context) error) (int, error) {
+	workCtx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	defer func() {
 		cancel()
 		workers.Wait()
+	}()
+	results := make([]chan error, len(tasks))
+	jobs := make(chan int, len(tasks))
+	for i := range tasks {
+		results[i] = make(chan error, 1)
+		jobs <- i
 	}
-	return pages, nil
+	close(jobs)
+	for range min(testFlightGroupFetchConcurrency, len(tasks)) {
+		workers.Go(func() {
+			for i := range jobs {
+				if err := workCtx.Err(); err != nil {
+					results[i] <- err
+					continue
+				}
+				results[i] <- tasks[i](workCtx)
+			}
+		})
+	}
+	for i, done := range results {
+		if err := <-done; err != nil {
+			return i, err
+		}
+	}
+	return -1, nil
 }
 
 func paginateBetaGroups(ctx context.Context, client testFlightSyncClient, appID string, firstPage *asc.BetaGroupsResponse) (*asc.BetaGroupsResponse, error) {
