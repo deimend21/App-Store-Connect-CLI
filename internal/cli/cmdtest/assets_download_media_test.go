@@ -564,14 +564,21 @@ func TestVideoPreviewsDownload_ByLocalization_WritesFiles(t *testing.T) {
 			}
 			switch req.URL.Path {
 			case "/v1/appStoreVersionLocalizations/loc-1/appPreviewSets":
-				body := `{"data":[{"type":"appPreviewSets","id":"set-1","attributes":{"previewType":"IPHONE_65"}}]}`
+				body := `{"data":[{"type":"appPreviewSets","id":"set-1","attributes":{"previewType":"IPHONE_65"},"relationships":{"appPreviews":{"data":[{"type":"appPreviews","id":"prev-2"},{"type":"appPreviews","id":"prev-1"}]}}},{"type":"appPreviewSets","id":"set-2","attributes":{"previewType":"IPAD_PRO_3GEN_129"}}],"included":[{"type":"appPreviews","id":"prev-1","attributes":{"fileName":"a.mov","videoUrl":"https://example.com/a.mov"}},{"type":"appPreviews","id":"prev-2","attributes":{"fileName":"z.mov","videoUrl":"https://example.com/z.mov"}}]}`
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(body)),
 					Header:     http.Header{"Content-Type": []string{"application/json"}},
 				}, nil
-			case "/v1/appPreviewSets/set-1/appPreviews":
-				body := `{"data":[{"type":"appPreviews","id":"prev-1","attributes":{"fileName":"p.mov","fileSize":7,"mimeType":"video/quicktime","videoUrl":"https://example.com/p.mov"}}]}`
+			case "/v1/appPreviewSets/set-2/appPreviews":
+				body := `{"data":[{"type":"appPreviews","id":"prev-3","attributes":{"fileName":"a.mov","videoUrl":"https://example.com/a.mov"}},{"type":"appPreviews","id":"prev-4","attributes":{"fileName":"z.mov","videoUrl":"https://example.com/z.mov"}}]}`
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			case "/v1/appPreviewSets/set-2/relationships/appPreviews":
+				body := `{"data":[{"type":"appPreviews","id":"prev-4"},{"type":"appPreviews","id":"prev-3"}],"links":{}}`
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader(body)),
@@ -585,7 +592,7 @@ func TestVideoPreviewsDownload_ByLocalization_WritesFiles(t *testing.T) {
 			if req.Method != http.MethodGet {
 				t.Fatalf("expected GET, got %s", req.Method)
 			}
-			if req.URL.Path != "/p.mov" {
+			if req.URL.Path != "/a.mov" && req.URL.Path != "/z.mov" {
 				t.Fatalf("unexpected asset path: %s", req.URL.Path)
 			}
 			return &http.Response{
@@ -616,17 +623,25 @@ func TestVideoPreviewsDownload_ByLocalization_WritesFiles(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if !strings.Contains(stdout, `"downloaded":1`) || !strings.Contains(stdout, `"failed":0`) {
+	if !strings.Contains(stdout, `"downloaded":4`) || !strings.Contains(stdout, `"failed":0`) {
 		t.Fatalf("unexpected stdout: %q", stdout)
 	}
 
-	wantPath := filepath.Join(outDir, "IPHONE_65", "01_prev-1_p.mov")
-	data, err := os.ReadFile(wantPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if string(data) != "MOVDATA" {
-		t.Fatalf("unexpected file contents: %q", string(data))
+	// Position prefixes follow App Store order, not file names, for both
+	// included previews (set-1) and the per-set fallback (set-2).
+	for _, wantPath := range []string{
+		filepath.Join(outDir, "IPHONE_65", "01_prev-2_z.mov"),
+		filepath.Join(outDir, "IPHONE_65", "02_prev-1_a.mov"),
+		filepath.Join(outDir, "IPAD_PRO_3GEN_129", "01_prev-4_z.mov"),
+		filepath.Join(outDir, "IPAD_PRO_3GEN_129", "02_prev-3_a.mov"),
+	} {
+		data, err := os.ReadFile(wantPath)
+		if err != nil {
+			t.Fatalf("ReadFile() error: %v", err)
+		}
+		if string(data) != "MOVDATA" {
+			t.Fatalf("unexpected file contents: %q", string(data))
+		}
 	}
 }
 
@@ -654,8 +669,11 @@ func TestVideoPreviewsDownload_ByLocalization_PreservesFallbackDetailErrors(t *t
 			return
 		}
 		wantQuery := ""
-		if req.URL.Path == "/v1/appStoreVersionLocalizations/loc-1/appPreviewSets" {
+		switch req.URL.Path {
+		case "/v1/appStoreVersionLocalizations/loc-1/appPreviewSets":
 			wantQuery = "include=appPreviews&limit%5BappPreviews%5D=50"
+		case "/v1/appPreviewSets/set-1/relationships/appPreviews":
+			wantQuery = "limit=200"
 		}
 		if req.URL.RawQuery != wantQuery {
 			t.Errorf("query = %q, want %q", req.URL.RawQuery, wantQuery)
@@ -668,6 +686,8 @@ func TestVideoPreviewsDownload_ByLocalization_PreservesFallbackDetailErrors(t *t
 			writeJSONResponse(w, http.StatusOK, `{"data":[{"type":"appPreviewSets","id":"set-1","attributes":{"previewType":"IPHONE_65"}}],"links":{}}`)
 		case "/v1/appPreviewSets/set-1/appPreviews":
 			writeJSONResponse(w, http.StatusOK, `{"data":[{"type":"appPreviews","id":"auth","attributes":{"fileName":"a-auth.mov"}},{"type":"appPreviews","id":"empty","attributes":{"fileName":"b-empty.mov"}},{"type":"appPreviews","id":"good","attributes":{"fileName":"c-good.mov","videoUrl":"`+serverURL+`/media/good.mov"}}],"links":{}}`)
+		case "/v1/appPreviewSets/set-1/relationships/appPreviews":
+			writeJSONResponse(w, http.StatusOK, `{"data":[{"type":"appPreviews","id":"auth"},{"type":"appPreviews","id":"empty"},{"type":"appPreviews","id":"good"}],"links":{}}`)
 		case "/v1/appPreviews/auth":
 			writeJSONResponse(w, http.StatusUnauthorized, `{"errors":[{"status":"401","code":"NOT_AUTHORIZED","title":"Unauthorized","detail":"preview detail access denied\nforged-row"}]}`)
 		case "/v1/appPreviews/empty":
@@ -786,6 +806,7 @@ func TestVideoPreviewsDownload_ByLocalization_PreservesFallbackDetailErrors(t *t
 	wantRequests := strings.Join([]string{
 		"/v1/appStoreVersionLocalizations/loc-1/appPreviewSets",
 		"/v1/appPreviewSets/set-1/appPreviews",
+		"/v1/appPreviewSets/set-1/relationships/appPreviews",
 		"/v1/appPreviews/auth",
 		"/v1/appPreviews/empty",
 		"/media/good.mov",

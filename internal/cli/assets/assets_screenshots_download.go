@@ -203,7 +203,7 @@ Examples:
 						if err != nil {
 							return fmt.Errorf("screenshots download: failed to fetch screenshot order for set %s: %w", set.ID, err)
 						}
-						shots = orderScreenshotsForDownload(shotsResp.Data, orderedIDs)
+						shots = orderMediaForDownload(shotsResp.Data, orderedIDs, func(a asc.AppScreenshotAttributes) string { return a.FileName })
 					}
 
 					for idx, shot := range shots {
@@ -338,8 +338,8 @@ func resolveScreenshotDownloadURL(ctx context.Context, client *asc.Client, shot 
 	return resolveImageAssetDownloadURL(imageAsset, shot.Attributes.FileName)
 }
 
-func orderScreenshotsForDownload(shots []asc.Resource[asc.AppScreenshotAttributes], orderedIDs []string) []asc.Resource[asc.AppScreenshotAttributes] {
-	ordered := append([]asc.Resource[asc.AppScreenshotAttributes](nil), shots...)
+func orderMediaForDownload[T any](items []asc.Resource[T], orderedIDs []string, fileName func(T) string) []asc.Resource[T] {
+	ordered := append([]asc.Resource[T](nil), items...)
 	orderByID := make(map[string]int, len(orderedIDs))
 	for idx, id := range orderedIDs {
 		id = strings.TrimSpace(id)
@@ -364,8 +364,8 @@ func orderScreenshotsForDownload(shots []asc.Resource[asc.AppScreenshotAttribute
 			return false
 		}
 
-		fi := strings.ToLower(strings.TrimSpace(ordered[i].Attributes.FileName))
-		fj := strings.ToLower(strings.TrimSpace(ordered[j].Attributes.FileName))
+		fi := strings.ToLower(strings.TrimSpace(fileName(ordered[i].Attributes)))
+		fj := strings.ToLower(strings.TrimSpace(fileName(ordered[j].Attributes)))
 		if fi == fj {
 			return ordered[i].ID < ordered[j].ID
 		}
