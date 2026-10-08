@@ -168,11 +168,28 @@ func TestReleaseWorkflowKeepsHistoricalGuardrailsInline(t *testing.T) {
 		`make check-docs`,
 		`make check-wall-of-apps`,
 		`make lint`,
-		`ASC_BYPASS_KEYCHAIN=1 make test`,
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("release workflow missing historical guardrail %q", want)
 		}
+	}
+	shardScript := "scripts/go_test_shard.py"
+	guard := "if [ -f " + shardScript + " ]; then\n"
+	fallback := "elif [ \"$UNSHARDED_FALLBACK\" = \"true\" ]; then\n"
+	guardStart := strings.Index(workflow, guard)
+	fallbackStart := strings.Index(workflow, fallback)
+	if guardStart == -1 || fallbackStart < guardStart {
+		t.Fatal("release test shards must guard the shard script and fall back for older tags")
+	}
+	if !strings.Contains(workflow[fallbackStart:], `ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" go test -count=1 -v ./...`) {
+		t.Fatal("historical release tags must still run the full Go suite")
+	}
+	if !strings.Contains(workflow, "UNSHARDED_FALLBACK: ${{ matrix.name == 'packages' }}") {
+		t.Fatal("exactly one release test shard must run the historical full suite")
+	}
+	outside := workflow[:guardStart] + workflow[fallbackStart:]
+	if strings.Count(workflow, "python3 "+shardScript) != 1 || strings.Contains(outside, "python3 "+shardScript) {
+		t.Fatal("release workflow may run the shard script only behind its existence guard")
 	}
 	if strings.Contains(workflow, "make release-guardrails") {
 		t.Fatal("release workflow cannot call a target absent from historical tags")
@@ -868,7 +885,7 @@ func validateReleaseFanout(data []byte) error {
 		return fmt.Errorf("missing frozen source/reuse outputs")
 	}
 	freshCondition := "needs.prepare.outputs.published != 'true' && needs.resolve.outputs.reused != 'true'"
-	for _, name := range []string{"quality", "macos", "portable"} {
+	for _, name := range []string{"quality", "quality-tests", "macos", "portable"} {
 		job, ok := workflow.Jobs[name]
 		if !ok || job.If != freshCondition {
 			return fmt.Errorf("%s must run only for fresh candidates", name)
@@ -912,10 +929,10 @@ func validateReleaseFanout(data []byte) error {
 	if !tools || !join {
 		return fmt.Errorf("assembly must use current workflow tools and validate exact-source canonical assets")
 	}
-	if fmt.Sprint(build.Needs) != "[prepare resolve quality macos portable]" {
+	if fmt.Sprint(build.Needs) != "[prepare resolve quality quality-tests macos portable]" {
 		return fmt.Errorf("candidate join missing a fresh gate")
 	}
-	expected := "always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))"
+	expected := "always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.quality-tests.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))"
 	if build.If != expected {
 		return fmt.Errorf("candidate join permits failed gates or blocks qualified reuse")
 	}
@@ -932,6 +949,8 @@ func TestReleaseWorkflowFreshFanoutGates(t *testing.T) {
 	}
 	for _, mutation := range [][2]string{
 		{"needs.quality.result == 'success'", "needs.quality.result != 'cancelled'"},
+		{"needs.quality-tests.result == 'success'", "needs.quality-tests.result != 'cancelled'"},
+		{"      - quality-tests\n", ""},
 		{"needs.macos.result == 'success'", "needs.macos.result != 'cancelled'"},
 		{"needs.portable.result == 'success'", "needs.portable.result != 'cancelled'"},
 		{"cache: false", "cache: true"},

@@ -28,6 +28,7 @@ endif
 GOMOD := go.mod
 GOBIN := $(shell $(GO) env GOPATH)/bin
 GO_TOOLCHAIN_VERSION := $(shell $(GO) env GOVERSION)
+GOFMT := $(shell $(GO) env GOROOT)/bin/gofmt
 # Cold hosted runners can require more than ten minutes for the full-module lint.
 GOLANGCI_LINT_TIMEOUT ?= 15m
 INSTALL_PREFIX ?= /usr/local/bin
@@ -149,31 +150,39 @@ test-integration:
 lint:
 	@echo "$(BLUE)Linting code...$(NC)"
 	@if command -v golangci-lint >/dev/null 2>&1; then \
+		case "$$(golangci-lint version 2>&1)" in \
+			*"has version $(GOLANGCI_LINT_VERSION:v%=%) built with $(GO_TOOLCHAIN_VERSION) "*) ;; \
+			*) echo "$(YELLOW)golangci-lint does not match $(GOLANGCI_LINT_VERSION) built with $(GO_TOOLCHAIN_VERSION): $$(golangci-lint version 2>&1)$(NC)"; \
+			   echo "$(YELLOW)Run: make tools$(NC)"; exit 1;; \
+		esac; \
 		GOLANGCI_LINT_CACHE="$(CURDIR)/.golangci-cache" golangci-lint run --timeout=$(GOLANGCI_LINT_TIMEOUT) ./...; \
 	else \
 		echo "$(YELLOW)golangci-lint not found; falling back to 'go vet ./...'.$(NC)"; \
-		echo "$(YELLOW)Install with: make tools (or: GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)$(NC)"; \
+		echo "$(YELLOW)Install with: make tools$(NC)"; \
 		$(GO) vet ./...; \
 	fi
 
 # Format code
 .PHONY: format
-format:
+format: check-gofumpt
 	@echo "$(BLUE)Formatting code...$(NC)"
-	@if ! command -v gofumpt >/dev/null 2>&1; then \
-		echo "$(YELLOW)gofumpt not found; install with: make tools (or: $(GO) install mvdan.cc/gofumpt@latest)$(NC)"; \
-		exit 1; \
-	fi
 	gofumpt -w .
 
-.PHONY: format-check
-format-check:
-	@echo "$(BLUE)Checking formatting (no writes)...$(NC)"
+.PHONY: check-gofumpt
+check-gofumpt:
 	@if ! command -v gofumpt >/dev/null 2>&1; then \
-		echo "$(YELLOW)gofumpt not found; install with: make tools (or: $(GO) install mvdan.cc/gofumpt@latest)$(NC)"; \
+		echo "$(YELLOW)gofumpt not found; install with: make tools$(NC)"; \
 		exit 1; \
 	fi
-	@unformatted_gofmt="$$(gofmt -l .)"; \
+	@if [ "$$(gofumpt --version)" != "$(GOFUMPT_VERSION) ($(GO_TOOLCHAIN_VERSION))" ]; then \
+		echo "$(YELLOW)gofumpt $$(gofumpt --version) does not match $(GOFUMPT_VERSION) ($(GO_TOOLCHAIN_VERSION)); run: make tools$(NC)"; \
+		exit 1; \
+	fi
+
+.PHONY: format-check
+format-check: check-gofumpt
+	@echo "$(BLUE)Checking formatting (no writes)...$(NC)"
+	@unformatted_gofmt="$$($(GOFMT) -l .)"; \
 	unformatted_gofumpt="$$(gofumpt -l .)"; \
 	if [ -n "$$unformatted_gofmt" ] || [ -n "$$unformatted_gofumpt" ]; then \
 		echo "Formatting issues detected."; \
@@ -192,7 +201,7 @@ format-check:
 .PHONY: tools
 tools:
 	@echo "$(BLUE)Installing dev tools...$(NC)"
-	$(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
+	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
 	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	@echo "$(GREEN)✓ Tools installed$(NC)"
 	@echo "$(YELLOW)Make sure '$(GOBIN)' is on your PATH$(NC)"
