@@ -13,6 +13,21 @@ import (
 func withTTYStub(t *testing.T, stdoutTTY, stderrTTY bool) {
 	t.Helper()
 
+	// go test -json gives the test binary one fd for stdout and stderr, which
+	// an fd-keyed stub cannot tell apart.
+	if os.Stdout.Fd() == os.Stderr.Fd() {
+		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatalf("open %s: %v", os.DevNull, err)
+		}
+		prevStderr := os.Stderr
+		os.Stderr = devNull
+		t.Cleanup(func() {
+			os.Stderr = prevStderr
+			_ = devNull.Close()
+		})
+	}
+
 	prevIsTerminal := isTerminal
 	stdoutFD := int(os.Stdout.Fd())
 	stderrFD := int(os.Stderr.Fd())
