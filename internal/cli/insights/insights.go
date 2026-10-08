@@ -973,8 +973,6 @@ func weekWindowProcessingDates(windows ...reportWeekWindow) []string {
 	return dates
 }
 
-// fetchAnalyticsReportInstances returns every instance page for a report so
-// weekly counts are not truncated when daily and weekly instances share pages.
 // fetchAnalyticsReportsInstances fetches each report's instances through a
 // bounded pool. The first error in report order wins, matching a serial walk.
 func fetchAnalyticsReportsInstances(
@@ -1029,6 +1027,8 @@ func fetchAnalyticsReportsInstances(
 	return instances, nil
 }
 
+// fetchAnalyticsReportInstances returns every instance page for a report so
+// weekly counts are not truncated when daily and weekly instances share pages.
 func fetchAnalyticsReportInstances(
 	ctx context.Context,
 	client *asc.Client,
