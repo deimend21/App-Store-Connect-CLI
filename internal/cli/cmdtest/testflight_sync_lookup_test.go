@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -22,10 +23,16 @@ func TestTestFlightConfigExportResolvesAppByBundleID(t *testing.T) {
 		http.DefaultTransport = originalTransport
 	})
 
-	callCount := 0
+	var callCount atomic.Int32
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		callCount++
-		switch callCount {
+		// The app and beta group reads run concurrently, so match them by path.
+		count := callCount.Add(1)
+		if (count == 2 || count == 3) && req.URL.Path == "/v1/apps/app-sync/betaGroups" {
+			count = 3
+		} else if count == 3 {
+			count = 2
+		}
+		switch count {
 		case 1:
 			if req.Method != http.MethodGet {
 				t.Fatalf("expected GET, got %s", req.Method)
@@ -76,7 +83,7 @@ func TestTestFlightConfigExportResolvesAppByBundleID(t *testing.T) {
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 			}, nil
 		default:
-			t.Fatalf("unexpected request count %d", callCount)
+			t.Fatalf("unexpected request count %d", count)
 			return nil, nil
 		}
 	})
