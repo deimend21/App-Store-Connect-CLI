@@ -237,6 +237,16 @@ jobs:
           artifact_id=$(gh api --paginate "repos/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" | \
             jq -sr --arg name "$artifact_name" '[.[].artifacts[] | select(.name == $name and .expired == false)][0].id // empty')
           if [ -n "$artifact_id" ]; then
+            artifact_dir="${RUNNER_TEMP}/same-run-candidate-${artifact_id}"
+            mkdir -p "$artifact_dir"
+            gh api "repos/${GH_REPO}/actions/artifacts/${artifact_id}/zip" > "$artifact_dir/artifact.zip"
+            python3 -m zipfile -e "$artifact_dir/artifact.zip" "$artifact_dir"
+            archive="${artifact_dir}/candidate-release-${VERSION}.tar"
+            provenance="${artifact_dir}/candidate-release-${VERSION}.commit"
+            if [ ! -f "$archive" ] || [ ! -f "$provenance" ] || ! test "$(cat "$provenance")" = "$release_commit"; then
+              echo "::error::Retained candidate artifact does not match release source ${release_commit}" >&2
+              exit 1
+            fi
             echo "Reusing immutable build artifact ${artifact_name}."
             echo "reused=true" >> "$GITHUB_OUTPUT"
             echo "cross_run=false" >> "$GITHUB_OUTPUT"

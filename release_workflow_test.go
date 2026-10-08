@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -1122,6 +1123,97 @@ cat "$GH_STUB_JSON"
 			}
 			if string(got) != fixture.want {
 				t.Fatalf("resolved incorrect lane attempts: want %q got %q", fixture.want, got)
+			}
+		})
+	}
+}
+
+func TestReleaseWorkflowSameRunCandidateProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release artifact resolver runs in a Unix shell")
+	}
+	for _, tool := range []string{"bash", "jq", "python3"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s is required to execute the release resolver: %v", tool, err)
+		}
+	}
+	script := releaseWorkflowStepRun(t, "resolve", "Check for existing immutable build artifact")
+	sha := strings.Repeat("a", 40)
+	for _, fixture := range []struct {
+		name, commit, failure string
+		missingTar, corrupt   bool
+		downloadFailure       bool
+	}{
+		{name: "same source", commit: sha},
+		{name: "moved tag", commit: strings.Repeat("b", 40), failure: "does not match release source"},
+		{name: "missing provenance", failure: "does not match release source"},
+		{name: "missing archive", commit: sha, missingTar: true, failure: "does not match release source"},
+		{name: "damaged ZIP", corrupt: true, failure: "BadZipFile"},
+		{name: "download fails", downloadFailure: true, failure: "download failed"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			dir := t.TempDir()
+			zipPath, outputPath := filepath.Join(dir, "fixture.zip"), filepath.Join(dir, "output")
+			archive, err := os.Create(zipPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writer := zip.NewWriter(archive)
+			entries := map[string]string{}
+			if !fixture.missingTar {
+				entries["candidate-release-1.2.3.tar"] = "retained candidate"
+			}
+			if fixture.commit != "" {
+				entries["candidate-release-1.2.3.commit"] = fixture.commit + "\n"
+			}
+			for name, contents := range entries {
+				entry, err := writer.Create(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := entry.Write([]byte(contents)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := archive.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if fixture.corrupt {
+				if err := os.WriteFile(zipPath, []byte("damaged ZIP"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stub := `#!/bin/sh
+case "$*" in
+ "api --paginate repos/test/repo/actions/runs/123/artifacts?per_page=100")
+  printf '%s\n' '{"artifacts":[{"id":7,"name":"candidate-release-1.2.3","expired":false}]}' ;;
+ "api repos/test/repo/actions/artifacts/7/zip")
+  if [ "$DOWNLOAD_FAILURE" = true ]; then echo 'download failed' >&2; exit 7; fi
+  cat "$GH_STUB_ZIP" ;;
+ *) echo "unexpected artifact API request" >&2; exit 8 ;;
+esac
+`
+			for name, contents := range map[string]string{"gh": stub, "git": "#!/bin/sh\nprintf '%s\\n' " + sha + "\n"} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := exec.Command("bash", "-e", "-o", "pipefail", "-c", script)
+			command.Dir = dir
+			command.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "GH_STUB_ZIP="+zipPath, "RUNNER_TEMP="+dir, "GITHUB_OUTPUT="+outputPath, "GITHUB_RUN_ID=123", "GH_REPO=test/repo", "VERSION=1.2.3", fmt.Sprintf("DOWNLOAD_FAILURE=%t", fixture.downloadFailure))
+			output, err := command.CombinedOutput()
+			got, _ := os.ReadFile(outputPath)
+			if fixture.failure != "" {
+				if err == nil || !strings.Contains(string(output), fixture.failure) || strings.Contains(string(got), "reused=true") {
+					t.Fatalf("invalid candidate must fail before reuse: err=%v output=%s outputs=%q", err, output, got)
+				}
+				return
+			}
+			if err != nil || string(got) != "reused=true\ncross_run=false\n" {
+				t.Fatalf("same-source candidate must remain reusable: err=%v output=%s outputs=%q", err, output, got)
 			}
 		})
 	}

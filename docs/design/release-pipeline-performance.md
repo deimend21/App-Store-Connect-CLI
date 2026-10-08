@@ -23,6 +23,8 @@ Use the native macOS release executable for notarization instead of compiling an
 
 Partial reruns find the latest unexpired artifact for each platform within the same workflow run, so successful work from an earlier attempt remains usable. Qualified candidate reuse, already-published repair, and publication/distribution checks remain. Historical releases build the selected tag while assembly tools come from the workflow SHA.
 
+Same-run candidate reuse also downloads the retained artifact and checks its commit sidecar against the selected release source before skipping work. The final integration review reproduced reuse of an old candidate after its tag moved between attempts. Missing, damaged, or mismatched candidates now fail closed; rebuilding under the existing immutable artifact name would conflict. `TestReleaseWorkflowSameRunCandidateProvenance` runs the actual resolver with matching and moved source commits, missing files, damaged ZIP data, and failed downloads. The five invalid cases failed before this check was added; matching-source reruns remain reusable.
+
 This follows the independent platform jobs and artifact join used by [GitHub CLI's release workflow](https://github.com/cli/cli/blob/996be976cad960a726aabb94be67dfc7e31e317b/.github/workflows/deployment.yml), while preserving ASC's clean-build and notarization requirements.
 
 ## Verification
