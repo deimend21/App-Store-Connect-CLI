@@ -48,7 +48,8 @@ GOVULNCHECK_VERSION ?= v1.6.0
 TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN ASC_SIGNING_RUN_LIVE_TEST ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST
 TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1
 
-# $(call run_isolated_tests,<go test arguments>)
+# $(call run_isolated_tests,<go test arguments>[,<test command>])
+# The test command defaults to `go test`.
 # The EXIT trap removes the directory however the run ends, including Ctrl-C.
 define run_isolated_tests
 	@config_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/asc-test-config.XXXXXX")" || exit 1; \
@@ -56,8 +57,8 @@ define run_isolated_tests
 	trap 'exit 130' INT; \
 	trap 'exit 143' TERM; \
 	chmod 500 "$$config_dir"; \
-	echo "ASC_CONFIG_PATH=$$config_dir/config.json $(GO) test $(1)"; \
-	$(TEST_ENV) ASC_CONFIG_PATH="$$config_dir/config.json" $(GO) test $(1); \
+	echo "ASC_CONFIG_PATH=$$config_dir/config.json $(or $(2),$(GO) test) $(1)"; \
+	$(TEST_ENV) ASC_CONFIG_PATH="$$config_dir/config.json" $(or $(2),$(GO) test) $(1); \
 	status=$$?; \
 	if [ -n "$$(ls -A "$$config_dir")" ]; then \
 		echo "error: tests wrote to the shared test config directory $$config_dir; set ASC_CONFIG_PATH in the test instead" >&2; \
@@ -111,17 +112,22 @@ build-debug:
 
 # Per-run config isolation and high-volume filesystem logs make test-result
 # caching costly. Disable result caching while retaining Go's compile cache.
+# The slowest packages run as concurrent test shards beside the rest of ./...;
+# TEST_JOBS sets the CPU budget (default: GOMAXPROCS, else the CPU count).
+TEST_JOBS ?=
+LOCAL_TEST = GO="$(GO)" python3 scripts/go_test_shard.py local --split ./internal/cli/cmdtest --split ./internal/cli/web $(if $(TEST_JOBS),--jobs $(TEST_JOBS)) --
+
 # Run tests
 .PHONY: test
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
-	$(call run_isolated_tests,-count=1 -v ./...)
+	$(call run_isolated_tests,-count=1 -v,$(LOCAL_TEST))
 
 # Run the short test suite (used by the pre-commit hook)
 .PHONY: test-short
 test-short:
 	@echo "$(BLUE)Running short tests...$(NC)"
-	$(call run_isolated_tests,-count=1 -short ./...)
+	$(call run_isolated_tests,-count=1 -short,$(LOCAL_TEST))
 
 # Run tests with parallel package compilation
 # Defaults to GOMAXPROCS; set PARALLEL to override (e.g. PARALLEL=4)
@@ -338,8 +344,8 @@ help:
 	@echo "  build          Build the binary"
 	@echo "  build-all      Build release binaries for supported platforms"
 	@echo "  build-debug    Build with debug symbols"
-	@echo "  test           Run tests"
-	@echo "  test-short     Run the short test suite"
+	@echo "  test           Run tests (TEST_JOBS=<n> sets the CPU budget)"
+	@echo "  test-short     Run the short test suite (TEST_JOBS=<n> sets the CPU budget)"
 	@echo "  test-parallel  Run tests with optional package parallelism (PARALLEL=<n>)"
 	@echo "  test-coverage  Run tests with coverage"
 	@echo "  test-integration  Run opt-in integration tests"
