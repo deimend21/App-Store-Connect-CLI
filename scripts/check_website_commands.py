@@ -8,6 +8,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -208,21 +209,26 @@ def build_command_index(binary_path: Path) -> dict[tuple[str, ...], CommandSpec]
             subcommands=root_spec.subcommands,
         )
     }
-    queue = [()]
+    level: list[tuple[str, ...]] = [()]
 
-    while queue:
-        path = queue.pop(0)
-        for subcommand in sorted(index[path].subcommands):
-            child_path = (*path, subcommand)
-            child_help = command_help(binary_path, child_path)
-            child_spec = parse_help_text(child_help, is_root=False, path=child_path)
-            index[child_path] = CommandSpec(
-                path=child_path,
-                usage=child_spec.usage,
-                flags=child_spec.flags,
-                subcommands=child_spec.subcommands,
-            )
-            queue.append(child_path)
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        while level:
+            children = [
+                (*path, subcommand) for path in level for subcommand in sorted(index[path].subcommands)
+            ]
+            # Warm the help cache concurrently; parsing stays sequential so the
+            # index order and the first reported failure match a serial walk.
+            list(pool.map(lambda child_path: help_process(binary_path, child_path), children))
+            for child_path in children:
+                child_help = command_help(binary_path, child_path)
+                child_spec = parse_help_text(child_help, is_root=False, path=child_path)
+                index[child_path] = CommandSpec(
+                    path=child_path,
+                    usage=child_spec.usage,
+                    flags=child_spec.flags,
+                    subcommands=child_spec.subcommands,
+                )
+            level = children
 
     return index
 

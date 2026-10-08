@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -84,6 +85,7 @@ type ApplyAction struct {
 	AlreadyExists       bool              `json:"alreadyExists,omitempty"`
 	IfExists            string            `json:"ifExists,omitempty"`
 	reconciledDuplicate bool
+	convertedFromCreate bool
 }
 
 // PushPlanResult is the push dry-run output artifact.
@@ -126,6 +128,7 @@ type scopeCallCounts struct {
 	create int
 	update int
 	delete int
+	list   int
 }
 
 type localMetadataBundle struct {
@@ -210,7 +213,9 @@ Notes:
     an existing directory manages every locale in that scope.
   - --dir must contain at least one metadata .json file or selected store asset; an empty tree is rejected.
   - applying an explicit null field clear requires --confirm.
-  - omitted fields are treated as no-op; they do not imply deletion.`,
+  - omitted fields are treated as no-op; they do not imply deletion.
+  - creating an app-info locale makes App Store Connect create an empty version
+    localization; a version create planned for that locale is applied as an update.`,
 			cfg.verbTitle,
 			cfg.name,
 			cfg.name,
@@ -987,13 +992,56 @@ func applyMetadataPlan(
 		applyErrors = append(applyErrors, err)
 	}
 
+	createdLocales := appInfoCreatedVersionLocales(appInfoActions, localVersion, remoteVersionItems)
+	if len(createdLocales) > 0 {
+		refreshed, err := fetchVersionLocalizations(ctx, client, versionID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s: warning: refresh version localizations after app-info creates: %v\n", ifExists.prefix, err)
+		}
+		converted := make(map[string]struct{}, len(createdLocales))
+		for _, item := range refreshed {
+			locale := strings.TrimSpace(item.Attributes.Locale)
+			if _, ok := createdLocales[locale]; ok {
+				remoteVersionItems = append(slices.Clip(remoteVersionItems), item)
+				converted[locale] = struct{}{}
+			}
+		}
+		createdLocales = converted
+	}
+
 	versionActions, err := applyVersionChanges(ctx, client, versionID, version, localVersion, remoteVersionItems, allowDeletes, ifExists)
+	for i := range versionActions {
+		_, versionActions[i].convertedFromCreate = createdLocales[versionActions[i].Locale]
+	}
 	actions = append(actions, versionActions...)
 	if err != nil {
 		applyErrors = append(applyErrors, err)
 	}
 
 	return actions, errors.Join(applyErrors...)
+}
+
+// appInfoCreatedVersionLocales returns planned version creates whose locale
+// this run created in app-info. App Store Connect creates an empty version
+// localization alongside, so those creates are applied as updates.
+func appInfoCreatedVersionLocales(
+	actions []ApplyAction,
+	localVersion map[string]versionLocalPatch,
+	remoteVersionItems []asc.Resource[asc.AppStoreVersionLocalizationAttributes],
+) map[string]struct{} {
+	plannedVersionLocales := make(map[string]struct{}, len(remoteVersionItems))
+	for _, item := range remoteVersionItems {
+		plannedVersionLocales[strings.TrimSpace(item.Attributes.Locale)] = struct{}{}
+	}
+	createdLocales := make(map[string]struct{})
+	for _, action := range actions {
+		_, versionLocal := localVersion[action.Locale]
+		_, versionRemote := plannedVersionLocales[action.Locale]
+		if action.Scope == appInfoDirName && action.Status == metadataActionStatusSucceeded && (action.Action == "create" || action.Action == "reconcile") && !action.AlreadyExists && !action.reconciledDuplicate && versionLocal && !versionRemote {
+			createdLocales[action.Locale] = struct{}{}
+		}
+	}
+	return createdLocales
 }
 
 func applyAppInfoChanges(
@@ -2136,6 +2184,13 @@ func buildPlanKey(scope, version, locale, field string) string {
 func buildAPICallSummary(appInfoCounts, versionCounts scopeCallCounts) []PlanAPICall {
 	summary := make([]PlanAPICall, 0, 6)
 	appendCalls := func(scope string, counts scopeCallCounts) {
+		if counts.list > 0 {
+			summary = append(summary, PlanAPICall{
+				Operation: "list_localizations",
+				Scope:     scope,
+				Count:     counts.list,
+			})
+		}
 		if counts.create > 0 {
 			summary = append(summary, PlanAPICall{
 				Operation: "create_localization",
