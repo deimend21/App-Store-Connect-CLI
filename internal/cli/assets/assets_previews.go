@@ -51,29 +51,17 @@ Examples:
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			setsResp, err := client.GetAppPreviewSets(requestCtx, locID)
+			setsResp, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
 			cancel()
 			if err != nil {
 				return fmt.Errorf("video-previews list: failed to fetch sets: %w", err)
 			}
 
-			result := asc.AppPreviewListResult{
-				VersionLocalizationID: locID,
-				Sets:                  make([]asc.AppPreviewSetWithPreviews, 0, len(setsResp.Data)),
+			sets, err := client.AppPreviewSetsWithPreviews(ctx, setsResp, shared.ContextWithTimeout)
+			if err != nil {
+				return fmt.Errorf("video-previews list: %w", err)
 			}
-
-			for _, set := range setsResp.Data {
-				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				previews, err := client.GetAppPreviews(requestCtx, set.ID)
-				cancel()
-				if err != nil {
-					return fmt.Errorf("video-previews list: failed to fetch previews for set %s: %w", set.ID, err)
-				}
-				result.Sets = append(result.Sets, asc.AppPreviewSetWithPreviews{
-					Set:      set,
-					Previews: previews.Data,
-				})
-			}
+			result := asc.AppPreviewListResult{VersionLocalizationID: locID, Sets: sets}
 
 			return shared.PrintOutput(&result, *output.Output, *output.Pretty)
 		},
@@ -345,11 +333,12 @@ Examples:
 				})
 			} else {
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				setsResp, err := client.GetAppPreviewSets(requestCtx, locID)
+				setsResp, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
 				cancel()
 				if err != nil {
 					return fmt.Errorf("video-previews download: failed to fetch sets: %w", err)
 				}
+				includedPreviews := asc.IncludedAppPreviews(setsResp)
 
 				sets := make([]asc.Resource[asc.AppPreviewSetAttributes], 0, len(setsResp.Data))
 				sets = append(sets, setsResp.Data...)
@@ -365,15 +354,16 @@ Examples:
 				for _, set := range sets {
 					previewType := strings.TrimSpace(set.Attributes.PreviewType)
 
-					requestCtx, cancel := shared.ContextWithTimeout(ctx)
-					previewsResp, err := client.GetAppPreviews(requestCtx, set.ID)
-					cancel()
-					if err != nil {
-						return fmt.Errorf("video-previews download: failed to fetch previews for set %s: %w", set.ID, err)
+					previews, ok := includedPreviews[set.ID]
+					if !ok {
+						requestCtx, cancel := shared.ContextWithTimeout(ctx)
+						previewsResp, err := client.GetAppPreviews(requestCtx, set.ID)
+						cancel()
+						if err != nil {
+							return fmt.Errorf("video-previews download: failed to fetch previews for set %s: %w", set.ID, err)
+						}
+						previews = previewsResp.Data
 					}
-
-					previews := make([]asc.Resource[asc.AppPreviewAttributes], 0, len(previewsResp.Data))
-					previews = append(previews, previewsResp.Data...)
 					sort.Slice(previews, func(i, j int) bool {
 						fi := strings.ToLower(strings.TrimSpace(previews[i].Attributes.FileName))
 						fj := strings.ToLower(strings.TrimSpace(previews[j].Attributes.FileName))
