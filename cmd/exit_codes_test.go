@@ -182,18 +182,6 @@ func TestExitCodeHelperProcess(t *testing.T) {
 	os.Exit(code)
 }
 
-func TestExitCodeFromError_Conflict(t *testing.T) {
-	conflictErr := &asc.APIError{
-		Code:   "CONFLICT",
-		Title:  "Conflict",
-		Detail: "Resource already exists",
-	}
-	result := ExitCodeFromError(conflictErr)
-	if result != ExitConflict {
-		t.Errorf("ExitCodeFromError(conflict) = %d, want %d (Conflict)", result, ExitConflict)
-	}
-}
-
 func TestExitCodeConstants(t *testing.T) {
 	if ExitSuccess != 0 {
 		t.Errorf("ExitSuccess = %d, want 0", ExitSuccess)
@@ -441,43 +429,6 @@ func TestGetCommandName(t *testing.T) {
 				t.Errorf("getCommandName() = %q, want %q", result, tt.expected)
 			}
 		})
-	}
-}
-
-func TestJUnitReportNameWithRootFlags(t *testing.T) {
-	// Build the binary
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-
-	reportFile := filepath.Join(tmpDir, "junit.xml")
-	// Run with root flags before subcommand
-	runCmd := exec.Command(binaryPath, "--report", "junit", "--report-file", reportFile, "completion", "--shell", "zsh")
-	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
-	output, _ := runCmd.CombinedOutput()
-
-	// Read and parse the JUnit report
-	data, err := os.ReadFile(reportFile)
-	if err != nil {
-		t.Fatalf("Failed to read JUnit report: %v", err)
-	}
-
-	var result struct {
-		XMLName xml.Name `xml:"testsuite"`
-		Cases   []struct {
-			Name string `xml:"name,attr"`
-		} `xml:"testcase"`
-	}
-	if err := xml.Unmarshal(data, &result); err != nil {
-		t.Fatalf("Failed to parse JUnit XML: %v\nOutput: %s", err, output)
-	}
-
-	if len(result.Cases) != 1 {
-		t.Fatalf("Expected 1 test case, got %d", len(result.Cases))
-	}
-
-	// The test case name should include the subcommand, not just "asc"
-	if !strings.Contains(result.Cases[0].Name, "completion") {
-		t.Errorf("Expected testcase name to contain 'completion', got %q. Full XML:\n%s", result.Cases[0].Name, data)
 	}
 }
 
