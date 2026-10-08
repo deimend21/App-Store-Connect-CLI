@@ -5,7 +5,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -236,6 +238,11 @@ returned as data[].id by:
   asc localizations list --version "VERSION_ID" --output json --locale "en-US"
 It is not the locale code such as en-US.
 
+App Store Connect exposes processed previews only as HLS streaming playlists,
+not as the original video file. When the preview URL is a playlist, the file
+is saved with a .m3u8 extension in place of the requested one, and outputPath
+reports the path written.
+
 Examples:
   asc video-previews download --id "PREVIEW_ID" --output "./preview.mov"
   asc video-previews download --version-localization "VERSION_LOCALIZATION_ID" --output-dir "./previews"
@@ -430,6 +437,9 @@ Examples:
 				item := &items[i]
 				if strings.TrimSpace(item.URL) == "" {
 					continue
+				}
+				if parsed, err := url.Parse(item.URL); err == nil && strings.EqualFold(path.Ext(parsed.Path), ".m3u8") {
+					item.OutputPath = strings.TrimSuffix(item.OutputPath, filepath.Ext(item.OutputPath)) + ".m3u8"
 				}
 
 				downloadCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
