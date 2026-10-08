@@ -5,7 +5,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"mime"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -236,6 +239,11 @@ returned as data[].id by:
   asc localizations list --version "VERSION_ID" --output json --locale "en-US"
 It is not the locale code such as en-US.
 
+App Store Connect exposes processed previews only as HLS streaming playlists,
+not as the original video file. With --version-localization, playlists are
+saved with a .m3u8 extension. With --id, the file is written to --output as
+given and a warning notes that it is a .m3u8 playlist.
+
 Examples:
   asc video-previews download --id "PREVIEW_ID" --output "./preview.mov"
   asc video-previews download --version-localization "VERSION_LOCALIZATION_ID" --output-dir "./previews"
@@ -430,10 +438,18 @@ Examples:
 				if strings.TrimSpace(item.URL) == "" {
 					continue
 				}
+				requestedPath := item.OutputPath
+				resolvePath := func(contentType string) string {
+					if idValue == "" && isHLSPlaylist(contentType, item.URL) {
+						return strings.TrimSuffix(requestedPath, filepath.Ext(requestedPath)) + ".m3u8"
+					}
+					return requestedPath
+				}
 
 				downloadCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
-				written, contentType, err := downloadURLToFile(downloadCtx, item.URL, item.OutputPath, *overwrite)
+				written, contentType, err := downloadURLToResolvedFile(downloadCtx, item.URL, resolvePath, *overwrite)
 				cancel()
+				item.OutputPath = resolvePath(contentType)
 				if err != nil {
 					result.Failures = append(result.Failures, previewDownloadFailure{
 						ID:          item.ID,
@@ -448,6 +464,9 @@ Examples:
 				item.BytesWritten = written
 				item.ContentType = contentType
 				result.Downloaded++
+				if idValue != "" && isHLSPlaylist(contentType, item.URL) && !strings.EqualFold(filepath.Ext(item.OutputPath), ".m3u8") {
+					fmt.Fprintf(os.Stderr, "Warning: App Store Connect only exposes an HLS streaming playlist for previews; %s is a .m3u8 playlist, not a video file\n", item.OutputPath)
+				}
 			}
 
 			result.Items = items
@@ -470,6 +489,17 @@ Examples:
 			return nil
 		},
 	}
+}
+
+func isHLSPlaylist(contentType, rawURL string) bool {
+	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
+		switch strings.ToLower(mediaType) {
+		case "application/vnd.apple.mpegurl", "audio/mpegurl":
+			return true
+		}
+	}
+	parsed, err := url.Parse(rawURL)
+	return err == nil && strings.EqualFold(path.Ext(parsed.Path), ".m3u8")
 }
 
 func renderPreviewDownloadResult(result *previewDownloadResult, markdown bool) error {
