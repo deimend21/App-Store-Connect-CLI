@@ -1450,3 +1450,34 @@ func TestBuildStatusPrivateKeyPathDecodesStoredBase64PEM(t *testing.T) {
 		t.Fatalf("expected base64-decoded private key path to be usable, got %v", err)
 	}
 }
+
+func TestWaitForBuildByNumberOrUploadFailureResolvesPreReleaseVersionOnce(t *testing.T) {
+	preReleaseCalls := 0
+	buildCalls := 0
+	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/preReleaseVersions":
+			preReleaseCalls++
+			return buildWaitJSONResponse(`{"data": [{"type": "preReleaseVersions", "id": "prv-1", "attributes": {"version": "1.2.3", "platform": "IOS"}}], "links": {}}`)
+		case "/v1/builds":
+			buildCalls++
+			if buildCalls < 3 {
+				return buildWaitJSONResponse(`{"data": [], "links": {}}`)
+			}
+			return buildWaitJSONResponse(`{"data": [{"type": "builds", "id": "build-123", "attributes": {"version": "42"}}], "links": {}}`)
+		default:
+			return nil, fmt.Errorf("unexpected path: %s", req.URL.Path)
+		}
+	})
+
+	buildResp, err := WaitForBuildByNumberOrUploadFailure(context.Background(), client, "app-1", "", "1.2.3", "42", "IOS", time.Millisecond)
+	if err != nil {
+		t.Fatalf("WaitForBuildByNumberOrUploadFailure() error: %v", err)
+	}
+	if buildResp == nil || buildResp.Data.ID != "build-123" {
+		t.Fatalf("expected build-123, got %+v", buildResp)
+	}
+	if preReleaseCalls != 1 {
+		t.Fatalf("expected 1 pre-release version lookup across %d polls, got %d", buildCalls, preReleaseCalls)
+	}
+}
