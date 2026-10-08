@@ -1,6 +1,7 @@
 package cmdtest
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -84,6 +85,14 @@ func TestMetadataPushNewLocaleUpdatesVersionLocalizationCreatedByAppInfoCreate(t
 	}
 	if actions[1]["scope"] != "version" || actions[1]["action"] != "update" || actions[1]["status"] != "succeeded" || actions[1]["localizationId"] != "loc-ja" {
 		t.Fatalf("version action = %v, want a succeeded update of loc-ja", actions[1])
+	}
+	apiCalls, err := json.Marshal(metadataPushResult(t, stdout)["apiCalls"])
+	if err != nil {
+		t.Fatalf("marshal apiCalls: %v", err)
+	}
+	wantCalls := `[{"count":1,"operation":"create_localization","scope":"app-info"},{"count":1,"operation":"list_localizations","scope":"version"},{"count":1,"operation":"update_localization","scope":"version"}]`
+	if string(apiCalls) != wantCalls {
+		t.Fatalf("apiCalls = %s, want %s", apiCalls, wantCalls)
 	}
 }
 

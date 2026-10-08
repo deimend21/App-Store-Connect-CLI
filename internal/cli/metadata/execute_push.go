@@ -320,6 +320,16 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 			opts.AllowDeletes,
 			metadataIfExistsOptions{mode: ifExistsMode, prefix: errorPrefix, lateAppInfoIDs: lateAppInfoIDs},
 		)
+		if createdLocales := appInfoCreatedVersionLocales(actions, localVersion, managedVersionItems); len(createdLocales) > 0 {
+			versionCalls.list++
+			for _, action := range actions {
+				if action.convertedFromCreate {
+					versionCalls.create--
+					versionCalls.update++
+				}
+			}
+			result.APICalls = buildAPICallSummary(appInfoCalls, versionCalls)
+		}
 	}
 
 	result.Actions = actions
