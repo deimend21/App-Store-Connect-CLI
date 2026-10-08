@@ -7,10 +7,8 @@ import (
 	"testing"
 )
 
-// Creating an app-info localization makes App Store Connect create an empty
-// version localization for the same locale, so the version family must update
-// it instead of replaying the planned create into a duplicate-locale 409.
-func TestMetadataPushNewLocaleUpdatesVersionLocalizationCreatedByAppInfoCreate(t *testing.T) {
+func writeMetadataNewLocaleFixture(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	files := map[string]string{
 		filepath.Join("app-info", "ja.json"):         `{"name":"Planned JA name"}`,
@@ -24,6 +22,14 @@ func TestMetadataPushNewLocaleUpdatesVersionLocalizationCreatedByAppInfoCreate(t
 			t.Fatalf("write %s: %v", path, err)
 		}
 	}
+	return dir
+}
+
+// Creating an app-info localization makes App Store Connect create an empty
+// version localization for the same locale, so the version family must update
+// it instead of replaying the planned create into a duplicate-locale 409.
+func TestMetadataPushNewLocaleUpdatesVersionLocalizationCreatedByAppInfoCreate(t *testing.T) {
+	dir := writeMetadataNewLocaleFixture(t)
 
 	appInfoCreated := false
 	versionPatched := false
@@ -78,5 +84,52 @@ func TestMetadataPushNewLocaleUpdatesVersionLocalizationCreatedByAppInfoCreate(t
 	}
 	if actions[1]["scope"] != "version" || actions[1]["action"] != "update" || actions[1]["status"] != "succeeded" || actions[1]["localizationId"] != "loc-ja" {
 		t.Fatalf("version action = %v, want a succeeded update of loc-ja", actions[1])
+	}
+}
+
+// An app-info locale that another writer created between planning and apply
+// reconciles as a duplicate; the version create for it must still fail.
+func TestMetadataPushNewLocaleKeepsVersionConflictWhenAppInfoReconciledDuplicate(t *testing.T) {
+	dir := writeMetadataNewLocaleFixture(t)
+
+	appInfoPosted := false
+	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+		"metadata", "push", "--app", "app-1", "--version", "1.2.3", "--platform", "IOS", "--dir", dir,
+		"--output", "json",
+	}, func(req ifExistsRequest) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appStoreVersions":
+			return jsonResponse(http.StatusOK, metadataPushVersionsList)
+		case req.Method == http.MethodGet && req.Path == "/v1/apps/app-1/appInfos":
+			return jsonResponse(http.StatusOK, metadataPushAppInfosList)
+		case req.Method == http.MethodGet && req.Path == "/v1/appInfos/appinfo-1/appInfoLocalizations":
+			if appInfoPosted {
+				return jsonResponse(http.StatusOK, `{"data":[{"type":"appInfoLocalizations","id":"info-ja","attributes":{"locale":"ja","name":"Planned JA name"}}],"links":{"next":""}}`)
+			}
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodPost && req.Path == "/v1/appInfoLocalizations":
+			appInfoPosted = true
+			return jsonResponse(http.StatusConflict, metadataAppInfoLocaleDuplicate409)
+		case req.Method == http.MethodGet && req.Path == "/v1/appStoreVersions/version-1/appStoreVersionLocalizations":
+			if appInfoPosted {
+				return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-ja","attributes":{"locale":"ja"}}],"links":{"next":""}}`)
+			}
+			return jsonResponse(http.StatusOK, metadataPushEmptyList)
+		case req.Method == http.MethodPost && req.Path == "/v1/appStoreVersionLocalizations":
+			return jsonResponse(http.StatusConflict, metadataVersionLocaleDuplicate409)
+		}
+		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
+		return nil, nil
+	})
+
+	if runErr == nil {
+		t.Fatalf("expected the version create conflict to fail the push (stderr %q)", stderr)
+	}
+	if got := countRequests(seen, http.MethodPatch, "/v1/appStoreVersionLocalizations/loc-ja"); got != 0 {
+		t.Fatalf("version localization PATCHes = %d, want 0: %v", got, seen)
+	}
+	actions := metadataPushActions(t, stdout)
+	if len(actions) != 2 || actions[1]["scope"] != "version" || actions[1]["action"] != "create" || actions[1]["status"] != "failed" {
+		t.Fatalf("actions = %v, want a failed version create", actions)
 	}
 }

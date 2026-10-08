@@ -210,7 +210,9 @@ Notes:
     an existing directory manages every locale in that scope.
   - --dir must contain at least one metadata .json file or selected store asset; an empty tree is rejected.
   - applying an explicit null field clear requires --confirm.
-  - omitted fields are treated as no-op; they do not imply deletion.`,
+  - omitted fields are treated as no-op; they do not imply deletion.
+  - creating an app-info locale makes App Store Connect create an empty version
+    localization; a version create planned for that locale is applied as an update.`,
 			cfg.verbTitle,
 			cfg.name,
 			cfg.name,
@@ -997,14 +999,14 @@ func applyMetadataPlan(
 	for _, action := range appInfoActions {
 		_, versionLocal := localVersion[action.Locale]
 		_, versionRemote := plannedVersionLocales[action.Locale]
-		if action.Status == metadataActionStatusSucceeded && (action.Action == "create" || action.Action == "reconcile") && versionLocal && !versionRemote {
+		if action.Status == metadataActionStatusSucceeded && (action.Action == "create" || action.Action == "reconcile") && !action.AlreadyExists && !action.reconciledDuplicate && versionLocal && !versionRemote {
 			createdLocales[action.Locale] = struct{}{}
 		}
 	}
 	if len(createdLocales) > 0 {
 		refreshed, err := fetchVersionLocalizations(ctx, client, versionID)
 		if err != nil {
-			applyErrors = append(applyErrors, fmt.Errorf("refresh version localizations after app-info creates: %w", err))
+			fmt.Fprintf(os.Stderr, "%s: warning: refresh version localizations after app-info creates: %v\n", ifExists.prefix, err)
 		}
 		for _, item := range refreshed {
 			if _, ok := createdLocales[strings.TrimSpace(item.Attributes.Locale)]; ok {
