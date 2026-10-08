@@ -362,16 +362,15 @@ Examples:
 						if err != nil {
 							return fmt.Errorf("video-previews download: failed to fetch previews for set %s: %w", set.ID, err)
 						}
-						previews = previewsResp.Data
-					}
-					sort.Slice(previews, func(i, j int) bool {
-						fi := strings.ToLower(strings.TrimSpace(previews[i].Attributes.FileName))
-						fj := strings.ToLower(strings.TrimSpace(previews[j].Attributes.FileName))
-						if fi == fj {
-							return previews[i].ID < previews[j].ID
+
+						requestCtx, cancel = shared.ContextWithTimeout(ctx)
+						orderedIDs, err := getOrderedAppPreviewIDs(requestCtx, client, set.ID)
+						cancel()
+						if err != nil {
+							return fmt.Errorf("video-previews download: failed to fetch preview order for set %s: %w", set.ID, err)
 						}
-						return fi < fj
-					})
+						previews = orderMediaForDownload(previewsResp.Data, orderedIDs, func(a asc.AppPreviewAttributes) string { return a.FileName })
+					}
 
 					for idx, preview := range previews {
 						base := sanitizeBaseFileName(preview.Attributes.FileName)

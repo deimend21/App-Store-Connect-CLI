@@ -383,9 +383,13 @@ func VerifySourceFileChecksumsFromFile(file *os.File, expected *Checksums) (*Che
 		if expectedHash == "" {
 			return nil, errors.New("composite checksum hash is missing")
 		}
-		sum, err := ComputeFileChecksumFromFile(file, expected.Composite.Algorithm)
-		if err != nil {
-			return nil, err
+		sum := computed.File
+		if sum == nil || sum.Algorithm != expected.Composite.Algorithm {
+			var err error
+			sum, err = ComputeFileChecksumFromFile(file, expected.Composite.Algorithm)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if !strings.EqualFold(expectedHash, sum.Hash) {
 			return nil, fmt.Errorf("composite checksum mismatch (expected %s, got %s)", expectedHash, sum.Hash)

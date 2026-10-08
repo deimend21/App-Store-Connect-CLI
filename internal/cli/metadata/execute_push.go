@@ -113,6 +113,7 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 	if err != nil {
 		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
+	defer client.CloseUploadConnections()
 
 	type versionResolution struct {
 		id    string
