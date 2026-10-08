@@ -385,7 +385,64 @@ jobs:
           make check-docs
           make check-wall-of-apps
           make lint
-          ASC_BYPASS_KEYCHAIN=1 make test
+
+  quality-tests:
+    name: Release tests (${{ matrix.name }})
+    needs:
+      - prepare
+      - resolve
+    if: needs.prepare.outputs.published != 'true' && needs.resolve.outputs.reused != 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: packages
+            shard: packages --packages ./... --exclude ./internal/cli/cmdtest --exclude ./internal/cli/web --shard-index 0 --shard-total 1
+          - name: web 1/2
+            shard: tests --package ./internal/cli/web --shard-index 0 --shard-total 2
+          - name: web 2/2
+            shard: tests --package ./internal/cli/web --shard-index 1 --shard-total 2
+          - name: cmdtest 1/2
+            shard: tests --package ./internal/cli/cmdtest --shard-index 0 --shard-total 2
+          - name: cmdtest 2/2
+            shard: tests --package ./internal/cli/cmdtest --shard-index 1 --shard-total 2
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Go test shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          UNSHARDED_FALLBACK: ${{ matrix.name == 'packages' }}
+        run: |
+          config_dir="$(mktemp -d "${RUNNER_TEMP}/asc-test-config.XXXXXX")"
+          chmod 500 "$config_dir"
+          if [ -f scripts/go_test_shard.py ]; then
+            read -r -a shard_args <<< "$SHARD"
+            ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v
+          elif [ "$UNSHARDED_FALLBACK" = "true" ]; then
+            echo "::notice::Release source predates scripts/go_test_shard.py; running the full Go suite in this shard"
+            ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" go test -count=1 -v ./...
+          else
+            echo "::notice::Release source predates scripts/go_test_shard.py; the packages shard runs the full Go suite"
+            exit 0
+          fi
+          if [ -n "$(ls -A "$config_dir")" ]; then
+            echo "::error::Tests wrote to the shared test config directory; set ASC_CONFIG_PATH in the test instead"
+            exit 1
+          fi
 
   macos:
     name: Build, sign, and notarize macOS
@@ -619,10 +676,11 @@ jobs:
       - prepare
       - resolve
       - quality
+      - quality-tests
       - macos
       - portable
     if: >-
-      always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))
+      always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.quality-tests.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       actions: read
