@@ -25,6 +25,17 @@ type ExportFile struct {
 
 // ExportPlan obtains all remote assets before touching the selected output root.
 func ExportPlan(ctx context.Context, client *asc.Client, versionID, metadataPrefix string, clip, previews bool) ([]ExportFile, []string, error) {
+	return exportPlan(ctx, client, versionID, metadataPrefix, clip, previews, nil, false)
+}
+
+// ExportPlanWithVersionLocalizations reuses a complete localization collection
+// fetched for this version within the caller's current export. A nil collection
+// is a resolved empty result. The supplied resources are only read.
+func ExportPlanWithVersionLocalizations(ctx context.Context, client *asc.Client, versionID, metadataPrefix string, clip, previews bool, localizations []asc.Resource[asc.AppStoreVersionLocalizationAttributes]) ([]ExportFile, []string, error) {
+	return exportPlan(ctx, client, versionID, metadataPrefix, clip, previews, localizations, true)
+}
+
+func exportPlan(ctx context.Context, client *asc.Client, versionID, metadataPrefix string, clip, previews bool, localizations []asc.Resource[asc.AppStoreVersionLocalizationAttributes], localizationsResolved bool) ([]ExportFile, []string, error) {
 	var files []ExportFile
 	var warnings []string
 	if clip {
@@ -70,9 +81,13 @@ func ExportPlan(ctx context.Context, client *asc.Client, versionID, metadataPref
 		}
 	}
 	if previews {
-		locs, err := versionLocalizations(ctx, client, versionID)
-		if err != nil {
-			return nil, nil, err
+		locs := localizations
+		if !localizationsResolved {
+			var err error
+			locs, err = versionLocalizations(ctx, client, versionID)
+			if err != nil {
+				return nil, nil, err
+			}
 		}
 		for _, loc := range locs {
 			if err := segment(loc.Attributes.Locale); err != nil {

@@ -2618,6 +2618,7 @@ func TestPrintSubmissionErrorHintsUsesAssociatedErrorsForSubmissionStateConflict
 
 func newSubmitTestClient(t *testing.T, transport http.RoundTripper) *asc.Client {
 	t.Helper()
+	t.Setenv("ASC_BASE_DELAY", "1ms")
 
 	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
 	writeSubmitECDSAPEM(t, keyPath)

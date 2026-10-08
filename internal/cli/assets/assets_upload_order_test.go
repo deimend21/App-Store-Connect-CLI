@@ -126,6 +126,7 @@ func newAssetsUploadTestClient(t *testing.T) *asc.Client {
 
 func newAssetsUploadTestServerClient(t *testing.T, handler http.Handler) *asc.Client {
 	t.Helper()
+	t.Setenv("ASC_BASE_DELAY", "1ms")
 
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
