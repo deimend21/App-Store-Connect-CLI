@@ -2894,6 +2894,64 @@ func withArrayKeyring(t *testing.T) {
 	}
 }
 
+func TestGetCredentials_SkipsLegacyProbeOnceLegacyKeychainIsEmpty(t *testing.T) {
+	newKr, legacyKr := withSeparateKeyrings(t)
+	marker := filepath.Join(t.TempDir(), "legacy-keychain-empty")
+	previousMarker := legacyKeychainEmptyMarkerPath
+	legacyKeychainEmptyMarkerPath = func() (string, error) { return marker, nil }
+	legacyOpens := 0
+	legacyKeyringOpener = func() (keyring.Keyring, error) {
+		legacyOpens++
+		return legacyKr, nil
+	}
+	t.Cleanup(func() { legacyKeychainEmptyMarkerPath = previousMarker })
+
+	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
+	writeECDSAPEM(t, keyPath, 0o600, true)
+	storeCredentialInKeyring(t, legacyKr, "old", "OLDKEY", "OLDISSUER", keyPath)
+
+	creds, err := GetCredentials("")
+	if err != nil {
+		t.Fatalf("GetCredentials() with legacy entry error = %v", err)
+	}
+	if creds.KeyID != "OLDKEY" {
+		t.Fatalf("KeyID = %q, want OLDKEY", creds.KeyID)
+	}
+	if _, err := newKr.Get(keyringKey("old")); err != nil {
+		t.Fatalf("legacy credential was not migrated: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker stat error = %v, want not exist before an empty probe", err)
+	}
+
+	if _, err := GetCredentials(""); err != nil {
+		t.Fatalf("GetCredentials() after migration error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker not written after empty legacy probe: %v", err)
+	}
+
+	opens := legacyOpens
+	if _, err := GetCredentials(""); err != nil {
+		t.Fatalf("GetCredentials() with marker error = %v", err)
+	}
+	if legacyOpens != opens {
+		t.Fatalf("legacy keychain opened %d more times, want 0 once marked empty", legacyOpens-opens)
+	}
+
+	storeCredentialInKeyring(t, legacyKr, "readded", "NEWKEY", "NEWISSUER", keyPath)
+	creds, err = GetCredentials("readded")
+	if err != nil {
+		t.Fatalf("GetCredentials(readded) with marker error = %v", err)
+	}
+	if creds.KeyID != "NEWKEY" {
+		t.Fatalf("KeyID = %q, want NEWKEY", creds.KeyID)
+	}
+	if _, err := newKr.Get(keyringKey("readded")); err != nil {
+		t.Fatalf("re-added legacy credential was not migrated: %v", err)
+	}
+}
+
 func withSeparateKeyrings(t *testing.T) (keyring.Keyring, keyring.Keyring) {
 	t.Helper()
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "0")

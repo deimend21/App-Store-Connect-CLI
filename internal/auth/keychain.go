@@ -1551,11 +1551,19 @@ func lookupKeychainCredential(profile string) (keychainLookup, error) {
 	if err != nil {
 		return keychainLookup{}, err
 	}
-	if legacyKeychainHasCredentials() {
-		// The full listing migrates legacy entries into the current keychain.
+	// The full listing migrates legacy entries into the current keychain.
+	legacyMarkedEmpty := legacyKeychainMarkedEmpty()
+	if !legacyMarkedEmpty && legacyKeychainHasCredentials() {
 		return lookupKeychainCredentialFromListing(profile)
 	}
+	lookup, err := lookupCurrentKeychainCredential(kr, names, profile)
+	if err != nil || lookup.found || !legacyMarkedEmpty || !legacyKeychainHasCredentials() {
+		return lookup, err
+	}
+	return lookupKeychainCredentialFromListing(profile)
+}
 
+func lookupCurrentKeychainCredential(kr keyring.Keyring, names []string, profile string) (keychainLookup, error) {
 	lookup := keychainLookup{stored: len(names)}
 	selected, defaultKey, err := selectedCredentialName(profile)
 	if err != nil {
@@ -1634,13 +1642,45 @@ func keychainCredentialNames(kr keyring.Keyring) ([]string, error) {
 	return names, nil
 }
 
+// legacyKeychainEmptyMarkerPath names a file recording that the legacy "asc"
+// keychain held no credentials. Only old releases write that keychain, so once
+// it is empty, lookups probe it again only when the current keychain does not
+// resolve the requested credential.
+var legacyKeychainEmptyMarkerPath = func() (string, error) {
+	path, err := config.GlobalPath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "legacy-keychain-empty"), nil
+}
+
+func legacyKeychainMarkedEmpty() bool {
+	marker, _ := legacyKeychainEmptyMarkerPath()
+	if marker == "" {
+		return false
+	}
+	info, err := os.Lstat(marker)
+	return err == nil && info.Mode().IsRegular()
+}
+
 func legacyKeychainHasCredentials() bool {
+	marker, _ := legacyKeychainEmptyMarkerPath()
 	kr, err := legacyKeyringOpener()
 	if err != nil {
 		return false
 	}
 	names, err := keychainCredentialNames(kr)
-	return err == nil && len(names) > 0
+	if err != nil {
+		return false
+	}
+	if len(names) == 0 && marker != "" {
+		if err := os.MkdirAll(filepath.Dir(marker), 0o700); err == nil {
+			if file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
+				_ = file.Close()
+			}
+		}
+	}
+	return len(names) > 0
 }
 
 func selectCredential(profile string, credentials []Credential) (Credential, bool) {
