@@ -666,18 +666,22 @@ func uploadScreenshots(ctx context.Context, client *asc.Client, versionID string
 			uploadedIDsByName := make(map[string]string)
 
 			uploadFiles := make([]string, 0, len(plan.Files))
+			uploadPlanIndexes := make([]int, 0, len(plan.Files))
+			skippedPlanIndexes := make([]int, 0)
 			queued := make(map[string]bool, len(plan.Files))
-			for _, filePath := range plan.Files {
+			for planIndex, filePath := range plan.Files {
 				name := filepath.Base(filePath)
 				if fileNames[name] || queued[name] {
 					result.Skipped = append(result.Skipped, SkippedItem{
 						Path:   filePath,
 						Reason: "already exists",
 					})
+					skippedPlanIndexes = append(skippedPlanIndexes, planIndex)
 					continue
 				}
 				queued[name] = true
 				uploadFiles = append(uploadFiles, filePath)
+				uploadPlanIndexes = append(uploadPlanIndexes, planIndex)
 			}
 			// Each asset reserves, transfers, and commits under its own
 			// upload budget; a shared request deadline would truncate the
@@ -693,6 +697,15 @@ func uploadScreenshots(ctx context.Context, client *asc.Client, versionID string
 				result.Uploaded = append(result.Uploaded, item)
 			}
 			if err != nil {
+				// Report only files the serial order would have reached before
+				// the failure; later uploads were deleted.
+				failedPlanIndex := uploadPlanIndexes[len(uploaded)]
+				for i, planIndex := range skippedPlanIndexes {
+					if planIndex > failedPlanIndex {
+						result.Skipped = result.Skipped[:i]
+						break
+					}
+				}
 				// Keep the assets that already uploaded for this set so the
 				// caller can report them.
 				results = append(results, result)
