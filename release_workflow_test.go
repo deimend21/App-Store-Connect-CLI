@@ -168,11 +168,28 @@ func TestReleaseWorkflowKeepsHistoricalGuardrailsInline(t *testing.T) {
 		`make check-docs`,
 		`make check-wall-of-apps`,
 		`make lint`,
-		`python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v`,
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("release workflow missing historical guardrail %q", want)
 		}
+	}
+	shardScript := "scripts/go_test_shard.py"
+	guard := "if [ -f " + shardScript + " ]; then\n"
+	fallback := "elif [ \"$UNSHARDED_FALLBACK\" = \"true\" ]; then\n"
+	guardStart := strings.Index(workflow, guard)
+	fallbackStart := strings.Index(workflow, fallback)
+	if guardStart == -1 || fallbackStart < guardStart {
+		t.Fatal("release test shards must guard the shard script and fall back for older tags")
+	}
+	if !strings.Contains(workflow[fallbackStart:], `ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" go test -count=1 -v ./...`) {
+		t.Fatal("historical release tags must still run the full Go suite")
+	}
+	if !strings.Contains(workflow, "UNSHARDED_FALLBACK: ${{ matrix.name == 'packages' }}") {
+		t.Fatal("exactly one release test shard must run the historical full suite")
+	}
+	outside := workflow[:guardStart] + workflow[fallbackStart:]
+	if strings.Count(workflow, "python3 "+shardScript) != 1 || strings.Contains(outside, "python3 "+shardScript) {
+		t.Fatal("release workflow may run the shard script only behind its existence guard")
 	}
 	if strings.Contains(workflow, "make release-guardrails") {
 		t.Fatal("release workflow cannot call a target absent from historical tags")

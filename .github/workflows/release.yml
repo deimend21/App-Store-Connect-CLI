@@ -425,11 +425,20 @@ jobs:
       - name: Run Go test shard
         env:
           SHARD: ${{ matrix.shard }}
+          UNSHARDED_FALLBACK: ${{ matrix.name == 'packages' }}
         run: |
           config_dir="$(mktemp -d "${RUNNER_TEMP}/asc-test-config.XXXXXX")"
           chmod 500 "$config_dir"
-          read -r -a shard_args <<< "$SHARD"
-          ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v
+          if [ -f scripts/go_test_shard.py ]; then
+            read -r -a shard_args <<< "$SHARD"
+            ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v
+          elif [ "$UNSHARDED_FALLBACK" = "true" ]; then
+            echo "::notice::Release source predates scripts/go_test_shard.py; running the full Go suite in this shard"
+            ASC_BYPASS_KEYCHAIN=1 ASC_CONFIG_PATH="$config_dir/config.json" go test -count=1 -v ./...
+          else
+            echo "::notice::Release source predates scripts/go_test_shard.py; the packages shard runs the full Go suite"
+            exit 0
+          fi
           if [ -n "$(ls -A "$config_dir")" ]; then
             echo "::error::Tests wrote to the shared test config directory; set ASC_CONFIG_PATH in the test instead"
             exit 1
