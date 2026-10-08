@@ -464,7 +464,7 @@ Examples:
 				item.BytesWritten = written
 				item.ContentType = contentType
 				result.Downloaded++
-				if idValue != "" && isHLSPlaylist(contentType, item.URL) {
+				if idValue != "" && isHLSPlaylist(contentType, item.URL) && !strings.EqualFold(filepath.Ext(item.OutputPath), ".m3u8") {
 					fmt.Fprintf(os.Stderr, "Warning: App Store Connect only exposes an HLS streaming playlist for previews; %s is a .m3u8 playlist, not a video file\n", item.OutputPath)
 				}
 			}
