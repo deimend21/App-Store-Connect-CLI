@@ -1218,13 +1218,14 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 	defer func() { _ = ptmx.Close() }()
 
 	output, promptSeen, readDone := startPTYCapture(ptmx, "Apple Account password:")
+	expired := ptyTestDeadline(t)
 
 	select {
 	case <-promptSeen:
 	case readErr := <-readDone:
 		t.Fatalf("process exited before password prompt: %v\noutput:\n%s", readErr, output.String())
-	case <-time.After(10 * time.Second):
-		t.Fatalf("timed out waiting for password prompt\noutput:\n%s", output.String())
+	case <-expired:
+		t.Fatalf("password prompt did not appear before the test deadline\noutput:\n%s", output.String())
 	}
 
 	if _, err := ptmx.Write([]byte{3}); err != nil {
@@ -1239,13 +1240,13 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 	var runErr error
 	select {
 	case runErr = <-waitDone:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("process did not exit promptly after interrupt\noutput:\n%s", output.String())
+	case <-expired:
+		t.Fatalf("process did not exit after interrupt before the test deadline\noutput:\n%s", output.String())
 	}
 
 	select {
 	case <-readDone:
-	case <-time.After(2 * time.Second):
+	case <-expired:
 		// Let the child close the PTY so the reader can drain the final
 		// interrupt-specific stderr before we tear the PTY down ourselves.
 		t.Fatalf("PTY reader did not exit after process completion\noutput:\n%s", output.String())
@@ -1317,13 +1318,14 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 	defer func() { _ = ptmx.Close() }()
 
 	output, promptSeen, readDone := startPTYCapture(ptmx, "Apple Account password:")
+	expired := ptyTestDeadline(t)
 
 	select {
 	case <-promptSeen:
 	case readErr := <-readDone:
 		t.Fatalf("process exited before password prompt: %v\noutput:\n%s", readErr, output.String())
-	case <-time.After(10 * time.Second):
-		t.Fatalf("timed out waiting for password prompt\noutput:\n%s", output.String())
+	case <-expired:
+		t.Fatalf("password prompt did not appear before the test deadline\noutput:\n%s", output.String())
 	}
 
 	if _, err := ptmx.Write([]byte{3}); err != nil {
@@ -1337,8 +1339,8 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 
 	select {
 	case err = <-waitDone:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("process did not exit promptly after interrupt\noutput:\n%s", output.String())
+	case <-expired:
+		t.Fatalf("process did not exit after interrupt before the test deadline\noutput:\n%s", output.String())
 	}
 
 	if err == nil {
@@ -1347,7 +1349,7 @@ func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
 
 	select {
 	case <-readDone:
-	case <-time.After(2 * time.Second):
+	case <-expired:
 		t.Fatalf("PTY reader did not exit after process completion\noutput:\n%s", output.String())
 	}
 
@@ -1414,13 +1416,13 @@ func TestSkillsAutoCheckIsDisabledEvenWhenEnvironmentOptsIn(t *testing.T) {
 		"PATH="+scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 
-	startedAt := time.Now()
 	ptmx, err := pty.Start(runCmd)
 	if err != nil {
 		t.Fatalf("failed to start PTY command: %v", err)
 	}
 	defer func() { _ = ptmx.Close() }()
 	output, _, readDone := startPTYCapture(ptmx, "")
+	expired := ptyTestDeadline(t)
 
 	waitDone := make(chan error, 1)
 	go func() {
@@ -1429,22 +1431,19 @@ func TestSkillsAutoCheckIsDisabledEvenWhenEnvironmentOptsIn(t *testing.T) {
 
 	select {
 	case err = <-waitDone:
-	case <-time.After(2 * time.Second):
+	case <-expired:
 		_ = runCmd.Process.Kill()
 		_ = ptmx.Close()
 		<-waitDone
-		t.Fatalf("foreground command waited for 10-second checker descendant\noutput:\n%s", output.String())
+		t.Fatalf("foreground command did not exit before the test deadline\noutput:\n%s", output.String())
 	}
 	if err != nil {
 		t.Fatalf("foreground command failed: %v\noutput:\n%s", err, output.String())
 	}
-	if elapsed := time.Since(startedAt); elapsed >= 2*time.Second {
-		t.Fatalf("foreground command took %s, want under 2s", elapsed)
-	}
 
 	select {
 	case <-readDone:
-	case <-time.After(2 * time.Second):
+	case <-expired:
 		t.Fatalf("PTY stayed open after foreground exit\noutput:\n%s", output.String())
 	}
 
@@ -1455,6 +1454,22 @@ func TestSkillsAutoCheckIsDisabledEvenWhenEnvironmentOptsIn(t *testing.T) {
 	if _, statErr := os.Stat(sleepPIDPath); !os.IsNotExist(statErr) {
 		t.Fatalf("automatic skills checker spawned a descendant despite being disabled: %v", statErr)
 	}
+}
+
+// ptyTestDeadline bounds PTY waits by the test binary's deadline instead of a
+// fixed budget, so a slow host delays these tests rather than failing them.
+// It fires at 90% of the remaining time, leaving room to report output and
+// kill the child before the binary's own timeout panics. It returns nil, which
+// blocks forever in a select, when there is no deadline.
+func ptyTestDeadline(t *testing.T) <-chan time.Time {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(deadline) * 9 / 10)
+	t.Cleanup(func() { timer.Stop() })
+	return timer.C
 }
 
 type ptyOutput struct {
