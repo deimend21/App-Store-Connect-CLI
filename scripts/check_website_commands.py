@@ -846,6 +846,7 @@ def collect_errors(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Mintlify website command examples.")
+    parser.add_argument("--binary", type=Path, help="Use a CLI freshly built by the caller instead of building one.")
     parser.add_argument(
         "--website-root",
         default=".",
@@ -859,14 +860,15 @@ def main(argv: list[str] | None = None) -> int:
     clear_help_cache()
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            binary_path = Path(tmpdir) / "asc-doc-check"
-            subprocess.run(
-                ["go", "build", "-o", str(binary_path), "."],
-                cwd=repo_root,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            binary_path = args.binary.resolve() if args.binary is not None else Path(tmpdir) / "asc-doc-check"
+            if args.binary is None:
+                subprocess.run(
+                    ["go", "build", "-o", str(binary_path), "."],
+                    cwd=repo_root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
             index = build_command_index(binary_path)
             errors = collect_errors(website_root, index, binary_path)
             if errors:
