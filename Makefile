@@ -201,7 +201,7 @@ format-check: check-gofumpt
 .PHONY: tools
 tools:
 	@echo "$(BLUE)Installing dev tools...$(NC)"
-	$(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
+	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install mvdan.cc/gofumpt@$(GOFUMPT_VERSION)
 	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	@echo "$(GREEN)✓ Tools installed$(NC)"
 	@echo "$(YELLOW)Make sure '$(GOBIN)' is on your PATH$(NC)"
