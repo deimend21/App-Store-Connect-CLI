@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 // TestMain isolates the web session cache so package tests that exercise the
@@ -21,9 +23,8 @@ func TestMain(m *testing.M) {
 	// Pin the config path to a file that never exists.
 	_ = os.Setenv("ASC_CONFIG_PATH", filepath.Join(tempDir, "config.json"))
 	_ = os.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-	// Mock HTTP fixtures keep production pacing enabled at its minimum; the
-	// core web package separately tests the default and rate-limit behavior.
-	_ = os.Setenv("ASC_WEB_MIN_REQUEST_INTERVAL", "200ms")
+	// The core web package tests the default and rate-limit behavior.
+	restorePacing := webcore.DisableRequestPacingForTesting()
 	_ = os.Setenv("ASC_WEB_SESSION_CACHE_DIR", tempDir)
 	_ = os.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "file")
 	// The Apple ID environment fallback must not leak in from the developer's
@@ -35,6 +36,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	restorePacing()
 	_ = os.RemoveAll(tempDir)
 	os.Exit(code)
 }
