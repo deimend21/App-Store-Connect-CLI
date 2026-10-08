@@ -600,6 +600,54 @@ func TestTestFlightFeedbackViewOutput(t *testing.T) {
 	}
 }
 
+func TestTestFlightReviewViewOutput(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/betaAppReviewDetails" {
+			t.Fatalf("expected path /v1/betaAppReviewDetails, got %s", req.URL.Path)
+		}
+		if req.URL.Query().Get("filter[app]") != "app-1" {
+			t.Fatalf("expected filter app app-1, got %q", req.URL.Query().Get("filter[app]"))
+		}
+		body := `{"data":[{"type":"betaAppReviewDetails","id":"detail-1"}],"links":{"next":""}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"testflight", "review", "view", "--app", "app-1"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if !strings.Contains(stdout, `"id":"detail-1"`) {
+		t.Fatalf("expected detail id in output, got %q", stdout)
+	}
+}
+
 func TestTestFlightFeedbackListOutputHasNoDeprecationWarning(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_APP_ID", "")
@@ -774,6 +822,53 @@ func TestTestFlightCrashesViewOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"id":"sub-1"`) {
 		t.Fatalf("expected crash submission id in output, got %q", stdout)
+	}
+}
+
+func TestTestFlightDistributionViewOutput(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("expected GET, got %s", req.Method)
+		}
+		if req.URL.Path != "/v1/buildBetaDetails" {
+			t.Fatalf("expected path /v1/buildBetaDetails, got %s", req.URL.Path)
+		}
+		if req.URL.Query().Get("filter[build]") != "build-1" {
+			t.Fatalf("expected build filter build-1, got %q", req.URL.Query().Get("filter[build]"))
+		}
+		body := `{"data":[{"type":"buildBetaDetails","id":"detail-1"}],"links":{"next":""}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+		}, nil
+	})
+
+	root := RootCommand("1.2.3")
+	root.FlagSet.SetOutput(io.Discard)
+
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse([]string{"testflight", "distribution", "view", "--build-id", "build-1"}); err != nil {
+			t.Fatalf("parse error: %v", err)
+		}
+		if err := root.Run(context.Background()); err != nil {
+			t.Fatalf("run error: %v", err)
+		}
+	})
+
+	if stderr != "" {
+		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+	if !strings.Contains(stdout, `"id":"detail-1"`) {
+		t.Fatalf("expected distribution detail id in output, got %q", stdout)
 	}
 }
 
