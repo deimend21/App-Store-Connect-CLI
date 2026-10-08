@@ -151,11 +151,7 @@ Examples:
 					return fmt.Errorf("metadata pull: %w", err)
 				}
 
-				appInfoItems, err = fetchAppInfoLocalizations(ctx, client, appInfoIDValue)
-				if err != nil {
-					return fmt.Errorf("metadata pull: %w", err)
-				}
-				versionItems, err = fetchVersionLocalizations(ctx, client, versionIDValue)
+				appInfoItems, versionItems, err = fetchMetadataLocalizations(ctx, client, appInfoIDValue, versionIDValue, true, true)
 				if err != nil {
 					return fmt.Errorf("metadata pull: %w", err)
 				}
