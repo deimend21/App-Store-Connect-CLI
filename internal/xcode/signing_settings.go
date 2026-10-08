@@ -4128,7 +4128,8 @@ func openSigningRoot(directory string) (rootfs.Root, func(), error) {
 		signingPlanRoots.roots[directory] = root
 	}
 	signingPlanRoots.borrowed++
-	return root, releaseSigningPlanRoot, nil
+	var once sync.Once
+	return root, func() { once.Do(releaseSigningPlanRoot) }, nil
 }
 
 // signingXCConfigReadFileFn keeps configuration reads behind the same rooted

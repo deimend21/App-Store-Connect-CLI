@@ -8675,6 +8675,13 @@ func TestSigningPlanRootStaysOpenWhileBorrowedAfterScopeEnds(t *testing.T) {
 		t.Fatalf("borrowed root closed when its scope ended: %v", err)
 	}
 	release()
+	release()
+	signingPlanRoots.Lock()
+	borrowed := signingPlanRoots.borrowed
+	signingPlanRoots.Unlock()
+	if borrowed != 0 {
+		t.Fatalf("borrowed = %d after a repeated release, want 0", borrowed)
+	}
 	if _, err := root.ReadFileLimited("a.xcconfig", 64); err == nil {
 		t.Fatal("expected the cached root to close after its last borrower released it")
 	}
@@ -8695,7 +8702,10 @@ func TestSigningPlanRootCacheIsBounded(t *testing.T) {
 		}
 		release()
 	}
-	if got := len(signingPlanRoots.roots); got != signingPlanMaxCachedRoots {
+	signingPlanRoots.Lock()
+	got := len(signingPlanRoots.roots)
+	signingPlanRoots.Unlock()
+	if got != signingPlanMaxCachedRoots {
 		t.Fatalf("cached roots = %d, want %d", got, signingPlanMaxCachedRoots)
 	}
 }
