@@ -1602,7 +1602,10 @@ func TestMetadataApplyCancellationArtifactsRemainingActionsAcrossScopes(t *testi
 				cancel: cancel,
 			}
 			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{"Content-Type": []string{"application/json"}}}, nil
-		case "/v1/appInfoLocalizations/loc-fr", "/v1/appStoreVersionLocalizations/loc-ja":
+		case "/v1/appInfoLocalizations/loc-fr":
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		case "/v1/appStoreVersionLocalizations/loc-ja":
 			mutations++
 			t.Fatalf("unexpected mutation after cancellation: %s", req.URL.Path)
 			return nil, nil

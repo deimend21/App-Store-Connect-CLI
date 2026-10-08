@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -1023,29 +1024,30 @@ func applyAppInfoChanges(
 	}
 
 	locales := sortedLocaleUnion(local, remoteByLocale)
-	actions := make([]ApplyAction, 0)
-	applyErrors := make([]error, 0)
-	contextErrorRecorded := false
-	for _, locale := range locales {
+	if !allowDeletes {
+		for _, locale := range locales {
+			_, localExists := local[locale]
+			remoteState, remoteExists := remoteByLocale[locale]
+			if !localExists && remoteExists && hasTrackedRemoteFields(appInfoPlanFields, remoteState.fields) {
+				return nil, fmt.Errorf("delete operations require --allow-deletes")
+			}
+		}
+	}
+
+	return runMetadataLocaleWrites(locales, func(locale string) (result metadataLocaleResult) {
 		localPatch, localExists := local[locale]
 		remoteState, remoteExists := remoteByLocale[locale]
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if action, ok := canceledAppInfoAction(locale, localPatch, remoteState, localExists, remoteExists, allowDeletes, ctxErr); ok {
-				if !contextErrorRecorded {
-					applyErrors = append(applyErrors, newMetadataMutationActionError(ctxErr))
-					contextErrorRecorded = true
-				}
-				actions = append(actions, action)
+				result.canceled = ctxErr
+				result.actions = append(result.actions, action)
 			}
-			continue
+			return result
 		}
 
 		if !localExists && remoteExists {
 			if !hasTrackedRemoteFields(appInfoPlanFields, remoteState.fields) {
-				continue
-			}
-			if !allowDeletes {
-				return actions, fmt.Errorf("delete operations require --allow-deletes")
+				return result
 			}
 			id, action, err := runMetadataMutation(
 				ctx, "delete",
@@ -1058,15 +1060,15 @@ func applyAppInfoChanges(
 				},
 			)
 			if err != nil {
-				actions = append(actions, failedMetadataAction(appInfoDirName, locale, "", "delete", remoteState.id, nil, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("delete app-info localization %s: %w", locale, err)))
+				result.actions = append(result.actions, failedMetadataAction(appInfoDirName, locale, "", "delete", remoteState.id, nil, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("delete app-info localization %s: %w", locale, err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
+				result.actions = append(result.actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
 			}
-			continue
+			return result
 		}
 		if !localExists {
-			continue
+			return result
 		}
 
 		remoteFields := cloneStringMap(remoteState.fields)
@@ -1076,7 +1078,7 @@ func applyAppInfoChanges(
 		// remote state, so a clear-only file counts no intent against it. Route
 		// it anyway; the existing-localization path compares the real state.
 		if adds == 0 && updates == 0 && !lateExisting {
-			continue
+			return result
 		}
 
 		switch {
@@ -1103,17 +1105,17 @@ func applyAppInfoChanges(
 			}
 			if existingID, exists := ifExists.lateAppInfoIDs[locale]; exists {
 				outcome := handleMetadataExistingConflict(ctx, conflict, existingID)
-				actions = append(actions, outcome.action)
+				result.actions = append(result.actions, outcome.action)
 				if outcome.err != nil {
-					applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("update existing app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, conflict.desired), outcome.err)))
+					result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("update existing app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, conflict.desired), outcome.err)))
 				}
-				continue
+				return result
 			}
 			if strings.TrimSpace(localPatch.localization.Name) == "" {
 				err := fmt.Errorf("cannot create app-info localization %q without name", locale)
-				actions = append(actions, failedMetadataAction(appInfoDirName, locale, "", "create", "", localPatch.setFields, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(err))
-				continue
+				result.actions = append(result.actions, failedMetadataAction(appInfoDirName, locale, "", "create", "", localPatch.setFields, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(err))
+				return result
 			}
 			desired := appInfoFields(localPatch.localization)
 			id, action, err := runMetadataMutation(
@@ -1133,17 +1135,17 @@ func applyAppInfoChanges(
 			if err != nil {
 				outcome := resolveMetadataCreateConflict(ctx, err, conflict)
 				if outcome.handled {
-					actions = append(actions, outcome.action)
+					result.actions = append(result.actions, outcome.action)
 					if outcome.err != nil {
-						applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("update existing app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, conflict.desired), outcome.err)))
+						result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("update existing app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, conflict.desired), outcome.err)))
 					}
-					continue
+					return result
 				}
 				err = outcome.err
-				actions = append(actions, failedMetadataAction(appInfoDirName, locale, "", "create", "", desired, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("create app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, localPatch.setFields), err)))
+				result.actions = append(result.actions, failedMetadataAction(appInfoDirName, locale, "", "create", "", desired, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("create app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, localPatch.setFields), err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
+				result.actions = append(result.actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
 			}
 		case remoteExists:
 			clearFields := changedClearFields(localPatch.clearFields, remoteFields)
@@ -1166,15 +1168,14 @@ func applyAppInfoChanges(
 				},
 			)
 			if err != nil {
-				actions = append(actions, failedMetadataAction(appInfoDirName, locale, "", "update", remoteState.id, desired, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("update app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, desired), err)))
+				result.actions = append(result.actions, failedMetadataAction(appInfoDirName, locale, "", "update", remoteState.id, desired, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("update app-info localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(appInfoPlanFields, desired), err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
+				result.actions = append(result.actions, successfulMetadataAction(appInfoDirName, locale, "", action, id))
 			}
 		}
-	}
-
-	return actions, errors.Join(applyErrors...)
+		return result
+	})
 }
 
 func applyVersionChanges(
@@ -1208,29 +1209,30 @@ func applyVersionChanges(
 
 	locales := sortedLocaleUnion(local, remoteByLocale)
 
-	actions := make([]ApplyAction, 0)
-	applyErrors := make([]error, 0)
-	contextErrorRecorded := false
-	for _, locale := range locales {
+	if !allowDeletes {
+		for _, locale := range locales {
+			_, localExists := local[locale]
+			remoteState, remoteExists := remoteByLocale[locale]
+			if !localExists && remoteExists && hasTrackedRemoteFields(versionPlanFields, remoteState.fields) {
+				return nil, fmt.Errorf("delete operations require --allow-deletes")
+			}
+		}
+	}
+
+	return runMetadataLocaleWrites(locales, func(locale string) (result metadataLocaleResult) {
 		localPatch, localExists := local[locale]
 		remoteState, remoteExists := remoteByLocale[locale]
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			if action, ok := canceledVersionAction(locale, version, localPatch, remoteState, localExists, remoteExists, allowDeletes, ctxErr); ok {
-				if !contextErrorRecorded {
-					applyErrors = append(applyErrors, newMetadataMutationActionError(ctxErr))
-					contextErrorRecorded = true
-				}
-				actions = append(actions, action)
+				result.canceled = ctxErr
+				result.actions = append(result.actions, action)
 			}
-			continue
+			return result
 		}
 
 		if !localExists && remoteExists {
 			if !hasTrackedRemoteFields(versionPlanFields, remoteState.fields) {
-				continue
-			}
-			if !allowDeletes {
-				return actions, fmt.Errorf("delete operations require --allow-deletes")
+				return result
 			}
 			id, action, err := runMetadataMutation(
 				ctx, "delete",
@@ -1243,21 +1245,21 @@ func applyVersionChanges(
 				},
 			)
 			if err != nil {
-				actions = append(actions, failedMetadataAction(versionDirName, locale, version, "delete", remoteState.id, nil, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("delete version localization %s: %w", locale, err)))
+				result.actions = append(result.actions, failedMetadataAction(versionDirName, locale, version, "delete", remoteState.id, nil, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("delete version localization %s: %w", locale, err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(versionDirName, locale, version, action, id))
+				result.actions = append(result.actions, successfulMetadataAction(versionDirName, locale, version, action, id))
 			}
-			continue
+			return result
 		}
 		if !localExists {
-			continue
+			return result
 		}
 
 		remoteFields := cloneStringMap(remoteState.fields)
 		adds, updates := countIntentChanges(versionPlanFields, localPatch.setFields, localPatch.clearFields, remoteFields)
 		if adds == 0 && updates == 0 {
-			continue
+			return result
 		}
 
 		switch {
@@ -1304,17 +1306,17 @@ func applyVersionChanges(
 					},
 				})
 				if outcome.handled {
-					actions = append(actions, outcome.action)
+					result.actions = append(result.actions, outcome.action)
 					if outcome.err != nil {
-						applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("update existing version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, desiredLocalizationFields(localPatch.setFields, localPatch.clearFields)), outcome.err)))
+						result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("update existing version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, desiredLocalizationFields(localPatch.setFields, localPatch.clearFields)), outcome.err)))
 					}
-					continue
+					return result
 				}
 				err = outcome.err
-				actions = append(actions, failedMetadataAction(versionDirName, locale, version, "create", "", desired, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("create version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, localPatch.setFields), err)))
+				result.actions = append(result.actions, failedMetadataAction(versionDirName, locale, version, "create", "", desired, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("create version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, localPatch.setFields), err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(versionDirName, locale, version, action, id))
+				result.actions = append(result.actions, successfulMetadataAction(versionDirName, locale, version, action, id))
 			}
 		case remoteExists:
 			clearFields := changedClearFields(localPatch.clearFields, remoteFields)
@@ -1337,14 +1339,51 @@ func applyVersionChanges(
 				},
 			)
 			if err != nil {
-				actions = append(actions, failedMetadataAction(versionDirName, locale, version, "update", remoteState.id, desired, err))
-				applyErrors = append(applyErrors, newMetadataMutationActionError(fmt.Errorf("update version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, desired), err)))
+				result.actions = append(result.actions, failedMetadataAction(versionDirName, locale, version, "update", remoteState.id, desired, err))
+				result.errs = append(result.errs, newMetadataMutationActionError(fmt.Errorf("update version localization %s (fields: %s): %w", locale, formatAttemptedFieldMap(versionPlanFields, desired), err)))
 			} else {
-				actions = append(actions, successfulMetadataAction(versionDirName, locale, version, action, id))
+				result.actions = append(result.actions, successfulMetadataAction(versionDirName, locale, version, action, id))
 			}
 		}
-	}
+		return result
+	})
+}
 
+const metadataWriteConcurrency = 4
+
+type metadataLocaleResult struct {
+	actions  []ApplyAction
+	errs     []error
+	canceled error
+}
+
+// runMetadataLocaleWrites applies independent per-locale writes with bounded
+// concurrency and merges results in locale order, recording the context error
+// once as the serial loop did.
+func runMetadataLocaleWrites(locales []string, apply func(string) metadataLocaleResult) ([]ApplyAction, error) {
+	results := make([]metadataLocaleResult, len(locales))
+	limiter := make(chan struct{}, metadataWriteConcurrency)
+	var workers sync.WaitGroup
+	for index, locale := range locales {
+		limiter <- struct{}{}
+		workers.Go(func() {
+			defer func() { <-limiter }()
+			results[index] = apply(locale)
+		})
+	}
+	workers.Wait()
+
+	actions := make([]ApplyAction, 0)
+	applyErrors := make([]error, 0)
+	contextErrorRecorded := false
+	for _, result := range results {
+		if result.canceled != nil && !contextErrorRecorded {
+			applyErrors = append(applyErrors, newMetadataMutationActionError(result.canceled))
+			contextErrorRecorded = true
+		}
+		actions = append(actions, result.actions...)
+		applyErrors = append(applyErrors, result.errs...)
+	}
 	return actions, errors.Join(applyErrors...)
 }
 
