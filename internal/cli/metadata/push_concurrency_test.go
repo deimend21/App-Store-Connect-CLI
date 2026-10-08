@@ -16,23 +16,24 @@ import (
 func TestApplyMetadataPlanOverlapsLocaleWritesInOrder(t *testing.T) {
 	locales := []string{"de-DE", "en-US", "es-ES", "fr-FR", "it", "ja"}
 	var mu sync.Mutex
-	inFlight, maxInFlight := 0, 0
+	inFlight, maxInFlight, arrivals := 0, 0, 0
 	release := make(chan struct{})
-	var releaseOnce sync.Once
 	metadataConcurrencyTransport(t, func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodPatch {
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
 		mu.Lock()
 		inFlight++
+		arrivals++
 		maxInFlight = max(maxInFlight, inFlight)
-		if inFlight == metadataWriteConcurrency {
-			releaseOnce.Do(func() { close(release) })
+		if arrivals == metadataWriteConcurrency {
+			close(release)
 		}
 		mu.Unlock()
 		select {
 		case <-release:
-		case <-time.After(time.Second):
+		case <-time.After(30 * time.Second):
+			t.Errorf("fewer than %d writes overlapped before timeout", metadataWriteConcurrency)
 		}
 		mu.Lock()
 		inFlight--
