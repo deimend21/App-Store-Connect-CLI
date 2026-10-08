@@ -112,7 +112,10 @@ def run_local(args: argparse.Namespace) -> int:
         def start(label: str, command: list[str], cpus: int = 1) -> None:
             log = open(os.path.join(directory, f"{len(runs)}.log"), "w+")
             environment = {**os.environ, "GOMAXPROCS": str(cpus)}
-            runs.append((label, log, subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)))
+            process = subprocess.Popen(
+                command, stdout=log, stderr=subprocess.STDOUT, env=environment, start_new_session=True
+            )
+            runs.append((label, log, process))
 
         try:
             if rest or not split:
@@ -146,10 +149,13 @@ def run_local(args: argparse.Namespace) -> int:
                 if status != 0:
                     failed.append(label)
         finally:
-            # Stop every run before the caller removes their shared state.
+            # Stop every run, test binaries included, before the caller removes
+            # their shared state.
             for _, log, process in runs:
-                if process.poll() is None:
-                    process.terminate()
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 process.wait()
                 log.close()
     for label in failed:
