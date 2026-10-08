@@ -540,7 +540,7 @@ func uploadScreenshotAssetFromFile(ctx context.Context, client *asc.Client, setI
 		return asc.AssetUploadResultItem{}, pending, fmt.Errorf("no upload operations returned for %q", info.Name())
 	}
 
-	if err := asc.UploadAssetFromFile(ctx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
+	if err := client.UploadAssetFromFile(ctx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
 		return asc.AssetUploadResultItem{}, pending, err
 	}
 	pending.State = "UPLOADED"

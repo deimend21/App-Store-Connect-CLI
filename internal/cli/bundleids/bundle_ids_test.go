@@ -2,9 +2,11 @@ package bundleids
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -228,9 +230,11 @@ func TestBundleIDsCapabilitiesAddCommand_MissingCapability(t *testing.T) {
 
 func TestParseCapabilitySettingsRejectsInvalidStructure(t *testing.T) {
 	tests := []struct {
-		name    string
-		value   string
-		wantErr string
+		name      string
+		value     string
+		wantErr   string
+		wantValue string
+		wantType  reflect.Type
 	}{
 		{
 			name:    "unknown setting field",
@@ -283,19 +287,25 @@ func TestParseCapabilitySettingsRejectsInvalidStructure(t *testing.T) {
 			wantErr: `capability option key at setting index 0, option index 0 must not be empty`,
 		},
 		{
-			name:    "setting key has wrong type",
-			value:   `[{"key":42}]`,
-			wantErr: `cannot unmarshal number into Go struct field CapabilitySetting.key of type string`,
+			name:      "setting key has wrong type",
+			value:     `[{"key":42}]`,
+			wantErr:   `--settings must be valid JSON array`,
+			wantValue: "number",
+			wantType:  reflect.TypeFor[string](),
 		},
 		{
-			name:    "options has wrong shape",
-			value:   `[{"key":"FUTURE_SETTING","options":{}}]`,
-			wantErr: `cannot unmarshal object into Go struct field CapabilitySetting.options of type []asc.CapabilityOption`,
+			name:      "options has wrong shape",
+			value:     `[{"key":"FUTURE_SETTING","options":{}}]`,
+			wantErr:   `--settings must be valid JSON array`,
+			wantValue: "object",
+			wantType:  reflect.TypeFor[[]asc.CapabilityOption](),
 		},
 		{
-			name:    "option has wrong shape",
-			value:   `[{"key":"FUTURE_SETTING","options":[true]}]`,
-			wantErr: `cannot unmarshal bool into Go struct field CapabilitySetting.options of type asc.CapabilityOption`,
+			name:      "option has wrong shape",
+			value:     `[{"key":"FUTURE_SETTING","options":[true]}]`,
+			wantErr:   `--settings must be valid JSON array`,
+			wantValue: "bool",
+			wantType:  reflect.TypeFor[asc.CapabilityOption](),
 		},
 		{
 			name:    "null is not an array",
@@ -314,6 +324,13 @@ func TestParseCapabilitySettingsRejectsInvalidStructure(t *testing.T) {
 			_, err := parseCapabilitySettings(tc.value)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+			if tc.wantType != nil {
+				// Go releases can change field-path wording; retain the typed cause.
+				var typeErr *json.UnmarshalTypeError
+				if !errors.As(err, &typeErr) || typeErr.Value != tc.wantValue || typeErr.Type != tc.wantType {
+					t.Fatalf("expected JSON %s into %v error, got %#v (%v)", tc.wantValue, tc.wantType, typeErr, err)
+				}
 			}
 		})
 	}
