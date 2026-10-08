@@ -323,6 +323,7 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("migrate import: %w", err)
 				}
+				defer client.CloseUploadConnections()
 				resolveCtx, cancelResolve := migrateRequestContext(ctx)
 				defer cancelResolve()
 				requestCtx = resolveCtx

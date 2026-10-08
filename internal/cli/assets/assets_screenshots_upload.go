@@ -587,24 +587,6 @@ func validateOpenedScreenshotFileFormat(filePath string, file *os.File) error {
 	return nil
 }
 
-// UploadScreenshotAsset uploads a screenshot file to a set.
-func UploadScreenshotAsset(ctx context.Context, client *asc.Client, setID, filePath string) (asc.AssetUploadResultItem, error) {
-	sourceRootPath, err := resolveScreenshotUploadRoot("", []string{filePath})
-	if err != nil {
-		return asc.AssetUploadResultItem{}, err
-	}
-	result, _, err := uploadScreenshotAsset(ctx, client, setID, sourceRootPath, filePath)
-	return result, err
-}
-
-// UploadScreenshotAssetFromFile uploads from an already-open, validated source
-// handle. Callers that discover files under a rooted filesystem can retain the
-// handle so a later pathname replacement cannot redirect the upload.
-func UploadScreenshotAssetFromFile(ctx context.Context, client *asc.Client, setID, filePath string, file *os.File) (asc.AssetUploadResultItem, error) {
-	result, _, err := uploadScreenshotAssetFromFile(ctx, client, setID, filePath, file)
-	return result, err
-}
-
 func waitForScreenshotDelivery(ctx context.Context, client *asc.Client, screenshotID string) (string, error) {
 	settled, err := waitForScreenshotSettlement(ctx, client, screenshotID)
 	state := ""
