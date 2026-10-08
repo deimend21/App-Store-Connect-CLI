@@ -168,7 +168,8 @@ func TestReleaseWorkflowKeepsHistoricalGuardrailsInline(t *testing.T) {
 		`make check-docs`,
 		`make check-wall-of-apps`,
 		`make lint`,
-		`ASC_BYPASS_KEYCHAIN=1 make test`,
+		`python3 scripts/test_release_rehearsal.py`,
+		`python3 scripts/go_test_shard.py "${shard_args[@]}" -- -count=1 -v`,
 	} {
 		if !strings.Contains(workflow, want) {
 			t.Errorf("release workflow missing historical guardrail %q", want)
@@ -868,7 +869,7 @@ func validateReleaseFanout(data []byte) error {
 		return fmt.Errorf("missing frozen source/reuse outputs")
 	}
 	freshCondition := "needs.prepare.outputs.published != 'true' && needs.resolve.outputs.reused != 'true'"
-	for _, name := range []string{"quality", "macos", "portable"} {
+	for _, name := range []string{"quality", "quality-tests", "macos", "portable"} {
 		job, ok := workflow.Jobs[name]
 		if !ok || job.If != freshCondition {
 			return fmt.Errorf("%s must run only for fresh candidates", name)
@@ -912,10 +913,10 @@ func validateReleaseFanout(data []byte) error {
 	if !tools || !join {
 		return fmt.Errorf("assembly must use current workflow tools and validate exact-source canonical assets")
 	}
-	if fmt.Sprint(build.Needs) != "[prepare resolve quality macos portable]" {
+	if fmt.Sprint(build.Needs) != "[prepare resolve quality quality-tests macos portable]" {
 		return fmt.Errorf("candidate join missing a fresh gate")
 	}
-	expected := "always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))"
+	expected := "always() && needs.prepare.result == 'success' && needs.resolve.result == 'success' && (needs.resolve.outputs.reused == 'true' || (needs.quality.result == 'success' && needs.quality-tests.result == 'success' && needs.macos.result == 'success' && needs.portable.result == 'success'))"
 	if build.If != expected {
 		return fmt.Errorf("candidate join permits failed gates or blocks qualified reuse")
 	}
@@ -932,6 +933,8 @@ func TestReleaseWorkflowFreshFanoutGates(t *testing.T) {
 	}
 	for _, mutation := range [][2]string{
 		{"needs.quality.result == 'success'", "needs.quality.result != 'cancelled'"},
+		{"needs.quality-tests.result == 'success'", "needs.quality-tests.result != 'cancelled'"},
+		{"      - quality-tests\n", ""},
 		{"needs.macos.result == 'success'", "needs.macos.result != 'cancelled'"},
 		{"needs.portable.result == 'success'", "needs.portable.result != 'cancelled'"},
 		{"cache: false", "cache: true"},
