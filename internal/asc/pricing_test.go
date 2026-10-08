@@ -124,26 +124,6 @@ func TestGetAppPricePoint(t *testing.T) {
 	}
 }
 
-func TestGetAppPricePointEqualizations(t *testing.T) {
-	resp := AppPricePointsV3Response{
-		Data: []Resource[AppPricePointV3Attributes]{
-			{Type: ResourceTypeAppPricePoints, ID: "pp-eq-1"},
-		},
-	}
-	body, _ := json.Marshal(resp)
-
-	client := newTestClient(t, func(req *http.Request) {
-		assertAuthorized(t, req)
-		if req.URL.Path != "/v3/appPricePoints/pp-1/equalizations" {
-			t.Fatalf("expected path /v3/appPricePoints/pp-1/equalizations, got %s", req.URL.Path)
-		}
-	}, jsonResponse(http.StatusOK, string(body)))
-
-	if _, err := client.GetAppPricePointEqualizations(context.Background(), "pp-1"); err != nil {
-		t.Fatalf("GetAppPricePointEqualizations() error: %v", err)
-	}
-}
-
 func TestGetAppPricePointEqualizations_WithQueryOptions(t *testing.T) {
 	resp := AppPricePointsV3Response{
 		Data: []Resource[AppPricePointV3Attributes]{
@@ -260,24 +240,6 @@ func TestGetAppPriceScheduleByID_RequiresID(t *testing.T) {
 	}
 }
 
-func TestGetAppPriceScheduleManualPrices(t *testing.T) {
-	resp := AppPricesResponse{
-		Data: []Resource[AppPriceAttributes]{{Type: ResourceTypeAppPrices, ID: "price-1"}},
-	}
-	body, _ := json.Marshal(resp)
-
-	client := newTestClient(t, func(req *http.Request) {
-		assertAuthorized(t, req)
-		if req.URL.Path != "/v1/appPriceSchedules/schedule-1/manualPrices" {
-			t.Fatalf("expected path /v1/appPriceSchedules/schedule-1/manualPrices, got %s", req.URL.Path)
-		}
-	}, jsonResponse(http.StatusOK, string(body)))
-
-	if _, err := client.GetAppPriceScheduleManualPrices(context.Background(), "schedule-1"); err != nil {
-		t.Fatalf("GetAppPriceScheduleManualPrices() error: %v", err)
-	}
-}
-
 func TestGetAppPriceScheduleManualPrices_WithQueryOptions(t *testing.T) {
 	resp := AppPricesResponse{
 		Data: []Resource[AppPriceAttributes]{{Type: ResourceTypeAppPrices, ID: "price-1"}},
@@ -332,24 +294,6 @@ func TestGetAppPriceScheduleManualPrices_WithQueryOptions(t *testing.T) {
 	}
 }
 
-func TestGetAppPriceScheduleAutomaticPrices(t *testing.T) {
-	resp := AppPricesResponse{
-		Data: []Resource[AppPriceAttributes]{{Type: ResourceTypeAppPrices, ID: "price-1"}},
-	}
-	body, _ := json.Marshal(resp)
-
-	client := newTestClient(t, func(req *http.Request) {
-		assertAuthorized(t, req)
-		if req.URL.Path != "/v1/appPriceSchedules/schedule-1/automaticPrices" {
-			t.Fatalf("expected path /v1/appPriceSchedules/schedule-1/automaticPrices, got %s", req.URL.Path)
-		}
-	}, jsonResponse(http.StatusOK, string(body)))
-
-	if _, err := client.GetAppPriceScheduleAutomaticPrices(context.Background(), "schedule-1"); err != nil {
-		t.Fatalf("GetAppPriceScheduleAutomaticPrices() error: %v", err)
-	}
-}
-
 func TestGetAppPriceScheduleAutomaticPrices_WithOptions(t *testing.T) {
 	resp := AppPricesResponse{
 		Data: []Resource[AppPriceAttributes]{{Type: ResourceTypeAppPrices, ID: "price-1"}},
@@ -387,31 +331,6 @@ func TestGetAppPriceScheduleAutomaticPrices_WithOptions(t *testing.T) {
 		WithAppPriceSchedulePricesPricePointFields([]string{"customerPrice", "proceeds", "territory"}),
 		WithAppPriceSchedulePricesTerritoryFields([]string{"currency"}),
 		WithAppPriceSchedulePricesLimit(200),
-	); err != nil {
-		t.Fatalf("GetAppPriceScheduleAutomaticPrices() error: %v", err)
-	}
-}
-
-func TestGetAppPriceScheduleAutomaticPrices_WithLimit(t *testing.T) {
-	resp := AppPricesResponse{
-		Data: []Resource[AppPriceAttributes]{{Type: ResourceTypeAppPrices, ID: "price-1"}},
-	}
-	body, _ := json.Marshal(resp)
-
-	client := newTestClient(t, func(req *http.Request) {
-		assertAuthorized(t, req)
-		if req.URL.Path != "/v1/appPriceSchedules/schedule-1/automaticPrices" {
-			t.Fatalf("expected path /v1/appPriceSchedules/schedule-1/automaticPrices, got %s", req.URL.Path)
-		}
-		if req.URL.Query().Get("limit") != "5" {
-			t.Fatalf("expected limit=5, got %q", req.URL.Query().Get("limit"))
-		}
-	}, jsonResponse(http.StatusOK, string(body)))
-
-	if _, err := client.GetAppPriceScheduleAutomaticPrices(
-		context.Background(),
-		"schedule-1",
-		WithAppPriceSchedulePricesLimit(5),
 	); err != nil {
 		t.Fatalf("GetAppPriceScheduleAutomaticPrices() error: %v", err)
 	}
