@@ -114,7 +114,7 @@ def run_local(args: argparse.Namespace) -> int:
         runs = []
 
         def start(label: str, command: list[str], cpus: int = 1) -> None:
-            log = open(os.path.join(directory, f"{len(runs)}.log"), "w+")
+            log = open(os.path.join(directory, f"{len(runs)}.log"), "w+b")
             environment = {**os.environ, "GOMAXPROCS": str(cpus)}
             process = subprocess.Popen(
                 command, stdout=log, stderr=subprocess.STDOUT, env=environment, start_new_session=True
@@ -148,7 +148,7 @@ def run_local(args: argparse.Namespace) -> int:
                 status = process.wait()
                 log.seek(0)
                 print(f"==> {label} (exit {status})", flush=True)
-                sys.stdout.write(log.read())
+                sys.stdout.buffer.write(log.read())
                 sys.stdout.flush()
                 if status != 0:
                     failed.append(label)
@@ -156,10 +156,11 @@ def run_local(args: argparse.Namespace) -> int:
             # Stop every run, test binaries included, before the caller removes
             # their shared state.
             for _, log, process in runs:
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except (ProcessLookupError, PermissionError):
+                        pass
                 process.wait()
                 log.close()
     for label in failed:
