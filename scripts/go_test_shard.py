@@ -95,7 +95,11 @@ def list_tests(package: str, *flags: str, env: dict[str, str] | None = None) -> 
 
 def run_local(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-    budget = args.jobs or int(os.environ.get("GOMAXPROCS") or 0) or os.cpu_count() or 1
+    gomaxprocs = os.environ.get("GOMAXPROCS") or "0"
+    if not gomaxprocs.isdigit():
+        print(f"error: GOMAXPROCS must be a positive integer, got {gomaxprocs!r}", file=sys.stderr)
+        return 2
+    budget = args.jobs or int(gomaxprocs) or os.cpu_count() or 1
     packages = go_list(args.packages)
     split = [package for package in dict.fromkeys(go_list(args.split) if args.split else []) if package in packages]
     rest = [package for package in packages if package not in split]
@@ -190,6 +194,8 @@ def parse_args() -> argparse.Namespace:
     if args.go_test_args and args.go_test_args[0] == "--":
         args.go_test_args = args.go_test_args[1:]
     if args.mode == "local":
+        if args.jobs < 0:
+            parser.error("--jobs must be a positive integer")
         return args
     if args.shard_total < 1:
         parser.error("--shard-total must be at least 1")
@@ -205,7 +211,13 @@ def main() -> int:
     if args.mode == "tests":
         return run_test_shard(args)
     if args.mode == "local":
-        return run_local(args)
+        try:
+            return run_local(args)
+        except KeyboardInterrupt:
+            return 130
+        except subprocess.CalledProcessError as error:
+            # go already printed the failure to stderr.
+            return error.returncode
     raise AssertionError(f"unknown mode {args.mode}")
 
 

@@ -113,7 +113,8 @@ build-debug:
 # Per-run config isolation and high-volume filesystem logs make test-result
 # caching costly. Disable result caching while retaining Go's compile cache.
 # The slowest packages run as concurrent test shards beside the rest of ./...;
-# TEST_JOBS sets the CPU budget (default: GOMAXPROCS, else the CPU count).
+# TEST_JOBS sets the CPU budget (default: GOMAXPROCS, else the CPU count). It is
+# a soft budget: it sizes shard and package fan-out, not a hard CPU limit.
 TEST_JOBS ?=
 LOCAL_TEST = GO="$(GO)" python3 scripts/go_test_shard.py local --split ./internal/cli/cmdtest --split ./internal/cli/web $(if $(TEST_JOBS),--jobs $(TEST_JOBS)) --
 
@@ -344,8 +345,8 @@ help:
 	@echo "  build          Build the binary"
 	@echo "  build-all      Build release binaries for supported platforms"
 	@echo "  build-debug    Build with debug symbols"
-	@echo "  test           Run tests (TEST_JOBS=<n> sets the CPU budget)"
-	@echo "  test-short     Run the short test suite (TEST_JOBS=<n> sets the CPU budget)"
+	@echo "  test           Run tests (TEST_JOBS=<n> sets a soft CPU budget)"
+	@echo "  test-short     Run the short test suite (TEST_JOBS=<n> sets a soft CPU budget)"
 	@echo "  test-parallel  Run tests with optional package parallelism (PARALLEL=<n>)"
 	@echo "  test-coverage  Run tests with coverage"
 	@echo "  test-integration  Run opt-in integration tests"
