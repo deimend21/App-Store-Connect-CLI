@@ -1430,14 +1430,6 @@ class HookChecksTest(unittest.TestCase):
         self.assertNotIn("make lint", calls)
         self.assertNotIn("make test-short", calls)
 
-    def test_lint_or_test_failure_blocks_commit_after_both_run(self) -> None:
-        for target in ["lint", "test-short"]:
-            with self.subTest(target=target):
-                code, calls = self.run_hook(["main.go"], fail_target=target)
-                self.assertNotEqual(code, 0)
-                self.assertIn("make lint", calls)
-                self.assertIn("make test-short", calls)
-
     def test_instruction_docs_run_validators_without_go_gates(self) -> None:
         for path in ["AGENTS.md", ".agents/skills/watch-asc-pr/SKILL.md",
                      ".agents/skills/watch-asc-pr/references/checks.md",

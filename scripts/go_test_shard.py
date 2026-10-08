@@ -8,11 +8,11 @@ The script supports three modes:
 * tests mode: list top-level tests in a single package and run a stable subset
   through one `go test -run` regex.
 * local mode: run every package at once on one host, splitting the slowest
-  packages into test shards. Each `go test` process gets GOMAXPROCS=1, and the
-  CPU budget (--jobs, else GOMAXPROCS, else the CPU count) is split between
-  the remaining-packages run (-p) and one CPU per shard. Without split packages,
-  or with a budget too small to give each one a shard, it runs one plain
-  `go test -p=<budget>`.
+  packages into test shards. Half the CPU budget (--jobs, else GOMAXPROCS,
+  else the CPU count) runs shards at GOMAXPROCS=1 each; the remaining packages
+  run as one `go test` with GOMAXPROCS and -p set to the other half. Without
+  split packages, or with a budget too small to give each one a shard, it runs
+  one `go test` with GOMAXPROCS and -p set to the whole budget.
 
 It intentionally keeps selection deterministic from repository contents only so
 CI does not depend on checked-in timing data.
@@ -99,40 +99,44 @@ def run_local(args: argparse.Namespace) -> int:
     packages = go_list(args.packages)
     split = [package for package in dict.fromkeys(go_list(args.split) if args.split else []) if package in packages]
     rest = [package for package in packages if package not in split]
-    environment = {**os.environ, "GOMAXPROCS": "1"}
     # Half the budget runs shards of the split packages, one CPU per shard,
     # handed out in --split order; the other half runs the remaining packages.
     shard_slots = budget // 2
     if not split or shard_slots < len(split):
-        commands = [(f"{len(packages)} package(s), -p={budget}", [GO, "test", f"-p={budget}", *args.go_test_args, *packages])]
-        split = []
-    else:
-        commands = []
-        if rest:
-            commands.append((f"{len(rest)} package(s), -p={budget - shard_slots}",
-                             [GO, "test", f"-p={budget - shard_slots}", *args.go_test_args, *rest]))
-    for index, package in enumerate(split):
-        shards = shard_slots // len(split) + (index < shard_slots % len(split))
-        # Listing builds the test binary once, before anything else runs, so
-        # the shards reuse it. A package that fails to build runs whole.
-        try:
-            tests = list_tests(package, f"-p={budget}", env=environment)
-        except subprocess.CalledProcessError:
-            commands.append((package, [GO, "test", *args.go_test_args, package]))
-            continue
-        for shard in range(shards):
-            selected = select_shard(tests, shard, shards)
-            if selected:
-                commands.append((f"{package} shard {shard + 1}/{shards}",
-                                 [GO, "test", *args.go_test_args, "-run", run_pattern(selected), package]))
+        split, rest, shard_slots = [], args.packages, 0
 
     failed = []
     with tempfile.TemporaryDirectory(prefix="go-test-local-") as directory:
         runs = []
+
+        def start(label: str, command: list[str], cpus: int = 1) -> None:
+            log = open(os.path.join(directory, f"{len(runs)}.log"), "w+")
+            environment = {**os.environ, "GOMAXPROCS": str(cpus)}
+            runs.append((label, log, subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)))
+
         try:
-            for index, (label, command) in enumerate(commands):
-                log = open(os.path.join(directory, f"{index}.log"), "w+")
-                runs.append((label, log, subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=environment)))
+            if rest or not split:
+                rest_jobs = budget - shard_slots
+                start(f"packages, -p={rest_jobs}", [GO, "test", f"-p={rest_jobs}", *args.go_test_args, *rest], rest_jobs)
+            # Listing builds each split package's test binary within the
+            # shards' share of the budget, so the shards reuse it. A package
+            # that fails to build runs whole and reports the failure.
+            listed = {}
+            for package in split:
+                try:
+                    listed[package] = list_tests(package, f"-p={shard_slots}", env={**os.environ, "GOMAXPROCS": "1"})
+                except subprocess.CalledProcessError:
+                    listed[package] = None
+            for index, package in enumerate(split):
+                if listed[package] is None:
+                    start(package, [GO, "test", *args.go_test_args, package])
+                    continue
+                shards = shard_slots // len(split) + (index < shard_slots % len(split))
+                for shard in range(shards):
+                    selected = select_shard(listed[package], shard, shards)
+                    if selected:
+                        start(f"{package} shard {shard + 1}/{shards}",
+                              [GO, "test", *args.go_test_args, "-run", run_pattern(selected), package])
             for label, log, process in runs:
                 status = process.wait()
                 log.seek(0)

@@ -104,35 +104,10 @@ fi
 echo "Running format checks..."
 make format-check
 
-# The make target strips inherited ASC_* settings and pins ASC_CONFIG_PATH so
-# the suite never reads the developer's stored config.
-cpus="${GOMAXPROCS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
-if [ "$cpus" -lt 2 ]; then
-  echo "Running lint checks..."
-  make lint
-  echo "Running short test suite..."
-  make test-short
-  exit 0
-fi
-
-# Lint and the short suite run side by side, splitting the CPU budget.
-lint_log="$(mktemp "${TMPDIR:-/tmp}/asc-pre-commit-lint.XXXXXX")"
-trap 'rm -f "$lint_log"' EXIT
-
-echo "Running lint checks in the background..."
-GOMAXPROCS=$(( cpus / 2 )) make lint > "$lint_log" 2>&1 &
-lint_pid=$!
+echo "Running lint checks..."
+make lint
 
 echo "Running short test suite..."
-test_status=0
-TEST_JOBS=$(( cpus - cpus / 2 )) make test-short || test_status=$?
-
-lint_status=0
-wait "$lint_pid" || lint_status=$?
-echo "Lint output:"
-cat "$lint_log"
-
-if [ "$lint_status" -ne 0 ] || [ "$test_status" -ne 0 ]; then
-  echo "pre-commit failed: lint exit $lint_status, short tests exit $test_status" >&2
-  exit 1
-fi
+# The make target strips inherited ASC_* settings and pins ASC_CONFIG_PATH so
+# the suite never reads the developer's stored config.
+make test-short
