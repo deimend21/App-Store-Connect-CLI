@@ -800,3 +800,40 @@ func TestVerifySourceFileChecksums(t *testing.T) {
 		t.Fatalf("expected SHA256 hash %s, got %#v", expected.File.Hash, computed.File)
 	}
 }
+
+func TestVerifySourceFileChecksumsSameAlgorithmComposite(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "checksum.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	const helloMD5 = "5d41402abc4b2a76b9719d911017c592"
+
+	tests := []struct {
+		name          string
+		compositeHash string
+		wantErr       string
+	}{
+		{name: "match", compositeHash: helloMD5},
+		{name: "composite mismatch", compositeHash: "00000000000000000000000000000000", wantErr: "composite checksum mismatch"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			computed, err := VerifySourceFileChecksums(filePath, &Checksums{
+				File:      &Checksum{Hash: helloMD5, Algorithm: ChecksumAlgorithmMD5},
+				Composite: &Checksum{Hash: test.compositeHash, Algorithm: ChecksumAlgorithmMD5},
+			})
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", test.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("VerifySourceFileChecksums() error: %v", err)
+			}
+			if computed.Composite == nil || computed.Composite.Hash != helloMD5 {
+				t.Fatalf("expected composite hash %s, got %#v", helloMD5, computed.Composite)
+			}
+		})
+	}
+}

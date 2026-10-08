@@ -38,9 +38,11 @@ func UploadAsset(ctx context.Context, filePath string, operations []UploadOperat
 }
 
 // UploadAssetFromFile uploads a file using the provided upload operations.
-// Operations run sequentially through the shared upload executor, so a part
+// Operations run concurrently through the shared upload executor, so a part
 // that hits a transient transport failure or retryable status is retried
-// instead of leaving the asset partially uploaded.
+// instead of leaving the asset partially uploaded. When several parts fail,
+// the error is from the first to fail in time, not the lowest-numbered part;
+// parts still in flight are cancelled.
 func UploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, operations []UploadOperation) error {
 	return uploadAssetFromFile(ctx, file, fileSize, operations, newUploadClient)
 }
@@ -57,11 +59,6 @@ func uploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, ope
 	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	uploadOpts := UploadOptions{
-		Client:    clientWithoutRedirects(newClient()),
-		RetryOpts: ResolveRetryOptions(),
 	}
 
 	for i, op := range operations {
@@ -82,13 +79,7 @@ func uploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, ope
 		}
 	}
 
-	for i, op := range operations {
-		if err := executeUploadOperation(ctx, file, uploadTask{index: i, op: op}, uploadOpts); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return ExecuteUploadOperationsFromFile(ctx, file, operations, WithUploadHTTPClient(newClient()))
 }
 
 // ValidateAssetFile validates that a file exists and is safe to read.
