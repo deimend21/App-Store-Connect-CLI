@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"slices"
-	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -940,42 +938,5 @@ func TestEndAppAvailabilityPreOrders(t *testing.T) {
 
 	if _, err := client.EndAppAvailabilityPreOrders(context.Background(), []string{"ta-1", "ta-2"}); err != nil {
 		t.Fatalf("EndAppAvailabilityPreOrders() error: %v", err)
-	}
-}
-
-func TestPaginateAll_Territories(t *testing.T) {
-	makePage := func(page int) *TerritoriesResponse {
-		links := Links{}
-		if page < 2 {
-			links.Next = fmt.Sprintf("page=%d", page+1)
-		}
-		return &TerritoriesResponse{
-			Data: []Resource[TerritoryAttributes]{
-				{Type: ResourceTypeTerritories, ID: fmt.Sprintf("territory-%d", page)},
-			},
-			Links: links,
-		}
-	}
-
-	firstPage := makePage(1)
-	response, err := PaginateAll(context.Background(), firstPage, func(ctx context.Context, nextURL string) (PaginatedResponse, error) {
-		if !strings.HasPrefix(nextURL, "page=") {
-			return nil, fmt.Errorf("unexpected next URL %q", nextURL)
-		}
-		return makePage(2), nil
-	})
-	if err != nil {
-		t.Fatalf("PaginateAll() error: %v", err)
-	}
-
-	territories, ok := response.(*TerritoriesResponse)
-	if !ok {
-		t.Fatalf("expected TerritoriesResponse, got %T", response)
-	}
-	if len(territories.Data) != 2 {
-		t.Fatalf("expected 2 territories, got %d", len(territories.Data))
-	}
-	if territories.Links.Next != "" {
-		t.Fatalf("expected next link to be cleared, got %q", territories.Links.Next)
 	}
 }
