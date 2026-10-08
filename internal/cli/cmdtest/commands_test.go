@@ -3571,6 +3571,11 @@ func TestBuildsTestNotesValidationErrors(t *testing.T) {
 			wantErr: "--localization-id cannot be combined with build selectors or --locale",
 		},
 		{
+			name:    "builds test-notes update localization id conflicts with build selector without locale",
+			args:    []string{"builds", "test-notes", "update", "--localization-id", "LOC_ID", "--build-id", "BUILD_ID", "--whats-new", "Notes"},
+			wantErr: "--localization-id cannot be combined with build selectors or --locale",
+		},
+		{
 			name:    "builds test-notes update missing locale for build selector",
 			args:    []string{"builds", "test-notes", "update", "--build-id", "BUILD_ID", "--whats-new", "Notes"},
 			wantErr: "either --localization-id or (--locale and a build selector) is required",
