@@ -44,6 +44,12 @@ FLAGS
 
 
 class ParseHelpTests(unittest.TestCase):
+    @patch.object(check_commands_docs.subprocess, "run")
+    def test_command_check_uses_explicit_binary_without_go_run(self, run: Mock) -> None:
+        run.return_value = Mock(stdout=HELP_WITH_SAMPLES, stderr="")
+        self.assertEqual(check_commands_docs.run_help_text(Path("/tmp/current-asc")), HELP_WITH_SAMPLES)
+        self.assertEqual(run.call_args.args[0], ["/tmp/current-asc", "--help"])
+
     @patch.object(generate_command_docs.subprocess, "run")
     def test_help_stdout_wins_over_go_download_diagnostics(self, run: Mock) -> None:
         run.return_value = Mock(stdout=HELP_WITH_SAMPLES, stderr="go: downloading example.com/module\n")
