@@ -448,6 +448,26 @@ func TestAccountAndDistributionInputValidationReturnsUsageExitCode(t *testing.T)
 			args:    []string{"xcode-cloud", "workflows", "--next", "http://api.appstoreconnect.apple.com/v1/apps"},
 			wantErr: "xcode-cloud workflows: --next must be an App Store Connect URL",
 		},
+		{
+			name:    "bundle-ids app view without id",
+			args:    []string{"bundle-ids", "app", "view"},
+			wantErr: "--id is required",
+		},
+		{
+			name:    "background-assets app-store-releases view without id",
+			args:    []string{"background-assets", "app-store-releases", "view"},
+			wantErr: "--id is required",
+		},
+		{
+			name:    "background-assets external-beta-releases view without id",
+			args:    []string{"background-assets", "external-beta-releases", "view"},
+			wantErr: "--id is required",
+		},
+		{
+			name:    "background-assets internal-beta-releases view without id",
+			args:    []string{"background-assets", "internal-beta-releases", "view"},
+			wantErr: "--id is required",
+		},
 	}
 
 	for _, test := range tests {

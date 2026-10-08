@@ -84,6 +84,11 @@ func TestIAPInputValidationReturnsUsageExitCode(t *testing.T) {
 			args:    []string{"iap", "pricing", "availabilities", "available-territories", "--limit", "201"},
 			wantErr: "iap availabilities available-territories: --limit must be between 1 and 200",
 		},
+		{
+			name:    "versions images view without image-id",
+			args:    []string{"iap", "versions", "images", "view"},
+			wantErr: "--image-id is required",
+		},
 	}
 
 	for _, test := range tests {
