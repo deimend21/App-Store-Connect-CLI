@@ -4,8 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	webcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/web"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 var testConfigPath string
@@ -23,12 +26,12 @@ func TestMain(m *testing.M) {
 	originalStdin := os.Stdin
 	os.Stdin = testStdin
 	restoreControllingTTY := webcli.DisableControllingTTYForTesting()
+	// The core web package tests the default and rate-limit behavior.
+	restorePacing := webcore.DisableRequestPacingForTesting()
+	restoreAssetLibraryPoll := asc.SetAssetLibraryProcessingPollIntervalForTest(time.Millisecond)
 
 	_ = os.Setenv("ASC_CONFIG_PATH", testConfigPath)
 	_ = os.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-	// Mock HTTP fixtures keep production pacing enabled at its minimum; the
-	// core web package separately tests the default and rate-limit behavior.
-	_ = os.Setenv("ASC_WEB_MIN_REQUEST_INTERVAL", "200ms")
 	_ = os.Setenv("ASC_MAX_RETRIES", "0")
 	_ = os.Setenv("ASC_TELEMETRY_DISABLED", "1")
 	_ = os.Setenv("HOME", tempDir)
@@ -40,6 +43,8 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	restoreAssetLibraryPoll()
+	restorePacing()
 	restoreControllingTTY()
 	os.Stdin = originalStdin
 	_ = testStdin.Close()
