@@ -840,12 +840,12 @@ func screenshotTestPNG(t *testing.T, metadata, pixels string) []byte {
 	return png
 }
 
-func TestVideoPreviewsDownload_HLSPlaylistIsNotSavedUnderVideoName(t *testing.T) {
+func TestVideoPreviewsDownload_HLSPlaylist(t *testing.T) {
 	setupAuth(t)
 
 	playlist := "#EXTM3U\n#EXT-X-VERSION:7\n"
 	media := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/P1_default.m3u8" {
+		if req.URL.Path != "/stream" {
 			t.Errorf("unexpected media path: %s", req.URL.Path)
 			http.NotFound(w, req)
 			return
@@ -855,16 +855,24 @@ func TestVideoPreviewsDownload_HLSPlaylistIsNotSavedUnderVideoName(t *testing.T)
 	}))
 	t.Cleanup(media.Close)
 
+	preview := `{"type":"appPreviews","id":"prev-1","attributes":{"fileName":"preview.mp4","mimeType":"video/mp4","videoUrl":"` + media.URL + `/stream"}}`
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host != "api.appstoreconnect.apple.com" {
 			return originalTransport.RoundTrip(req)
 		}
-		if req.URL.Path != "/v1/appPreviews/prev-1" {
+		var body string
+		switch req.URL.Path {
+		case "/v1/appPreviews/prev-1":
+			body = `{"data":` + preview + `}`
+		case "/v1/appStoreVersionLocalizations/loc-1/appPreviewSets":
+			body = `{"data":[{"type":"appPreviewSets","id":"set-1","attributes":{"previewType":"IPHONE_65"}}]}`
+		case "/v1/appPreviewSets/set-1/appPreviews":
+			body = `{"data":[` + preview + `]}`
+		default:
 			t.Fatalf("unexpected API path: %s", req.URL.Path)
 		}
-		body := `{"data":{"type":"appPreviews","id":"prev-1","attributes":{"fileName":"preview.mp4","mimeType":"video/mp4","videoUrl":"` + media.URL + `/P1_default.m3u8"}}}`
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Body:       io.NopCloser(strings.NewReader(body)),
@@ -872,38 +880,56 @@ func TestVideoPreviewsDownload_HLSPlaylistIsNotSavedUnderVideoName(t *testing.T)
 		}, nil
 	})
 
-	dir := t.TempDir()
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{"video-previews", "download", "--id", "prev-1", "--output", filepath.Join(dir, "preview.mp4")}); err != nil {
-			t.Fatalf("parse error: %v", err)
+	run := func(args ...string) (string, string) {
+		t.Helper()
+		root := RootCommand("1.2.3")
+		root.FlagSet.SetOutput(io.Discard)
+		return captureOutput(t, func() {
+			if err := root.Parse(append([]string{"video-previews", "download"}, args...)); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			if err := root.Run(context.Background()); err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+		})
+	}
+	assertSaved := func(stdout, wantPath string) {
+		t.Helper()
+		var result struct {
+			Items []struct {
+				OutputPath string `json:"outputPath"`
+			} `json:"items"`
 		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("decode stdout JSON: %v (stdout=%q)", err, stdout)
 		}
-	})
+		if len(result.Items) != 1 || result.Items[0].OutputPath != wantPath {
+			t.Fatalf("items = %+v, want one item with outputPath %q", result.Items, wantPath)
+		}
+		data, err := os.ReadFile(wantPath)
+		if err != nil {
+			t.Fatalf("ReadFile() error: %v", err)
+		}
+		if string(data) != playlist {
+			t.Fatalf("unexpected file contents: %q", string(data))
+		}
+	}
 
-	var result struct {
-		Items []struct {
-			OutputPath string `json:"outputPath"`
-		} `json:"items"`
+	explicit := filepath.Join(t.TempDir(), "preview.mp4")
+	stdout, stderr := run("--id", "prev-1", "--output", explicit)
+	assertSaved(stdout, explicit)
+	wantWarning := "Warning: App Store Connect only exposes an HLS streaming playlist for previews; " + explicit + " is a .m3u8 playlist, not a video file\n"
+	if stderr != wantWarning {
+		t.Fatalf("stderr = %q, want %q", stderr, wantWarning)
 	}
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode stdout JSON: %v (stdout=%q)", err, stdout)
+
+	outDir := t.TempDir()
+	stdout, stderr = run("--version-localization", "loc-1", "--output-dir", outDir)
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
 	}
-	wantPath := filepath.Join(dir, "preview.m3u8")
-	if len(result.Items) != 1 || result.Items[0].OutputPath != wantPath {
-		t.Fatalf("items = %+v, want one item with outputPath %q", result.Items, wantPath)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "preview.mp4")); !errors.Is(err, os.ErrNotExist) {
+	assertSaved(stdout, filepath.Join(outDir, "IPHONE_65", "01_prev-1_preview.m3u8"))
+	if _, err := os.Stat(filepath.Join(outDir, "IPHONE_65", "01_prev-1_preview.mp4")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("playlist was saved under the .mp4 name (stat err = %v)", err)
-	}
-	data, err := os.ReadFile(wantPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if string(data) != playlist {
-		t.Fatalf("unexpected file contents: %q", string(data))
 	}
 }
