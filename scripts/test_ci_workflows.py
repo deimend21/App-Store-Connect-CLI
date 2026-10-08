@@ -250,23 +250,29 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
     quality = job_block(workflow, "quality-checks")
     assert "runs-on: ubuntu-latest" in quality
     assert "python3 scripts/test_ci_change_scope.py" in quality
-    assert "contains(fromJSON('[\"telemetry\", \"full\"]'), needs.changes.outputs.scope)" in quality
     # Agents.md: formatting, documentation, and lint must keep running on PR and main.
     for command in (
         "make format-check",
         "python3 scripts/test_check_docs.py",
         "make check-docs",
         "make check-wall-of-apps",
-        "make lint",
     ):
         assert command in quality, f"{path}: quality-checks must run {command!r}"
+    lint = job_block(workflow, "lint")
+    assert "make lint" in lint, f"{path}: lint must run 'make lint'"
     # Every test job runs on ubuntu, so darwin- and windows-gated sources and tests
     # are never type-checked unless CI vets them explicitly. golangci-lint covers
     # GOOS=linux with tests enabled, so only the two absent platforms need a pass.
-    for goos in ("darwin", "windows"):
-        assert f"GOOS={goos} go vet ./..." in quality, (
-            f"{path}: quality-checks must type-check {goos}-gated code"
-        )
+    vet = job_block(workflow, "vet-platforms")
+    assert "goos: [darwin, windows]" in vet, f"{path}: vet-platforms must type-check darwin and windows"
+    assert "run: GOOS=${{ matrix.goos }} go vet ./..." in vet
+    for job in (lint, vet):
+        assert "runs-on: ubuntu-latest" in job
+        assert "contains(fromJSON('[\"telemetry\", \"full\"]'), needs.changes.outputs.scope)" in job
+    gate = job_block(workflow, "format-and-lint")
+    assert "needs: [changes, wall-only-check, quality-checks, lint, vet-platforms, website-checks]" in gate
+    for result in ("needs.quality-checks.result", "needs.lint.result", "needs.vet-platforms.result"):
+        assert result in gate, f"{path}: format-and-lint must require {result}"
     website = job_block(workflow, "website-checks")
     assert "uses: ./.github/workflows/website-checks.yml" in website
     assert "needs.changes.outputs.website_affected == 'true'" in website
@@ -294,10 +300,22 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
             f"{path}: {runner} must run ./internal/rootfs with the keychain bypass"
         )
     windows = matrix_command_for_runner(build_platforms, "windows-latest")
+    macos = matrix_command_for_runner(build_platforms, "macos-latest")
+    for runner, command, tests in (
+        ("macos-latest", macos, (
+            "ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/secureopen -run 'NoInherit'",
+            "ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/certificates -run 'ACL|OwnerOnlyAtCreation'",
+        )),
+        ("windows-latest", windows, (
+            "ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/secureopen\n",
+            "ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/certificates -run '^TestCreateCertificateExportStagingFileProtectsDACLAtCreation$'",
+        )),
+    ):
+        for test in tests:
+            assert test in command, f"{path}: {runner} must run native file-permission test {test.strip()!r}"
     assert "ASC_BYPASS_KEYCHAIN=1 ASC_WINDOWS_CREDENTIAL_SMOKE=1 ASC_WINDOWS_SMOKE_BINARY=../../../build/asc_dev_windows_amd64.exe go test -count=1 ./internal/cli/auth -run '^TestWindowsCredentialManagerNativeRoundTrip$'" in windows, (
         f"{path}: missing opt-in native Windows Credential Manager smoke"
     )
-    macos = matrix_command_for_runner(build_platforms, "macos-latest")
     for variable in ("CGO_CFLAGS", "CGO_LDFLAGS"):
         assert f'export {variable}="-O2 -g -mmacosx-version-min=13.0"' in macos, (
             f"{path}: Darwin minimum must participate in the CGO build cache key"
@@ -334,8 +352,13 @@ def assert_optimized_workflow_rejects_weakened_checks() -> None:
             "make check-docs",
             "make check-wall-of-apps",
             "make lint",
-            "GOOS=darwin go vet ./...",
-            "GOOS=windows go vet ./...",
+            "goos: [darwin, windows]",
+            "GOOS=${{ matrix.goos }} go vet ./...",
+            "needs.lint.result",
+            "needs.vet-platforms.result",
+            "./internal/secureopen -run 'NoInherit'",
+            "./internal/cli/certificates -run 'ACL|OwnerOnlyAtCreation'",
+            "./internal/cli/certificates -run '^TestCreateCertificateExportStagingFileProtectsDACLAtCreation$'",
             "python3 scripts/go_test_shard.py",
             "--packages ./...",
             "ASC_BYPASS_KEYCHAIN=1",
@@ -796,11 +819,10 @@ def assert_go_tool_cache_identity() -> None:
 def assert_lint_analysis_cache() -> None:
     prefix = "golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-"
     for path in (PR_WORKFLOW, MAIN_WORKFLOW):
-        quality = job_block(path.read_text(), "quality-checks")
+        quality = job_block(path.read_text(), "lint")
         cache = re.search(r"- name: Cache lint analysis\n(.*?)(?=\n      - )", quality, re.DOTALL)
         assert cache is not None, f"{path}: persist the actual lint analysis cache"
         block = cache.group(1)
-        assert "if: contains(fromJSON('[\"telemetry\", \"full\"]'), needs.changes.outputs.scope)" in block
         assert "uses: actions/cache@v6" in block
         assert "path: ${{ github.workspace }}/.golangci-cache" in block
         assert "key: " + prefix + "${{ github.sha }}" in block
@@ -841,7 +863,7 @@ def assert_ci_workload_caches() -> None:
         raise AssertionError(f"cache accepts missing identity {token}")
     for path, test_job in ((PR_WORKFLOW, "unit-test-shards"), (MAIN_WORKFLOW, "test-shards")):
         workflow = path.read_text()
-        for job, workload in (("quality-checks", "quality"), (test_job, "test-${{ matrix.name }}"), ("build-platforms", "build-${{ matrix.name }}")):
+        for job, workload in (("quality-checks", "quality"), ("lint", "lint"), ("vet-platforms", "vet-${{ matrix.goos }}"), (test_job, "test-${{ matrix.name }}"), ("build-platforms", "build-${{ matrix.name }}")):
             block = job_block(workflow, job)
             assert "uses: ./.github/actions/setup-go-cache" in block, f"{path}: {job} must own its compiled cache"
             assert "workload: " + workload in block
@@ -871,7 +893,6 @@ def main() -> None:
     for required_job in ("format-and-lint", "unit-tests", "build"):
         assert "if: always()" in job_block(pr, required_job), f"required job {required_job} must always resolve"
     quality_gate = job_block(pr, "format-and-lint")
-    assert "needs: [changes, wall-only-check, quality-checks, website-checks]" in quality_gate
     assert "needs.website-checks.result" in quality_gate
 
     website = WEBSITE_WORKFLOW.read_text()
