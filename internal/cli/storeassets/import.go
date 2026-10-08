@@ -334,7 +334,7 @@ func uploadHeader(ctx context.Context, c *asc.Client, locID, path string, curren
 	}
 	uploadCtx, cancel := shared.ContextWithUploadTimeout(shared.ContextWithoutTimeout(ctx))
 	defer cancel()
-	if err := asc.UploadAssetFromFile(uploadCtx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
+	if err := c.UploadAssetFromFile(uploadCtx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
 		return id, "upload", current.ID != "", err
 	}
 	_, err = request(ctx, func(ctx context.Context) (*asc.AppClipHeaderImageResponse, error) {

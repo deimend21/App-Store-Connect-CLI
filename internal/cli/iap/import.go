@@ -545,7 +545,7 @@ func uploadIAPImportReviewScreenshot(ctx context.Context, client *asc.Client, ro
 		return screenshotID, fmt.Errorf("create review screenshot: no upload operations returned")
 	}
 
-	if err := asc.UploadAssetFromFile(uploadCtx, snapshot, info.Size(), reservation.Data.Attributes.UploadOperations); err != nil {
+	if err := client.UploadAssetFromFile(uploadCtx, snapshot, info.Size(), reservation.Data.Attributes.UploadOperations); err != nil {
 		return screenshotID, fmt.Errorf("upload review screenshot: %w", err)
 	}
 

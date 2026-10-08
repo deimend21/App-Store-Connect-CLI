@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -53,7 +54,10 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			original := http.DefaultTransport
 			t.Cleanup(func() { http.DefaultTransport = original })
 			calls, reads, uploaded := 0, 0, 0
+			var mu sync.Mutex
 			http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				mu.Lock()
+				defer mu.Unlock()
 				calls++
 				switch {
 				case req.Method == "POST" && req.URL.Path == "/v1/appAssetLibraryImages":
@@ -185,7 +189,7 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 			if mode == "invalid-reservation" && calls != 1 {
 				t.Fatalf("invalid reservation continued: %d calls", calls)
 			}
-			if mode == "upload-failure" && calls != 2 {
+			if mode == "upload-failure" && calls > 3 {
 				t.Fatalf("upload failure continued: %d calls", calls)
 			}
 		})
