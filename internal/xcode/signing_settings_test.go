@@ -8679,3 +8679,23 @@ func TestSigningPlanRootStaysOpenWhileBorrowedAfterScopeEnds(t *testing.T) {
 		t.Fatal("expected the cached root to close after its last borrower released it")
 	}
 }
+
+func TestSigningPlanRootCacheIsBounded(t *testing.T) {
+	endScope := beginSigningPlanRootScope()
+	defer endScope()
+	base := t.TempDir()
+	for index := 0; index <= signingPlanMaxCachedRoots; index++ {
+		dir := filepath.Join(base, fmt.Sprint(index))
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, release, err := openSigningRoot(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	if got := len(signingPlanRoots.roots); got != signingPlanMaxCachedRoots {
+		t.Fatalf("cached roots = %d, want %d", got, signingPlanMaxCachedRoots)
+	}
+}

@@ -4063,6 +4063,10 @@ func readSigningRegularFile(path string, limit int64) ([]byte, error) {
 // rooted operation still reopens the selected directory without following
 // symlinks and verifies its pinned identity, so a replaced directory fails
 // closed rather than redirecting a read.
+// signingPlanMaxCachedRoots bounds the directory descriptors one plan build
+// keeps open; directories beyond it get a Root that closes after each use.
+const signingPlanMaxCachedRoots = 64
+
 var signingPlanRoots struct {
 	sync.Mutex
 	scopes   int
@@ -4101,7 +4105,8 @@ func closeIdleSigningPlanRootsLocked() {
 
 func openSigningRoot(directory string) (rootfs.Root, func(), error) {
 	signingPlanRoots.Lock()
-	if signingPlanRoots.scopes == 0 {
+	cached, ok := signingPlanRoots.roots[directory]
+	if signingPlanRoots.scopes == 0 || (!ok && len(signingPlanRoots.roots) >= signingPlanMaxCachedRoots) {
 		signingPlanRoots.Unlock()
 		root, err := rootfs.New(directory)
 		if err != nil {
@@ -4110,7 +4115,7 @@ func openSigningRoot(directory string) (rootfs.Root, func(), error) {
 		return root, func() { _ = root.Close() }, nil
 	}
 	defer signingPlanRoots.Unlock()
-	root, ok := signingPlanRoots.roots[directory]
+	root := cached
 	if !ok {
 		var err error
 		root, err = rootfs.New(directory)
