@@ -132,7 +132,13 @@ func exportPlan(ctx context.Context, client *asc.Client, versionID, metadataPref
 						}
 					}
 					path := filepath.Join("app_previews", loc.Attributes.Locale, strings.ToLower(device), name)
-					files = append(files, ExportFile{Path: path, URL: url})
+					if assets.IsHLSPlaylist("", url) {
+						data, _ := json.Marshal(previewReference{ID: item.ID, FileName: name, FileSize: item.Attributes.FileSize, SourceFileChecksum: item.Attributes.SourceFileChecksum})
+						reference := string(data) + "\n"
+						files = append(files, ExportFile{Path: path + ".m3u8", URL: url}, ExportFile{Path: path + ".preview.json", Text: &reference})
+					} else {
+						files = append(files, ExportFile{Path: path, URL: url})
+					}
 					if item.Attributes.PreviewFrameTimeCode != "" {
 						frame := item.Attributes.PreviewFrameTimeCode + "\n"
 						files = append(files, ExportFile{Path: strings.TrimSuffix(path, filepath.Ext(path)) + ".poster_frame.txt", Text: &frame})
