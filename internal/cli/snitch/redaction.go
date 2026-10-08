@@ -105,8 +105,12 @@ type lazyRegexp struct {
 	re   *regexp.Regexp
 }
 
+var lazyPatterns []*lazyRegexp
+
 func lazyMustCompile(expr string) *lazyRegexp {
-	return &lazyRegexp{expr: expr}
+	l := &lazyRegexp{expr: expr}
+	lazyPatterns = append(lazyPatterns, l)
+	return l
 }
 
 func (l *lazyRegexp) compiled() *regexp.Regexp {
