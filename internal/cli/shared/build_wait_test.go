@@ -982,7 +982,7 @@ func TestWaitForBuildByNumberOrUploadFailureFailsAfterConsecutiveTransientLimit(
 }
 
 func TestWaitForBuildByNumberOrUploadFailureMatchesEquivalentVersionFormat(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var versionFilters []string
 	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
@@ -1053,7 +1053,7 @@ func TestWaitForBuildByNumberOrUploadFailureMatchesEquivalentVersionFormat(t *te
 }
 
 func TestWaitForBuildByNumberOrUploadFailureFiltersNearMatchesAcrossPages(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var buildFilters []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -1125,7 +1125,7 @@ func TestWaitForBuildByNumberOrUploadFailureFiltersNearMatchesAcrossPages(t *tes
 }
 
 func TestWaitForBuildByNumberOrUploadFailurePrefersRequestedVersionFormat(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var versionFilters []string
 	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
