@@ -23,11 +23,20 @@ paths were removed.
 
 Before submitting, ensure you have:
 
-1. A processed build uploaded to App Store Connect
+1. A processed build uploaded to App Store Connect (`processingState` is `VALID`)
 2. App Store version created with required metadata
-3. All localizations configured with required fields
-4. Screenshots uploaded for at least one device type
-5. Privacy information and app review details completed
+3. All localizations configured with required fields:
+   - **Privacy Policy URL**: Must be a publicly accessible, live HTTP/HTTPS URL (e.g., public Notion page, GitHub Pages, or corporate site). Never use private repositories or URLs requiring authentication.
+   - **Support URL**: Must also be publicly accessible with contact information or support docs.
+4. Screenshots uploaded for at least one primary device tier:
+   - iPhone 6.7" Super Retina: `1290x2796` (portrait) or `2796x1290` (landscape)
+   - iPad Pro 12.9" (if Universal): `2048x2732` (portrait) or `2732x2048` (landscape)
+5. **App Privacy declarations (Data Usages)** completed and **published** on App Store Connect web:
+   - Apple's REST API cannot legally execute developer data privacy declarations. If your app does not collect data, visit `https://appstoreconnect.apple.com/apps/<APP_ID>/appPrivacy`, select "No, we do not collect data from this app", and click **Publish**.
+6. **App Review details configured**:
+   - Contact phone number must include the international dialing prefix (e.g., `+86 152xxxxxxxx`).
+   - Valid demo credentials provided if the app requires a login.
+   - Xcode project has a valid launch screen configured (`UILaunchScreen: {}`) and `UIRequiresFullScreen` enabled.
 
 ## Canonical Publish Workflow
 
@@ -372,6 +381,38 @@ Ensure the build:
 **Problem**: A previous submission attempt left an orphaned submission.
 
 **Solution**: The CLI automatically cancels stale submissions. If you see this warning, it's informational and the new submission will proceed.
+
+### "You must have published answers to your app's data usages"
+
+**Problem**: Submitting for review fails because data privacy declarations have not been published on App Store Connect.
+
+**Solution**: Apple's REST API cannot legally publish data usage declarations on behalf of developers without a web session.
+1. Open `https://appstoreconnect.apple.com/apps/<APP_ID>/appPrivacy`.
+2. Click **Get Started** / **Edit** and answer the questionnaire (e.g. choose "No, we do not collect data from this app" if the app does not collect personal data).
+3. Click **Save** and then click the blue **Publish** button at the top-right corner.
+4. Re-run `asc review submit --confirm`.
+
+### "Privacy Policy or Support URL returns 404 / Requires login"
+
+**Problem**: The App Store review team rejects the app under Guideline 5.1.1 (Data Collection & Privacy) or 2.1 (Performance) because URLs cannot be loaded.
+
+**Solution**:
+* Never use private GitHub repositories or restricted internal documents.
+* Host privacy policy and support documentation on a public Notion page, GitHub Pages, or dedicated public site.
+* Update URLs:
+  ```bash
+  # Update Support URL (version localization)
+  asc localizations update --id "<VERSION_LOCALIZATION_ID>" --support-url "https://public-page-url"
+
+  # Update Privacy Policy URL (app-info localization)
+  asc localizations update --type app-info --id "<APP_INFO_LOCALIZATION_ID>" --privacy-policy-url "https://public-page-url"
+  ```
+
+### "Review Details phone number rejected"
+
+**Problem**: Updating App Store review contact details fails or errors.
+
+**Solution**: Phone numbers must include the international dialing prefix. E.g., for China, format as `+86 152xxxxxxxx` instead of `152xxxxxxxx`.
 
 ### Submission Rejected
 
