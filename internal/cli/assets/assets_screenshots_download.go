@@ -8,12 +8,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
+
+const screenshotDownloadConcurrency = 4
 
 type screenshotDownloadItem struct {
 	ID          string `json:"id"`
@@ -246,15 +249,41 @@ Examples:
 				}
 			}
 
+			type downloadOutcome struct {
+				written     int64
+				contentType string
+				unchanged   bool
+				err         error
+			}
+			outcomes := make([]downloadOutcome, len(items))
+			slots := make(chan struct{}, screenshotDownloadConcurrency)
+			var wg sync.WaitGroup
+			for i := range items {
+				item := items[i]
+				if strings.TrimSpace(item.URL) == "" {
+					continue
+				}
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					slots <- struct{}{}
+					defer func() { <-slots }()
+					downloadCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
+					defer cancel()
+					outcome := &outcomes[i]
+					outcome.written, outcome.contentType, outcome.unchanged, outcome.err = downloadScreenshotURLToFile(downloadCtx, item.URL, item.OutputPath, *overwrite)
+				}()
+			}
+			wg.Wait()
+
 			for i := range items {
 				item := &items[i]
 				if strings.TrimSpace(item.URL) == "" {
 					continue
 				}
 
-				downloadCtx, cancel := shared.ContextWithDownloadTimeout(ctx)
-				written, contentType, unchanged, err := downloadScreenshotURLToFile(downloadCtx, item.URL, item.OutputPath, *overwrite)
-				cancel()
+				outcome := outcomes[i]
+				written, contentType, unchanged, err := outcome.written, outcome.contentType, outcome.unchanged, outcome.err
 				if err != nil {
 					result.Failures = append(result.Failures, screenshotDownloadFailure{
 						ID:          item.ID,

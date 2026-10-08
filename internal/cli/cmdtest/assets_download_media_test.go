@@ -233,6 +233,14 @@ func TestScreenshotsDownload_ByLocalization_WritesFiles(t *testing.T) {
 		http.DefaultTransport = originalTransport
 	})
 
+	var assetRequests sync.WaitGroup
+	assetRequests.Add(2)
+	bothAssetsRequested := make(chan struct{})
+	go func() {
+		assetRequests.Wait()
+		close(bothAssetsRequested)
+	}()
+
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Host {
 		case "api.appstoreconnect.apple.com":
@@ -271,6 +279,12 @@ func TestScreenshotsDownload_ByLocalization_WritesFiles(t *testing.T) {
 			}
 			if req.URL.Path != "/shot-a_100x200.png" && req.URL.Path != "/shot-b_100x200.png" {
 				t.Fatalf("unexpected asset path: %s", req.URL.Path)
+			}
+			assetRequests.Done()
+			select {
+			case <-bothAssetsRequested:
+			case <-time.After(5 * time.Second):
+				t.Error("screenshot downloads ran serially; want both in flight")
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
