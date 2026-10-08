@@ -441,7 +441,7 @@ Examples:
 				}
 				requestedPath := item.OutputPath
 				resolvePath := func(contentType string) string {
-					if idValue == "" && isHLSPlaylist(contentType, item.URL) {
+					if idValue == "" && IsHLSPlaylist(contentType, item.URL) {
 						return strings.TrimSuffix(requestedPath, filepath.Ext(requestedPath)) + ".m3u8"
 					}
 					return requestedPath
@@ -465,7 +465,7 @@ Examples:
 				item.BytesWritten = written
 				item.ContentType = contentType
 				result.Downloaded++
-				if idValue != "" && isHLSPlaylist(contentType, item.URL) {
+				if idValue != "" && IsHLSPlaylist(contentType, item.URL) {
 					fmt.Fprintf(os.Stderr, "Warning: App Store Connect only exposes an HLS streaming playlist for previews; %s is a .m3u8 playlist, not a video file\n", item.OutputPath)
 				}
 			}
@@ -492,7 +492,9 @@ Examples:
 	}
 }
 
-func isHLSPlaylist(contentType, rawURL string) bool {
+// IsHLSPlaylist reports whether a preview download is an HLS playlist; pass an
+// empty contentType to decide from the URL alone before downloading.
+func IsHLSPlaylist(contentType, rawURL string) bool {
 	if mediaType, _, err := mime.ParseMediaType(contentType); err == nil {
 		switch strings.ToLower(mediaType) {
 		case "application/vnd.apple.mpegurl", "audio/mpegurl":
