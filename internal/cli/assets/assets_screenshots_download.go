@@ -167,10 +167,11 @@ Examples:
 					OutputPath: outputFile,
 				})
 			} else {
-				setsResp, err := client.GetAllAppScreenshotSets(ctx, locID, asc.WithAppScreenshotSetsRequestContext(shared.ContextWithTimeout))
+				setsResp, err := client.GetAllAppScreenshotSets(ctx, locID, asc.WithAppScreenshotSetsIncludeScreenshots(), asc.WithAppScreenshotSetsRequestContext(shared.ContextWithTimeout))
 				if err != nil {
 					return fmt.Errorf("screenshots download: failed to fetch sets: %w", err)
 				}
+				includedShots := asc.IncludedAppScreenshots(setsResp)
 
 				sets := make([]asc.Resource[asc.AppScreenshotSetAttributes], 0, len(setsResp.Data))
 				sets = append(sets, setsResp.Data...)
@@ -186,18 +187,21 @@ Examples:
 				for _, set := range sets {
 					displayType := strings.TrimSpace(set.Attributes.ScreenshotDisplayType)
 
-					shotsResp, err := client.GetAllAppScreenshots(ctx, set.ID, asc.WithAppScreenshotsRequestContext(shared.ContextWithTimeout))
-					if err != nil {
-						return fmt.Errorf("screenshots download: failed to fetch screenshots for set %s: %w", set.ID, err)
-					}
+					shots, ok := includedShots[set.ID]
+					if !ok {
+						shotsResp, err := client.GetAllAppScreenshots(ctx, set.ID, asc.WithAppScreenshotsRequestContext(shared.ContextWithTimeout))
+						if err != nil {
+							return fmt.Errorf("screenshots download: failed to fetch screenshots for set %s: %w", set.ID, err)
+						}
 
-					requestCtx, cancel := shared.ContextWithTimeout(ctx)
-					orderedIDs, err := GetOrderedAppScreenshotIDs(requestCtx, client, set.ID)
-					cancel()
-					if err != nil {
-						return fmt.Errorf("screenshots download: failed to fetch screenshot order for set %s: %w", set.ID, err)
+						requestCtx, cancel := shared.ContextWithTimeout(ctx)
+						orderedIDs, err := GetOrderedAppScreenshotIDs(requestCtx, client, set.ID)
+						cancel()
+						if err != nil {
+							return fmt.Errorf("screenshots download: failed to fetch screenshot order for set %s: %w", set.ID, err)
+						}
+						shots = orderScreenshotsForDownload(shotsResp.Data, orderedIDs)
 					}
-					shots := orderScreenshotsForDownload(shotsResp.Data, orderedIDs)
 
 					for idx, shot := range shots {
 						base := sanitizeBaseFileName(shot.Attributes.FileName)

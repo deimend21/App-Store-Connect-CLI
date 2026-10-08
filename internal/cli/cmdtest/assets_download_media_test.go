@@ -639,8 +639,12 @@ func TestVideoPreviewsDownload_ByLocalization_PreservesFallbackDetailErrors(t *t
 			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
 			return
 		}
-		if req.URL.RawQuery != "" {
-			t.Errorf("query = %q, want empty", req.URL.RawQuery)
+		wantQuery := ""
+		if req.URL.Path == "/v1/appStoreVersionLocalizations/loc-1/appPreviewSets" {
+			wantQuery = "include=appPreviews&limit%5BappPreviews%5D=50"
+		}
+		if req.URL.RawQuery != wantQuery {
+			t.Errorf("query = %q, want %q", req.URL.RawQuery, wantQuery)
 			http.Error(w, "unexpected query", http.StatusBadRequest)
 			return
 		}
