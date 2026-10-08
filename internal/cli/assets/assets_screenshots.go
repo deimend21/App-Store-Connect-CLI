@@ -798,6 +798,8 @@ Examples:
 					return fmt.Errorf("screenshots upload: %w", err)
 				}
 
+				defer client.CloseUploadConnections()
+
 				result, err := resumeAppScreenshotUpload(ctx, client, resumePath)
 				if hasAppScreenshotUploadResultOutput(result) {
 					if printErr := shared.PrintOutput(&result, *output.Output, *output.Pretty); printErr != nil {
@@ -963,6 +965,8 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 		if err != nil {
 			return nil, err
 		}
+		defer client.CloseUploadConnections()
+
 		result, err := deps.ExecuteUpload(ctx, screenshotUploadConfig[asc.AppScreenshotUploadResult]{
 			Client:         client,
 			LocalizationID: locID,
@@ -1012,6 +1016,8 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 	if err != nil {
 		return nil, err
 	}
+
+	defer client.CloseUploadConnections()
 
 	requestCtx, cancel := deps.RequestContext(ctx)
 	defer cancel()

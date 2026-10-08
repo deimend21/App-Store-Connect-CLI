@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/storeassets"
 )
@@ -159,19 +158,12 @@ func ExecutePushWithWarnings(ctx context.Context, opts PushExecutionOptions) (Pu
 
 	// Only managed JSON scopes participate in localization changes. Preview
 	// uploads also need version localization IDs, but must not plan their deletion.
-	var remoteAppInfoItems []asc.Resource[asc.AppInfoLocalizationAttributes]
-	if localBundle.appInfoManaged {
-		remoteAppInfoItems, err = fetchAppInfoLocalizations(ctx, client, appInfoIDValue)
-		if err != nil {
-			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
-		}
-	}
-	var remoteVersionItems []asc.Resource[asc.AppStoreVersionLocalizationAttributes]
-	if localBundle.versionManaged || len(previews) > 0 {
-		remoteVersionItems, err = fetchVersionLocalizations(ctx, client, versionIDValue)
-		if err != nil {
-			return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
-		}
+	remoteAppInfoItems, remoteVersionItems, err := fetchMetadataLocalizations(
+		ctx, client, appInfoIDValue, versionIDValue,
+		localBundle.appInfoManaged, localBundle.versionManaged || len(previews) > 0,
+	)
+	if err != nil {
+		return PushPlanResult{}, nil, fmt.Errorf("%s: %w", errorPrefix, err)
 	}
 
 	remoteAppInfo := make(map[string]AppInfoLocalization, len(remoteAppInfoItems))

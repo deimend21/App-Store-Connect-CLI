@@ -177,6 +177,8 @@ Examples:
 				return fmt.Errorf("video-previews upload: %w", err)
 			}
 
+			defer client.CloseUploadConnections()
+
 			result, err := uploadPreviews(ctx, client, locID, previewType, files, *skipExisting, *replace, *dryRun)
 			if hasAppPreviewUploadResultOutput(result) {
 				if printErr := shared.PrintOutput(&result, *output.Output, *output.Pretty); printErr != nil {
@@ -789,7 +791,7 @@ func uploadPreviewAsset(ctx context.Context, client *asc.Client, setID, filePath
 		return result, fmt.Errorf("no upload operations returned for %q", info.Name())
 	}
 
-	if err := asc.UploadAssetFromFile(ctx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
+	if err := client.UploadAssetFromFile(ctx, file, info.Size(), created.Data.Attributes.UploadOperations); err != nil {
 		return result, err
 	}
 

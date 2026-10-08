@@ -602,6 +602,38 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 	tsvReader.FieldsPerRecord = -1
 	tsvReader.LazyQuotes = true
 
+	if strings.TrimSpace(scope.AppSKU) != "" {
+		tsvReader.ReuseRecord = true
+		headers, err := tsvReader.Read()
+		if err == io.EOF {
+			return salesWeekMetrics{}, fmt.Errorf("report is empty")
+		}
+		if err != nil {
+			return salesWeekMetrics{}, fmt.Errorf("parse report rows: %w", err)
+		}
+		accumulator, headerErr := newSalesReportAccumulator(headers, scope)
+		for {
+			row, err := tsvReader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return salesWeekMetrics{}, fmt.Errorf("parse report rows: %w", err)
+			}
+			if headerErr == nil {
+				accumulator.add(row)
+			}
+		}
+		// Read the entire stream before reporting header errors, matching the
+		// buffered path's CSV and gzip checksum error precedence.
+		if headerErr != nil {
+			return salesWeekMetrics{}, headerErr
+		}
+		return accumulator.metrics, nil
+	}
+
+	// A missing SKU may be discovered after linked IAP rows. Retain the
+	// full report so enrichment precedes aggregation for this fallback.
 	rows, err := tsvReader.ReadAll()
 	if err != nil {
 		return salesWeekMetrics{}, fmt.Errorf("parse report rows: %w", err)
@@ -609,93 +641,119 @@ func ParseSalesReportMetrics(reader io.Reader, scope salesScope) (salesWeekMetri
 	if len(rows) == 0 {
 		return salesWeekMetrics{}, fmt.Errorf("report is empty")
 	}
-
-	headers := rows[0]
-	appleIdentifierIdx := findColumnIndex(headers, "appleidentifier")
-	parentIdentifierIdx := findColumnIndex(headers, "parentidentifier")
-	skuIdx := findColumnIndex(headers, "sku")
-	productTypeIdentifierIdx := findColumnIndex(headers, "producttypeidentifier")
-	subscriptionIdx := findColumnIndex(headers, "subscription")
-	unitsIdx := findColumnIndex(headers, "units")
-	developerProceedsIdx := findColumnIndex(headers, "developerproceeds")
-	customerPriceIdx := findColumnIndex(headers, "customerprice")
-	if appleIdentifierIdx < 0 && parentIdentifierIdx < 0 {
-		return salesWeekMetrics{}, fmt.Errorf("report is missing Apple Identifier and Parent Identifier columns")
+	accumulator, err := newSalesReportAccumulator(rows[0], scope)
+	if err != nil {
+		return salesWeekMetrics{}, err
 	}
-
-	scope = EnrichSalesScopeFromRows(scope, rows[1:], appleIdentifierIdx, skuIdx)
-	metrics := salesWeekMetrics{
-		UnitsColumnPresent:             unitsIdx >= 0,
-		DownloadUnitsAvailable:         unitsIdx >= 0 && productTypeIdentifierIdx >= 0,
-		DeveloperProceedsColumnPresent: developerProceedsIdx >= 0,
-		CustomerPriceColumnPresent:     customerPriceIdx >= 0,
-		SubscriptionColumnPresent:      subscriptionIdx >= 0,
-	}
+	accumulator.scope = EnrichSalesScopeFromRows(scope, rows[1:], accumulator.appleIdentifierIdx, accumulator.skuIdx)
 	for _, row := range rows[1:] {
-		if isEmptyRow(row) {
-			continue
-		}
+		accumulator.add(row)
+	}
+	return accumulator.metrics, nil
+}
 
-		appleIdentifier := strings.TrimSpace(valueAtIndex(row, appleIdentifierIdx))
-		parentIdentifier := strings.TrimSpace(valueAtIndex(row, parentIdentifierIdx))
-		isAppRow, isMonetizedRow, include := RowMatchesSalesScope(scope, appleIdentifier, parentIdentifier)
-		if !include {
-			continue
-		}
-		subscriptionValue := strings.TrimSpace(valueAtIndex(row, subscriptionIdx))
-		isSubscriptionRow := subscriptionValue != ""
-		isRenewalRow := isRenewalSubscriptionState(subscriptionValue)
+// salesReportAccumulator retains column indexes and totals, never input rows.
+// Both parser paths use the same ordered aggregation rules.
+type salesReportAccumulator struct {
+	scope                    salesScope
+	metrics                  salesWeekMetrics
+	appleIdentifierIdx       int
+	parentIdentifierIdx      int
+	skuIdx                   int
+	productTypeIdentifierIdx int
+	subscriptionIdx          int
+	unitsIdx                 int
+	developerProceedsIdx     int
+	customerPriceIdx         int
+}
 
-		metrics.RowCount++
-		if isSubscriptionRow {
-			metrics.SubscriptionRows++
-		}
-		if isRenewalRow {
-			metrics.RenewalRows++
-		}
+func newSalesReportAccumulator(headers []string, scope salesScope) (salesReportAccumulator, error) {
+	a := salesReportAccumulator{scope: scope}
+	a.appleIdentifierIdx = findColumnIndex(headers, "appleidentifier")
+	a.parentIdentifierIdx = findColumnIndex(headers, "parentidentifier")
+	a.skuIdx = findColumnIndex(headers, "sku")
+	a.productTypeIdentifierIdx = findColumnIndex(headers, "producttypeidentifier")
+	a.subscriptionIdx = findColumnIndex(headers, "subscription")
+	a.unitsIdx = findColumnIndex(headers, "units")
+	a.developerProceedsIdx = findColumnIndex(headers, "developerproceeds")
+	a.customerPriceIdx = findColumnIndex(headers, "customerprice")
+	if a.appleIdentifierIdx < 0 && a.parentIdentifierIdx < 0 {
+		return a, fmt.Errorf("report is missing Apple Identifier and Parent Identifier columns")
+	}
 
-		if unitsIdx >= 0 {
-			if value, ok := parseNumericValue(valueAtIndex(row, unitsIdx)); ok {
-				metrics.UnitsTotal += value
-				if isAppRow && isInitialAppDownloadProductType(valueAtIndex(row, productTypeIdentifierIdx)) {
-					metrics.DownloadUnitsTotal += value
-				}
-				if isMonetizedRow {
-					metrics.MonetizedUnitsTotal += value
-				}
-				if isSubscriptionRow {
-					metrics.SubscriptionUnitsTotal += value
-				}
-				if isRenewalRow {
-					metrics.RenewalUnitsTotal += value
-				}
+	a.metrics = salesWeekMetrics{
+		UnitsColumnPresent:             a.unitsIdx >= 0,
+		DownloadUnitsAvailable:         a.unitsIdx >= 0 && a.productTypeIdentifierIdx >= 0,
+		DeveloperProceedsColumnPresent: a.developerProceedsIdx >= 0,
+		CustomerPriceColumnPresent:     a.customerPriceIdx >= 0,
+		SubscriptionColumnPresent:      a.subscriptionIdx >= 0,
+	}
+	return a, nil
+}
+
+func (a *salesReportAccumulator) add(row []string) {
+	metrics := &a.metrics
+	if isEmptyRow(row) {
+		return
+	}
+
+	appleIdentifier := strings.TrimSpace(valueAtIndex(row, a.appleIdentifierIdx))
+	parentIdentifier := strings.TrimSpace(valueAtIndex(row, a.parentIdentifierIdx))
+	isAppRow, isMonetizedRow, include := RowMatchesSalesScope(a.scope, appleIdentifier, parentIdentifier)
+	if !include {
+		return
+	}
+	subscriptionValue := strings.TrimSpace(valueAtIndex(row, a.subscriptionIdx))
+	isSubscriptionRow := subscriptionValue != ""
+	isRenewalRow := isRenewalSubscriptionState(subscriptionValue)
+
+	metrics.RowCount++
+	if isSubscriptionRow {
+		metrics.SubscriptionRows++
+	}
+	if isRenewalRow {
+		metrics.RenewalRows++
+	}
+
+	if a.unitsIdx >= 0 {
+		if value, ok := parseNumericValue(valueAtIndex(row, a.unitsIdx)); ok {
+			metrics.UnitsTotal += value
+			if isAppRow && isInitialAppDownloadProductType(valueAtIndex(row, a.productTypeIdentifierIdx)) {
+				metrics.DownloadUnitsTotal += value
 			}
-		}
-		if developerProceedsIdx >= 0 {
-			if value, ok := parseNumericValue(valueAtIndex(row, developerProceedsIdx)); ok {
-				metrics.DeveloperProceedsTotal += value
-				if isSubscriptionRow {
-					metrics.SubscriptionDeveloperProceeds += value
-				}
-				if isRenewalRow {
-					metrics.RenewalDeveloperProceeds += value
-				}
+			if isMonetizedRow {
+				metrics.MonetizedUnitsTotal += value
 			}
-		}
-		if customerPriceIdx >= 0 {
-			if value, ok := parseNumericValue(valueAtIndex(row, customerPriceIdx)); ok {
-				metrics.CustomerPriceTotal += value
-				if isSubscriptionRow {
-					metrics.SubscriptionCustomerPrice += value
-				}
-				if isRenewalRow {
-					metrics.RenewalCustomerPrice += value
-				}
+			if isSubscriptionRow {
+				metrics.SubscriptionUnitsTotal += value
+			}
+			if isRenewalRow {
+				metrics.RenewalUnitsTotal += value
 			}
 		}
 	}
-
-	return metrics, nil
+	if a.developerProceedsIdx >= 0 {
+		if value, ok := parseNumericValue(valueAtIndex(row, a.developerProceedsIdx)); ok {
+			metrics.DeveloperProceedsTotal += value
+			if isSubscriptionRow {
+				metrics.SubscriptionDeveloperProceeds += value
+			}
+			if isRenewalRow {
+				metrics.RenewalDeveloperProceeds += value
+			}
+		}
+	}
+	if a.customerPriceIdx >= 0 {
+		if value, ok := parseNumericValue(valueAtIndex(row, a.customerPriceIdx)); ok {
+			metrics.CustomerPriceTotal += value
+			if isSubscriptionRow {
+				metrics.SubscriptionCustomerPrice += value
+			}
+			if isRenewalRow {
+				metrics.RenewalCustomerPrice += value
+			}
+		}
+	}
 }
 
 func isInitialAppDownloadProductType(value string) bool {

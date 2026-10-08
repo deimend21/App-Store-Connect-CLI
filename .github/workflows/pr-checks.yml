@@ -66,10 +66,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: wall-only-check
 
       - name: Check Wall of Apps source
         run: make check-wall-of-apps
@@ -88,62 +87,74 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: quality
 
       - name: Cache Go tools
         id: go-tools-cache
         uses: actions/cache@v6
         with:
           path: ~/go/bin
-          key: ${{ runner.os }}-go-tools-${{ hashFiles('Makefile') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-go-tools-${{ hashFiles('Makefile', 'go.mod') }}
 
       - name: Install tooling
         if: steps.go-tools-cache.outputs.cache-hit != 'true'
         run: make tools
 
-      - parallel:
-          - name: Check formatting
-            run: |
-              export PATH="$(go env GOPATH)/bin:$PATH"
-              make format-check
+      - name: Cache lint analysis
+        if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.golangci-cache
+          key: golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            golangci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('go.mod', 'go.sum', 'Makefile', '.golangci.yml') }}-
 
-          - name: Check Wall of Apps source
-            if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
-            run: make check-wall-of-apps
+      - name: Check formatting
+        run: |
+          go_tools_bin="$(go env GOPATH)/bin"
+          export PATH="$go_tools_bin:$PATH"
+          make format-check
 
-          - name: Self-test docs validators
-            if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
-            run: python3 scripts/test_check_docs.py
+      - name: Check Wall of Apps source
+        if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
+        run: make check-wall-of-apps
 
-          - name: Check CI workflow contracts
-            if: needs.changes.outputs.scope == 'full'
-            run: python3 scripts/test_ci_workflows.py
+      - name: Self-test docs validators
+        if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
+        run: |
+          python3 scripts/test_check_docs.py
+          python3 scripts/test_check_docs_commands.py
+          python3 scripts/test_generate_command_docs.py
 
-          - name: Test CI change selection
-            if: needs.changes.outputs.scope == 'full'
-            run: python3 scripts/test_ci_change_scope.py
+      - name: Check CI workflow contracts
+        if: needs.changes.outputs.scope == 'full'
+        run: python3 scripts/test_ci_workflows.py
 
-          - name: Check documentation
-            if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
-            run: make check-docs
+      - name: Test CI change selection
+        if: needs.changes.outputs.scope == 'full'
+        run: python3 scripts/test_ci_change_scope.py
 
-          - name: Run lint
-            if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
-            run: |
-              export PATH="$(go env GOPATH)/bin:$PATH"
-              make lint
+      - name: Check documentation
+        if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
+        run: make check-docs
 
-          # Every test job runs on ubuntu, so darwin- and windows-gated sources and
-          # tests are otherwise never type-checked. golangci-lint already vets
-          # GOOS=linux with tests enabled.
-          - name: Vet platform-gated code
-            if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
-            run: |
-              GOOS=darwin go vet ./...
-              GOOS=windows go vet ./...
+      - name: Run lint
+        if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
+        run: |
+          go_tools_bin="$(go env GOPATH)/bin"
+          export PATH="$go_tools_bin:$PATH"
+          make lint
+
+      # Every test job runs on ubuntu, so darwin- and windows-gated sources and
+      # tests are otherwise never type-checked. golangci-lint already vets
+      # GOOS=linux with tests enabled.
+      - name: Vet platform-gated code
+        if: contains(fromJSON('["telemetry", "full"]'), needs.changes.outputs.scope)
+        run: |
+          GOOS=darwin go vet ./...
+          GOOS=windows go vet ./...
 
   format-and-lint:
     needs: [changes, wall-only-check, quality-checks, website-checks]
@@ -197,13 +208,14 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: test-${{ matrix.name }}
 
       - name: Run Go test shard
-        run: ASC_BYPASS_KEYCHAIN=1 ${{ matrix.command }}
+        env:
+          ASC_BYPASS_KEYCHAIN: "1"
+        run: ${{ matrix.command }}
 
   telemetry-linux-tests:
     needs: changes
@@ -214,10 +226,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: telemetry-linux-tests
 
       - name: Run telemetry tests
         run: ASC_BYPASS_KEYCHAIN=1 go test -short ./internal/telemetry ./internal/cli/telemetry ./cmd
@@ -231,10 +242,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: telemetry-windows-tests
 
       - name: Run telemetry tests
         run: go test -short ./internal/telemetry
@@ -281,12 +291,14 @@ jobs:
           - name: macOS
             runner: macos-latest
             command: |
+              export CGO_CFLAGS="-O2 -g -mmacosx-version-min=13.0"
+              export CGO_LDFLAGS="-O2 -g -mmacosx-version-min=13.0"
               ASC_BYPASS_KEYCHAIN=1 go test -short ./internal/screenshots
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/rootfs
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/secureopen -run 'NoInherit'
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/certificates -run 'ACL|OwnerOnlyAtCreation'
-              CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -o build/asc_dev_macos_amd64 .
-              CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -o build/asc_dev_macos_arm64 .
+              MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -o build/asc_dev_macos_amd64 .
+              MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -o build/asc_dev_macos_arm64 .
           - name: Linux
             runner: ubuntu-latest
             command: |
@@ -309,10 +321,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: build-${{ matrix.name }}
 
       - name: Create build directory
         run: mkdir -p build
@@ -340,10 +351,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: go.mod
-          cache: true
+          workload: ordinary-${{ matrix.name }}
 
       - name: Compile CLI
         run: go build .

@@ -12,7 +12,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -453,11 +452,8 @@ func TestFetchAndAggregate_SingleReportKeepsAvailableColumns(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body: io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV(
-				"123",
-				"APP",
-			)))),
-			Request: req,
+			Body:       io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV()))),
+			Request:    req,
 		}, nil
 	})
 
@@ -499,11 +495,8 @@ func TestFetchAndAggregate_UsesSubscriptionVersion1_4(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body: io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV(
-				"123",
-				"APP",
-			)))),
-			Request: req,
+			Body:       io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV()))),
+			Request:    req,
 		}, nil
 	})
 
@@ -569,11 +562,8 @@ func TestFetchAndAggregate_ReturnsIncompleteRangeError(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body: io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV(
-				"123",
-				"APP",
-			)))),
-			Request: req,
+			Body:       io.NopCloser(bytes.NewReader(gzipCompareText(t, compareSalesReportTSV()))),
+			Request:    req,
 		}, nil
 	})
 
@@ -683,9 +673,9 @@ func compareTestPrivateKeyPEM(t *testing.T) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 }
 
-func compareSalesReportTSV(appID, appSKU string) string {
+func compareSalesReportTSV() string {
 	return strings.Join([]string{
 		"Provider\tProvider Country\tSKU\tDeveloper\tTitle\tVersion\tProduct Type Identifier\tUnits\tDeveloper Proceeds\tBegin Date\tEnd Date\tCustomer Currency\tCountry Code\tCurrency of Proceeds\tApple Identifier\tCustomer Price\tPromo Code\tParent Identifier\tSubscription\tPeriod",
-		fmt.Sprintf("Provider\tUS\t%s\tDeveloper\tApp\t1.0\t1\t2\t3.00\t2026-01-01\t2026-01-01\tUSD\tUS\tUSD\t%s\t4.00\t\t%s\t\t", appSKU, appID, appID),
+		"Provider\tUS\tAPP\tDeveloper\tApp\t1.0\t1\t2\t3.00\t2026-01-01\t2026-01-01\tUSD\tUS\tUSD\t123\t4.00\t\t123\t\t",
 	}, "\n")
 }

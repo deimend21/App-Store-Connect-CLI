@@ -13,6 +13,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,16 @@ func UploadAsset(ctx context.Context, filePath string, operations []UploadOperat
 // that hits a transient transport failure or retryable status is retried
 // instead of leaving the asset partially uploaded.
 func UploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, operations []UploadOperation) error {
+	return uploadAssetFromFile(ctx, file, fileSize, operations, newUploadClient)
+}
+
+// UploadAssetFromFile uploads an asset using this client's dedicated upload pool.
+// API credentials and cookies are never attached to upload requests.
+func (c *Client) UploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, operations []UploadOperation) error {
+	return uploadAssetFromFile(ctx, file, fileSize, operations, c.newPooledUploadClient)
+}
+
+func uploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, operations []UploadOperation, newClient func() *http.Client) error {
 	if len(operations) == 0 {
 		return fmt.Errorf("no upload operations provided")
 	}
@@ -49,7 +60,7 @@ func UploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, ope
 	}
 
 	uploadOpts := UploadOptions{
-		Client:    clientWithoutRedirects(newUploadClient()),
+		Client:    clientWithoutRedirects(newClient()),
 		RetryOpts: ResolveRetryOptions(),
 	}
 
