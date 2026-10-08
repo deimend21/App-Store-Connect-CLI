@@ -104,6 +104,9 @@ func TestAssetLibraryImageUpload(t *testing.T) {
 					uploaded++
 					return jsonResponse(200, "")
 				case req.Method == "PATCH" && req.URL.Path == "/v1/appAssetLibraryImages/image":
+					if mode == "upload-failure" {
+						t.Fatal("upload failure committed the image")
+					}
 					var body map[string]any
 					if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 						t.Fatal(err)

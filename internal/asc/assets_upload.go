@@ -40,7 +40,9 @@ func UploadAsset(ctx context.Context, filePath string, operations []UploadOperat
 // UploadAssetFromFile uploads a file using the provided upload operations.
 // Operations run concurrently through the shared upload executor, so a part
 // that hits a transient transport failure or retryable status is retried
-// instead of leaving the asset partially uploaded.
+// instead of leaving the asset partially uploaded. When several parts fail,
+// the error is from the first to fail in time, not the lowest-numbered part;
+// parts still in flight are cancelled.
 func UploadAssetFromFile(ctx context.Context, file *os.File, fileSize int64, operations []UploadOperation) error {
 	return uploadAssetFromFile(ctx, file, fileSize, operations, newUploadClient)
 }

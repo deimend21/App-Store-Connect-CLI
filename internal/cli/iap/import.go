@@ -147,6 +147,7 @@ Examples:
 			if err != nil {
 				return err
 			}
+			defer client.CloseUploadConnections()
 
 			result := &asc.InAppPurchaseImportResult{
 				AppID:             resolvedAppID,
