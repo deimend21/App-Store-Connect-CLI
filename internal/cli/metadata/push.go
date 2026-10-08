@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -984,6 +985,32 @@ func applyMetadataPlan(
 	actions = append(actions, appInfoActions...)
 	if err != nil {
 		applyErrors = append(applyErrors, err)
+	}
+
+	// Creating an app-info localization makes App Store Connect create an
+	// empty version localization for that locale; update it instead of creating.
+	plannedVersionLocales := make(map[string]struct{}, len(remoteVersionItems))
+	for _, item := range remoteVersionItems {
+		plannedVersionLocales[strings.TrimSpace(item.Attributes.Locale)] = struct{}{}
+	}
+	createdLocales := make(map[string]struct{})
+	for _, action := range appInfoActions {
+		_, versionLocal := localVersion[action.Locale]
+		_, versionRemote := plannedVersionLocales[action.Locale]
+		if action.Status == metadataActionStatusSucceeded && (action.Action == "create" || action.Action == "reconcile") && versionLocal && !versionRemote {
+			createdLocales[action.Locale] = struct{}{}
+		}
+	}
+	if len(createdLocales) > 0 {
+		refreshed, err := fetchVersionLocalizations(ctx, client, versionID)
+		if err != nil {
+			applyErrors = append(applyErrors, fmt.Errorf("refresh version localizations after app-info creates: %w", err))
+		}
+		for _, item := range refreshed {
+			if _, ok := createdLocales[strings.TrimSpace(item.Attributes.Locale)]; ok {
+				remoteVersionItems = append(slices.Clip(remoteVersionItems), item)
+			}
+		}
 	}
 
 	versionActions, err := applyVersionChanges(ctx, client, versionID, version, localVersion, remoteVersionItems, allowDeletes, ifExists)
