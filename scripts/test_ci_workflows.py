@@ -809,9 +809,13 @@ def assert_test_result_cache_disabled() -> None:
 def assert_go_tool_cache_identity() -> None:
     for path in (PR_WORKFLOW, MAIN_WORKFLOW):
         workflow = path.read_text()
-        key = next(line for line in workflow.splitlines() if "key:" in line and "go-tools" in line)
-        assert "runner.arch" in key, f"{path}: tool cache must include architecture"
-        assert "'Makefile', 'go.mod'" in key, f"{path}: tool cache must include tool and Go versions"
+        keys = [line for line in workflow.splitlines() if "key:" in line and "go-tools" in line]
+        assert keys, f"{path}: missing tool cache"
+        for key in keys:
+            assert "runner.arch" in key, f"{path}: tool cache must include architecture"
+            assert "steps.go-tool-versions.outputs.key" in key, f"{path}: tool cache must key on tool and Go versions"
+            assert "hashFiles('Makefile'" not in key, f"{path}: unrelated Makefile edits must not rebuild tools"
+        assert "GOFUMPT|GOLANGCI_LINT" in workflow and "go env GOVERSION" in workflow
 
 
 def assert_lint_analysis_cache() -> None:
@@ -835,9 +839,16 @@ def assert_workload_cache_action(action: str) -> None:
     assert "cache: false" in action, "setup-go must not race to save its shared cache"
     assert "go env GOCACHE" in action and "go env GOMODCACHE" in action
     prefix = "go-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ inputs.workload }}-${{ hashFiles('go.mod', 'go.sum') }}-"
-    assert "key: " + prefix + "${{ github.sha }}" in action, "save newly compiled source entries"
-    assert "restore-keys: |\n          " + prefix in action, "restore only a compatible workload cache"
-    assert "uses: actions/cache@v6" in action
+    assert action.count("key: " + prefix + "${{ github.sha }}") == 2, "save newly compiled source entries"
+    assert action.count("restore-keys: |\n          " + prefix) == 2, "restore only a compatible workload cache"
+    main_push = "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    save = re.search(r"- name: Cache Go compilation\n(.*?)(?=\n    - |\Z)", action, re.DOTALL)
+    restore = re.search(r"- name: Restore Go compilation\n(.*?)(?=\n    - |\Z)", action, re.DOTALL)
+    assert save is not None and "if: " + main_push in save.group(1), "only main pushes may save the workload cache"
+    assert "uses: actions/cache@v6" in save.group(1)
+    assert restore is not None, "other events must restore the workload cache"
+    assert "if: github.event_name != 'push' || github.ref != 'refs/heads/main'" in restore.group(1)
+    assert "uses: actions/cache/restore@v6" in restore.group(1), "PR runs must not save workload caches"
 
 
 def assert_ci_workload_caches() -> None:
@@ -890,6 +901,8 @@ def main() -> None:
     assert "workflow_call:" in website
     assert "runs-on: ubuntu-latest" in job_block(website, "website")
     assert "make check-website-docs" in website
+    assert "uses: ./.github/actions/setup-go-cache" in website and "workload: website" in website
+    assert "cache: true" not in website, "website must not freeze a dependency-only setup-go cache"
 
     main = MAIN_WORKFLOW.read_text()
     assert "git diff-tree --no-commit-id --name-only --no-renames -r" in main
