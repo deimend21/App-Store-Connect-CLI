@@ -3,7 +3,10 @@ package testflight
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -103,60 +106,69 @@ func TestPullTestFlightConfigConcurrentBoundAndCancellation(t *testing.T) {
 	}
 }
 
-func TestPullTestFlightConfigConcurrentPreservesOrderAndPhases(t *testing.T) {
-	s := syncConcurrencyStub(4)
-	release := make(chan struct{})
-	arrived := make(chan string, 4)
-	var buildsDone atomic.Int32
+func TestPullTestFlightConfigConcurrentPreservesOrderAndOverlapsPhases(t *testing.T) {
+	s := syncConcurrencyStub(5)
+	laterStarted := make(chan string, 10)
 	s.fetchBuilds = func(ctx context.Context, id string) (*asc.BuildsResponse, error) {
-		arrived <- id
-		select {
-		case <-release:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		if id == "0" {
+			// A slow first group must not hold back the fifth group or the testers phase.
+			for seen := map[string]bool{}; !seen["build-4"] || !seen["tester-0"]; {
+				select {
+				case started := <-laterStarted:
+					seen[started] = true
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+		} else {
+			laterStarted <- "build-" + id
 		}
-		buildsDone.Add(1)
 		return &asc.BuildsResponse{Data: []asc.Resource[asc.BuildAttributes]{{ID: "shared", Attributes: asc.BuildAttributes{Version: id}}}}, nil
 	}
 	s.fetchTesters = func(ctx context.Context, id string) (*asc.BetaTestersResponse, error) {
-		if buildsDone.Load() != 4 {
-			return nil, fmt.Errorf("testers started before builds completed")
-		}
+		laterStarted <- "tester-" + id
 		return &asc.BetaTestersResponse{Data: []asc.Resource[asc.BetaTesterAttributes]{{ID: "shared", Attributes: asc.BetaTesterAttributes{Email: id}}}}, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	type result struct {
-		config *TestFlightConfig
-		err    error
+	config, err := pullTestFlightConfig(ctx, &s, "app", testFlightPullOptions{includeBuilds: true, includeTesters: true})
+	if err != nil {
+		t.Fatal(err)
 	}
-	done := make(chan result, 1)
-	go func() {
-		c, e := pullTestFlightConfig(ctx, &s, "app", testFlightPullOptions{includeBuilds: true, includeTesters: true})
-		done <- result{c, e}
-	}()
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	for i := 0; i < 4; i++ {
-		select {
-		case <-arrived:
-		case <-timer.C:
-			cancel()
-			<-done
-			t.Fatal("build reads did not overlap")
-		}
+	if len(config.Builds) != 1 || config.Builds[0].Version != "0" || len(config.Testers) != 1 || config.Testers[0].Email != "0" {
+		t.Fatalf("first-group precedence changed: %+v", config)
 	}
-	close(release)
-	r := <-done
-	if r.err != nil {
-		t.Fatal(r.err)
+	if !reflect.DeepEqual(config.Builds[0].Groups, []string{"0", "1", "2", "3", "4"}) {
+		t.Fatalf("memberships changed: %v", config.Builds[0].Groups)
 	}
-	if len(r.config.Builds) != 1 || r.config.Builds[0].Version != "0" || len(r.config.Testers) != 1 || r.config.Testers[0].Email != "0" {
-		t.Fatalf("first-group precedence changed: %+v", r.config)
+}
+
+func TestPullTestFlightConfigOverlapsAppAndGroupReads(t *testing.T) {
+	s := appOverlapStub{concurrentSyncStub: syncConcurrencyStub(1), groupsStarted: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := pullTestFlightConfig(ctx, &s, "app", testFlightPullOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(r.config.Builds[0].Groups, []string{"0", "1", "2", "3"}) {
-		t.Fatalf("memberships changed: %v", r.config.Builds[0].Groups)
+}
+
+type appOverlapStub struct {
+	concurrentSyncStub
+	groupsStarted chan struct{}
+}
+
+func (s *appOverlapStub) GetApp(ctx context.Context, appID string) (*asc.AppResponse, error) {
+	select {
+	case <-s.groupsStarted:
+		return s.app, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("app read did not overlap group read: %w", ctx.Err())
 	}
+}
+
+func (s *appOverlapStub) GetBetaGroups(ctx context.Context, appID string, opts ...asc.BetaGroupsOption) (*asc.BetaGroupsResponse, error) {
+	close(s.groupsStarted)
+	return s.groups, nil
 }
 
 func BenchmarkPullTestFlightConfigLatency(b *testing.B) {
@@ -180,9 +192,7 @@ func BenchmarkPullTestFlightConfigLatency(b *testing.B) {
 func TestPullTestFlightConfigConcurrentPreservesFirstError(t *testing.T) {
 	s := syncConcurrencyStub(8)
 	lastStarted := make(chan struct{})
-	var builds, testers atomic.Int32
 	s.fetchBuilds = func(ctx context.Context, id string) (*asc.BuildsResponse, error) {
-		builds.Add(1)
 		if id == "3" {
 			close(lastStarted)
 		}
@@ -199,18 +209,11 @@ func TestPullTestFlightConfigConcurrentPreservesFirstError(t *testing.T) {
 		}
 		return &asc.BuildsResponse{}, nil
 	}
-	s.fetchTesters = func(context.Context, string) (*asc.BetaTestersResponse, error) {
-		testers.Add(1)
-		return &asc.BetaTestersResponse{}, nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_, err := pullTestFlightConfig(ctx, &s, "app", testFlightPullOptions{includeBuilds: true, includeTesters: true})
 	if err == nil || err.Error() != "fetch beta group builds: first group failed" {
 		t.Fatalf("first error changed: %v", err)
-	}
-	if builds.Load() != 4 || testers.Load() != 0 {
-		t.Fatalf("calls after failing wave: builds=%d testers=%d", builds.Load(), testers.Load())
 	}
 }
 
@@ -299,5 +302,51 @@ func TestPullTestFlightConfigConcurrentFirstErrorCancelsPeers(t *testing.T) {
 		cancel()
 		<-done
 		t.Fatal("first group failure did not cancel stalled peers")
+	}
+}
+
+func TestFetchTesterGroupMembershipsUsesBoundedPool(t *testing.T) {
+	groupIDs := []string{"g0", "g1", "g2", "g3", "g4"}
+	lastStarted := make(chan struct{})
+	var active, maxActive atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		now := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := maxActive.Load()
+			if now <= old || maxActive.CompareAndSwap(old, now) {
+				break
+			}
+		}
+		groupID := strings.Split(req.URL.Path, "/")[3]
+		switch groupID {
+		case "g0":
+			// A slow first group must not hold back the fifth group.
+			select {
+			case <-lastStarted:
+			case <-req.Context().Done():
+				return
+			}
+		case "g4":
+			close(lastStarted)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"data":[{"type":"betaTesters","id":"shared"},{"type":"betaTesters","id":"tester-%s"}],"links":{}}`, groupID)
+	}))
+	defer server.Close()
+	client := newBetaTesterCSVConflictClient(t, server)
+	resolver := &betaGroupResolver{byID: map[string]string{}, sortedGroupIDs: groupIDs}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	membership, err := fetchTesterGroupMemberships(ctx, client, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(membership["shared"], groupIDs) || !reflect.DeepEqual(membership["tester-g4"], []string{"g4"}) {
+		t.Fatalf("memberships changed: %v", membership)
+	}
+	if maxActive.Load() > 4 {
+		t.Fatalf("maximum in-flight reads %d exceeded bound", maxActive.Load())
 	}
 }
