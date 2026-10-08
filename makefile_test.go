@@ -211,6 +211,21 @@ func TestMakeBuildRebuildsBinaryWhenSourceChanges(t *testing.T) {
 	}
 }
 
+// copyTestRunner gives a temporary workspace the script that make test runs.
+func copyTestRunner(t *testing.T, repoRoot, workspaceDir string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "go_test_shard.py"))
+	if err != nil {
+		t.Fatalf("read test runner: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(workspaceDir, "scripts"), 0o700); err != nil {
+		t.Fatalf("mkdir scripts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceDir, "scripts", "go_test_shard.py"), data, 0o600); err != nil {
+		t.Fatalf("write test runner: %v", err)
+	}
+}
+
 func TestMakeTestTargetsIsolateDeveloperEnvironment(t *testing.T) {
 	repoRoot, err := os.Getwd()
 	if err != nil {
@@ -226,6 +241,7 @@ func TestMakeTestTargetsIsolateDeveloperEnvironment(t *testing.T) {
 			}
 			envLog := filepath.Join(workspaceDir, "test-env")
 			stateLog := filepath.Join(workspaceDir, "test-state")
+			copyTestRunner(t, repoRoot, workspaceDir)
 			fakeGo := filepath.Join(workspaceDir, "fake-go")
 			script := `#!/bin/sh
 if [ "$1" = "test" ]; then
@@ -328,6 +344,7 @@ func TestMakeTestFailsWhenTestsWriteSharedConfig(t *testing.T) {
 	if err := os.Mkdir(tempDir, 0o700); err != nil {
 		t.Fatalf("mkdir tmp: %v", err)
 	}
+	copyTestRunner(t, repoRoot, workspaceDir)
 	fakeGo := filepath.Join(workspaceDir, "fake-go")
 	// Simulate a test that writes the inherited config path, as a root runner
 	// could despite the read-only directory.
@@ -370,6 +387,7 @@ func TestMakeTestRemovesConfigDirectoryWhenInterrupted(t *testing.T) {
 	if err := os.Mkdir(tempDir, 0o700); err != nil {
 		t.Fatalf("mkdir tmp: %v", err)
 	}
+	copyTestRunner(t, repoRoot, workspaceDir)
 	fakeGo := filepath.Join(workspaceDir, "fake-go")
 	// Terminate the recipe shell while the test command runs, as Ctrl-C or a
 	// cancelled CI job would.
