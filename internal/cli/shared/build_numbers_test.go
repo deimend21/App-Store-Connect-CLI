@@ -11,13 +11,6 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-func resetEquivalentVersionNotes() {
-	equivalentVersionNoteMu.Lock()
-	defer equivalentVersionNoteMu.Unlock()
-
-	equivalentVersionNotes = map[string]struct{}{}
-}
-
 func TestParseBuildNumberRejectsNonNumeric(t *testing.T) {
 	_, err := parseBuildNumber("1a", "processed build")
 	if err == nil {
@@ -187,7 +180,7 @@ func newPreReleaseVersionLookupClient(t *testing.T, storedVersion string, calls 
 }
 
 func TestFindPreReleaseVersionIDsMatchesEquivalentVersionFormat(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "1.2", &calls)
@@ -212,7 +205,7 @@ func TestFindPreReleaseVersionIDsMatchesEquivalentVersionFormat(t *testing.T) {
 }
 
 func TestFindPreReleaseVersionIDsPrefersRequestedVersionFormat(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "1.2.0", &calls)
@@ -237,7 +230,7 @@ func TestFindPreReleaseVersionIDsPrefersRequestedVersionFormat(t *testing.T) {
 }
 
 func TestFindPreReleaseVersionIDsCollectsEquivalentFormatsAcrossPlatforms(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
@@ -270,7 +263,7 @@ func TestFindPreReleaseVersionIDsCollectsEquivalentFormatsAcrossPlatforms(t *tes
 }
 
 func TestFindPreReleaseVersionIDsNotesEquivalentMatchOnlyOnce(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "1.2", &calls)
@@ -288,7 +281,7 @@ func TestFindPreReleaseVersionIDsNotesEquivalentMatchOnlyOnce(t *testing.T) {
 }
 
 func TestFindPreReleaseVersionIDsReportsNoMatchWithoutNote(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "9.9", &calls)
@@ -313,7 +306,7 @@ func TestFindPreReleaseVersionIDsReportsNoMatchWithoutNote(t *testing.T) {
 }
 
 func TestFindPreReleaseVersionIDsWithoutVersionFilterQueriesOnce(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "", &calls)
@@ -331,7 +324,7 @@ func TestFindPreReleaseVersionIDsWithoutVersionFilterQueriesOnce(t *testing.T) {
 }
 
 func TestFindPreReleaseVersionIDsDeduplicatesAndSkipsBlankIDs(t *testing.T) {
-	resetEquivalentVersionNotes()
+	ResetEquivalentVersionNotesForTest()
 
 	client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
 		if req.URL.Path != "/v1/preReleaseVersions" {

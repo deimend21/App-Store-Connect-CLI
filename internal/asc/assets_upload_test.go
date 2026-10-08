@@ -3,6 +3,7 @@ package asc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -207,6 +208,47 @@ func TestUploadAssetFromFileUploadsChunks(t *testing.T) {
 	}
 	if atomic.LoadInt32(&call) != 2 {
 		t.Fatalf("expected 2 upload calls, got %d", call)
+	}
+}
+
+func TestUploadAssetFromFileUploadsChunksConcurrentlyAndFailsOnChunkError(t *testing.T) {
+	setFastAssetUploadRetries(t, "0")
+	file := createTempAssetFile(t, []byte("abcdefgh"))
+	defer file.Close()
+
+	arrived := make(chan struct{}, DefaultUploadConcurrency)
+	allArrived := make(chan struct{})
+	go func() {
+		for i := 0; i < DefaultUploadConcurrency; i++ {
+			<-arrived
+		}
+		close(allArrived)
+	}()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		arrived <- struct{}{}
+		select {
+		case <-allArrived:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for concurrent chunk uploads; asset upload appears serial")
+		}
+		if r.URL.Path == "/part2" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ops := make([]UploadOperation, 0, DefaultUploadConcurrency)
+	for i := 0; i < DefaultUploadConcurrency; i++ {
+		ops = append(ops, UploadOperation{Method: http.MethodPut, URL: fmt.Sprintf("%s/part%d", server.URL, i), Length: 2, Offset: int64(i * 2)})
+	}
+
+	err := UploadAssetFromFile(context.Background(), file, 8, ops)
+	if err == nil || !strings.Contains(err.Error(), "upload operation 2") {
+		t.Fatalf("UploadAssetFromFile() error = %v, want failure for upload operation 2", err)
 	}
 }
 
