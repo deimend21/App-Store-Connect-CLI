@@ -457,15 +457,11 @@ func TestFetchAndAggregate_SingleReportKeepsAvailableColumns(t *testing.T) {
 		}, nil
 	})
 
-	metrics, found, err := fetchAndAggregate(
+	metrics, found, err := fetchAndAggregateOne(
 		context.Background(),
 		client,
-		"V",
-		insights.SalesScope{AppID: "123", AppSKU: "APP"},
 		[]string{"2026-01-01"},
 		asc.SalesReportTypeSales,
-		asc.SalesReportSubTypeSummary,
-		asc.SalesReportFrequencyDaily,
 	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -500,15 +496,11 @@ func TestFetchAndAggregate_UsesSubscriptionVersion1_4(t *testing.T) {
 		}, nil
 	})
 
-	_, found, err := fetchAndAggregate(
+	_, found, err := fetchAndAggregateOne(
 		context.Background(),
 		client,
-		"V",
-		insights.SalesScope{AppID: "123", AppSKU: "APP"},
 		[]string{"2026-01-01"},
 		asc.SalesReportTypeSubscription,
-		asc.SalesReportSubTypeSummary,
-		asc.SalesReportFrequencyDaily,
 	)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -528,15 +520,11 @@ func TestFetchAndAggregate_ReturnsParseError(t *testing.T) {
 		}, nil
 	})
 
-	_, _, err := fetchAndAggregate(
+	_, _, err := fetchAndAggregateOne(
 		context.Background(),
 		client,
-		"V",
-		insights.SalesScope{AppID: "123", AppSKU: "APP"},
 		[]string{"2026-01-01"},
 		asc.SalesReportTypeSales,
-		asc.SalesReportSubTypeSummary,
-		asc.SalesReportFrequencyDaily,
 	)
 	if err == nil {
 		t.Fatal("expected parse error")
@@ -567,15 +555,11 @@ func TestFetchAndAggregate_ReturnsIncompleteRangeError(t *testing.T) {
 		}, nil
 	})
 
-	_, found, err := fetchAndAggregate(
+	_, found, err := fetchAndAggregateOne(
 		context.Background(),
 		client,
-		"V",
-		insights.SalesScope{AppID: "123", AppSKU: "APP"},
 		[]string{"2026-01-01", "2026-01-02"},
 		asc.SalesReportTypeSales,
-		asc.SalesReportSubTypeSummary,
-		asc.SalesReportFrequencyDaily,
 	)
 	if err == nil {
 		t.Fatal("expected incomplete-range error")
