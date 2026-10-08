@@ -809,10 +809,12 @@ def assert_test_result_cache_disabled() -> None:
 def assert_go_tool_cache_identity() -> None:
     for path in (PR_WORKFLOW, MAIN_WORKFLOW):
         workflow = path.read_text()
-        key = next(line for line in workflow.splitlines() if "key:" in line and "go-tools" in line)
-        assert "runner.arch" in key, f"{path}: tool cache must include architecture"
-        assert "steps.go-tool-versions.outputs.key" in key, f"{path}: tool cache must key on tool and Go versions"
-        assert "hashFiles('Makefile'" not in key, f"{path}: unrelated Makefile edits must not rebuild tools"
+        keys = [line for line in workflow.splitlines() if "key:" in line and "go-tools" in line]
+        assert keys, f"{path}: missing tool cache"
+        for key in keys:
+            assert "runner.arch" in key, f"{path}: tool cache must include architecture"
+            assert "steps.go-tool-versions.outputs.key" in key, f"{path}: tool cache must key on tool and Go versions"
+            assert "hashFiles('Makefile'" not in key, f"{path}: unrelated Makefile edits must not rebuild tools"
         assert "GOFUMPT|GOLANGCI_LINT" in workflow and "go env GOVERSION" in workflow
 
 
