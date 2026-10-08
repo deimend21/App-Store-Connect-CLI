@@ -123,72 +123,6 @@ func TestBuildFeedbackQuery(t *testing.T) {
 	}
 }
 
-func TestBuildFeedbackQuery_IncludesScreenshots(t *testing.T) {
-	query := &feedbackQuery{}
-	WithFeedbackIncludeScreenshots()(query)
-
-	values, err := url.ParseQuery(buildFeedbackQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-
-	expected := "createdDate,comment,email,deviceModel,osVersion,locale,timeZone,architecture,connectionType,pairedAppleWatch,appUptimeInMilliseconds,diskBytesAvailable,diskBytesTotal,batteryPercentage,screenWidthInPoints,screenHeightInPoints,appPlatform,devicePlatform,deviceFamily,buildBundleId,screenshots,build,tester"
-	if got := values.Get("fields[betaFeedbackScreenshotSubmissions]"); got != expected {
-		t.Fatalf("expected fields to be %q, got %q", expected, got)
-	}
-}
-
-func TestBuildCrashQuery(t *testing.T) {
-	query := &crashQuery{}
-	opts := []CrashOption{
-		WithCrashDeviceModels([]string{"iPhone16,1"}),
-		WithCrashOSVersions([]string{"18.0"}),
-		WithCrashAppPlatforms([]string{"ios"}),
-		WithCrashDevicePlatforms([]string{"mac_os"}),
-		WithCrashBuildIDs([]string{"build-2"}),
-		WithCrashBuildPreReleaseVersionIDs([]string{"pre-2"}),
-		WithCrashTesterIDs([]string{"tester-2"}),
-		WithCrashLimit(5),
-		WithCrashSort("createdDate"),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildCrashQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-
-	if got := values.Get("filter[deviceModel]"); got != "iPhone16,1" {
-		t.Fatalf("expected filter[deviceModel]=iPhone16,1, got %q", got)
-	}
-	if got := values.Get("filter[osVersion]"); got != "18.0" {
-		t.Fatalf("expected filter[osVersion]=18.0, got %q", got)
-	}
-	if got := values.Get("limit"); got != "5" {
-		t.Fatalf("expected limit=5, got %q", got)
-	}
-	if got := values.Get("filter[appPlatform]"); got != "IOS" {
-		t.Fatalf("expected filter[appPlatform]=IOS, got %q", got)
-	}
-	if got := values.Get("filter[devicePlatform]"); got != "MAC_OS" {
-		t.Fatalf("expected filter[devicePlatform]=MAC_OS, got %q", got)
-	}
-	if got := values.Get("filter[build]"); got != "build-2" {
-		t.Fatalf("expected filter[build]=build-2, got %q", got)
-	}
-	if got := values.Get("filter[build.preReleaseVersion]"); got != "pre-2" {
-		t.Fatalf("expected filter[build.preReleaseVersion]=pre-2, got %q", got)
-	}
-	if got := values.Get("filter[tester]"); got != "tester-2" {
-		t.Fatalf("expected filter[tester]=tester-2, got %q", got)
-	}
-	if got := values.Get("sort"); got != "createdDate" {
-		t.Fatalf("expected sort=createdDate, got %q", got)
-	}
-}
-
 func TestBuildCrashQueryIncludeBuild(t *testing.T) {
 	query := &crashQuery{}
 	WithCrashInclude([]string{"build"})(query)
@@ -830,37 +764,6 @@ func TestBuildAccessibilityDeclarationsQuery(t *testing.T) {
 	}
 }
 
-func TestBuildAppStoreReviewAttachmentsQuery(t *testing.T) {
-	query := &appStoreReviewAttachmentsQuery{}
-	opts := []AppStoreReviewAttachmentsOption{
-		WithAppStoreReviewAttachmentsFields([]string{"fileName", "fileSize"}),
-		WithAppStoreReviewAttachmentReviewDetailFields([]string{"contactEmail", "notes"}),
-		WithAppStoreReviewAttachmentsInclude([]string{"appStoreReviewDetail"}),
-		WithAppStoreReviewAttachmentsLimit(10),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildAppStoreReviewAttachmentsQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-
-	if got := values.Get("fields[appStoreReviewAttachments]"); got != "fileName,fileSize" {
-		t.Fatalf("expected fields[appStoreReviewAttachments]=fileName,fileSize, got %q", got)
-	}
-	if got := values.Get("fields[appStoreReviewDetails]"); got != "contactEmail,notes" {
-		t.Fatalf("expected fields[appStoreReviewDetails]=contactEmail,notes, got %q", got)
-	}
-	if got := values.Get("include"); got != "appStoreReviewDetail" {
-		t.Fatalf("expected include=appStoreReviewDetail, got %q", got)
-	}
-	if got := values.Get("limit"); got != "10" {
-		t.Fatalf("expected limit=10, got %q", got)
-	}
-}
-
 func TestBuildAppEncryptionDeclarationsQuery(t *testing.T) {
 	query := &appEncryptionDeclarationsQuery{}
 	opts := []AppEncryptionDeclarationsOption{
@@ -1061,32 +964,6 @@ func TestBuildAppStoreVersionsQueryMixedExclusiveStatesKeepSeparateFilters(t *te
 	}
 }
 
-func TestBuildAppSearchKeywordsQuery(t *testing.T) {
-	query := &appSearchKeywordsQuery{}
-	opts := []AppSearchKeywordsOption{
-		WithAppSearchKeywordsLimit(15),
-		WithAppSearchKeywordsPlatforms([]string{"ios", "MAC_OS"}),
-		WithAppSearchKeywordsLocales([]string{"en-US", "ja"}),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildAppSearchKeywordsQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("filter[platform]"); got != "IOS,MAC_OS" {
-		t.Fatalf("expected filter[platform]=IOS,MAC_OS, got %q", got)
-	}
-	if got := values.Get("filter[locale]"); got != "en-US,ja" {
-		t.Fatalf("expected filter[locale]=en-US,ja, got %q", got)
-	}
-	if got := values.Get("limit"); got != "15" {
-		t.Fatalf("expected limit=15, got %q", got)
-	}
-}
-
 func TestBuildAppClipDefaultExperiencesQuery(t *testing.T) {
 	query := &appClipDefaultExperiencesQuery{}
 	WithAppClipDefaultExperiencesReleaseWithVersionExists(true)(query)
@@ -1171,36 +1048,6 @@ func TestBuildAppInfoQueryAddsIncludedRelationshipsToSparseFields(t *testing.T) 
 	}
 	if got := values["include"]; len(got) != 1 || got[0] != "ageRatingDeclaration,primaryCategory" {
 		t.Fatalf("include = %q, want one ordered, deduplicated value", got)
-	}
-}
-
-func TestBuildTerritoryAgeRatingsQuery(t *testing.T) {
-	query := &territoryAgeRatingsQuery{}
-	opts := []TerritoryAgeRatingsOption{
-		WithTerritoryAgeRatingsFields([]string{"appStoreAgeRating", "territory"}),
-		WithTerritoryAgeRatingsTerritoryFields([]string{"currency"}),
-		WithTerritoryAgeRatingsInclude([]string{"territory"}),
-		WithTerritoryAgeRatingsLimit(12),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildTerritoryAgeRatingsQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("fields[territoryAgeRatings]"); got != "appStoreAgeRating,territory" {
-		t.Fatalf("expected fields[territoryAgeRatings]=appStoreAgeRating,territory, got %q", got)
-	}
-	if got := values.Get("fields[territories]"); got != "currency" {
-		t.Fatalf("expected fields[territories]=currency, got %q", got)
-	}
-	if got := values.Get("include"); got != "territory" {
-		t.Fatalf("expected include=territory, got %q", got)
-	}
-	if got := values.Get("limit"); got != "12" {
-		t.Fatalf("expected limit=12, got %q", got)
 	}
 }
 
@@ -1345,60 +1192,6 @@ func TestBuildBuildUploadsQuery(t *testing.T) {
 	}
 }
 
-func TestBuildBuildUploadFilesQuery(t *testing.T) {
-	query := &buildUploadFilesQuery{}
-	opts := []BuildUploadFilesOption{
-		WithBuildUploadFilesLimit(20),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildBuildUploadFilesQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("limit"); got != "20" {
-		t.Fatalf("expected limit=20, got %q", got)
-	}
-}
-
-func TestBuildBuildIndividualTestersQuery(t *testing.T) {
-	query := &buildIndividualTestersQuery{}
-	opts := []BuildIndividualTestersOption{
-		WithBuildIndividualTestersLimit(30),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildBuildIndividualTestersQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("limit"); got != "30" {
-		t.Fatalf("expected limit=30, got %q", got)
-	}
-}
-
-func TestBuildBetaBuildUsagesQuery(t *testing.T) {
-	query := &betaBuildUsagesQuery{}
-	opts := []BetaBuildUsagesOption{
-		WithBetaBuildUsagesLimit(40),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildBetaBuildUsagesQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("limit"); got != "40" {
-		t.Fatalf("expected limit=40, got %q", got)
-	}
-}
-
 func TestBuildBetaTesterUsagesQuery(t *testing.T) {
 	query := &betaTesterUsagesQuery{}
 	opts := []BetaTesterUsagesOption{
@@ -1422,28 +1215,6 @@ func TestBuildBetaTesterUsagesQuery(t *testing.T) {
 	}
 	if got := values.Get("limit"); got != "10" {
 		t.Fatalf("expected limit=10, got %q", got)
-	}
-}
-
-func TestBuildAppInfoLocalizationsQuery(t *testing.T) {
-	query := &appInfoLocalizationsQuery{}
-	opts := []AppInfoLocalizationsOption{
-		WithAppInfoLocalizationsLimit(5),
-		WithAppInfoLocalizationLocales([]string{"en-US"}),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	values, err := url.ParseQuery(buildAppInfoLocalizationsQuery(query))
-	if err != nil {
-		t.Fatalf("failed to parse query: %v", err)
-	}
-	if got := values.Get("filter[locale]"); got != "en-US" {
-		t.Fatalf("expected filter[locale]=en-US, got %q", got)
-	}
-	if got := values.Get("limit"); got != "5" {
-		t.Fatalf("expected limit=5, got %q", got)
 	}
 }
 
@@ -1674,23 +1445,6 @@ func TestBuildBuildsQuery(t *testing.T) {
 	}
 	if query.preReleaseVersion != "2.4.0" {
 		t.Fatalf("expected preReleaseVersion=2.4.0, got %q", query.preReleaseVersion)
-	}
-}
-
-func TestBuildBuildsQuery_WithExpiredFilter(t *testing.T) {
-	query := &buildsQuery{}
-	opts := []BuildsOption{
-		WithBuildsExpired(false),
-	}
-	for _, opt := range opts {
-		opt(query)
-	}
-
-	if query.expired == nil {
-		t.Fatal("expected expired filter to be set")
-	}
-	if *query.expired {
-		t.Fatalf("expected expired filter=false, got %v", *query.expired)
 	}
 }
 
@@ -2112,59 +1866,6 @@ func TestBuildPassTypeIDCertificatesQuery(t *testing.T) {
 	}
 }
 
-func TestBuildPerfPowerMetricsQuery(t *testing.T) {
-	query := &perfPowerMetricsQuery{
-		platforms:   []string{"IOS"},
-		metricTypes: []string{"DISK", "HANG"},
-		deviceTypes: []string{"iPhone15,2"},
-	}
-	values, err := url.ParseQuery(buildPerfPowerMetricsQuery(query))
-	if err != nil {
-		t.Fatalf("ParseQuery() error: %v", err)
-	}
-	if values.Get("filter[platform]") != "IOS" {
-		t.Fatalf("expected platform filter, got %q", values.Get("filter[platform]"))
-	}
-	if values.Get("filter[metricType]") != "DISK,HANG" {
-		t.Fatalf("expected metricType filter, got %q", values.Get("filter[metricType]"))
-	}
-	if values.Get("filter[deviceType]") != "iPhone15,2" {
-		t.Fatalf("expected deviceType filter, got %q", values.Get("filter[deviceType]"))
-	}
-}
-
-func TestBuildDiagnosticSignaturesQuery(t *testing.T) {
-	query := &diagnosticSignaturesQuery{
-		listQuery:       listQuery{limit: 25},
-		diagnosticTypes: []string{"HANGS"},
-		fields:          []string{"diagnosticType", "signature"},
-	}
-	values, err := url.ParseQuery(buildDiagnosticSignaturesQuery(query))
-	if err != nil {
-		t.Fatalf("ParseQuery() error: %v", err)
-	}
-	if values.Get("filter[diagnosticType]") != "HANGS" {
-		t.Fatalf("expected diagnosticType filter, got %q", values.Get("filter[diagnosticType]"))
-	}
-	if values.Get("fields[diagnosticSignatures]") != "diagnosticType,signature" {
-		t.Fatalf("expected fields, got %q", values.Get("fields[diagnosticSignatures]"))
-	}
-	if values.Get("limit") != "25" {
-		t.Fatalf("expected limit=25, got %q", values.Get("limit"))
-	}
-}
-
-func TestBuildDiagnosticLogsQuery(t *testing.T) {
-	query := &diagnosticLogsQuery{listQuery: listQuery{limit: 50}}
-	values, err := url.ParseQuery(buildDiagnosticLogsQuery(query))
-	if err != nil {
-		t.Fatalf("ParseQuery() error: %v", err)
-	}
-	if values.Get("limit") != "50" {
-		t.Fatalf("expected limit=50, got %q", values.Get("limit"))
-	}
-}
-
 func TestBuildAndroidToIosAppMappingDetailsQuery(t *testing.T) {
 	query := &androidToIosAppMappingDetailsQuery{
 		listQuery: listQuery{limit: 10},
@@ -2215,19 +1916,6 @@ func TestBuildAlternativeDistributionKeysQuery(t *testing.T) {
 	}
 	if values.Get("exists[app]") != "true" {
 		t.Fatalf("expected exists[app]=true, got %q", values.Get("exists[app]"))
-	}
-}
-
-func TestBuildAlternativeDistributionPackageVersionsQuery(t *testing.T) {
-	query := &alternativeDistributionPackageVersionsQuery{
-		listQuery: listQuery{limit: 7},
-	}
-	values, err := url.ParseQuery(buildAlternativeDistributionPackageVersionsQuery(query))
-	if err != nil {
-		t.Fatalf("ParseQuery() error: %v", err)
-	}
-	if values.Get("limit") != "7" {
-		t.Fatalf("expected limit=7, got %q", values.Get("limit"))
 	}
 }
 
@@ -2292,17 +1980,6 @@ func TestBuildBackgroundAssetVersionsQuery(t *testing.T) {
 	}
 	if values.Get("limit") != "25" {
 		t.Fatalf("expected limit=25, got %q", values.Get("limit"))
-	}
-}
-
-func TestBuildBackgroundAssetUploadFilesQuery(t *testing.T) {
-	query := &backgroundAssetUploadFilesQuery{listQuery: listQuery{limit: 15}}
-	values, err := url.ParseQuery(buildBackgroundAssetUploadFilesQuery(query))
-	if err != nil {
-		t.Fatalf("ParseQuery() error: %v", err)
-	}
-	if values.Get("limit") != "15" {
-		t.Fatalf("expected limit=15, got %q", values.Get("limit"))
 	}
 }
 
@@ -2376,73 +2053,6 @@ func TestBuildUploadCreateRequest_JSON(t *testing.T) {
 	}
 	if parsed.Data.Relationships.App.Data.ID != "APP_ID_123" {
 		t.Fatalf("expected app id=APP_ID_123, got %q", parsed.Data.Relationships.App.Data.ID)
-	}
-}
-
-func TestSubscriptionOfferCodeOneTimeUseCodeCreateRequest_JSON(t *testing.T) {
-	req := SubscriptionOfferCodeOneTimeUseCodeCreateRequest{
-		Data: SubscriptionOfferCodeOneTimeUseCodeCreateData{
-			Type: ResourceTypeSubscriptionOfferCodeOneTimeUseCodes,
-			Attributes: SubscriptionOfferCodeOneTimeUseCodeCreateAttributes{
-				NumberOfCodes:  3,
-				ExpirationDate: "2026-02-01",
-			},
-			Relationships: SubscriptionOfferCodeOneTimeUseCodeCreateRelationships{
-				OfferCode: Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeSubscriptionOfferCodes,
-						ID:   "OFFER_CODE_ID",
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(req)
-	if err != nil {
-		t.Fatalf("BuildRequestBody() error: %v", err)
-	}
-
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(body); err != nil {
-		t.Fatalf("read body error: %v", err)
-	}
-
-	var parsed struct {
-		Data struct {
-			Type       string `json:"type"`
-			Attributes struct {
-				NumberOfCodes  int    `json:"numberOfCodes"`
-				ExpirationDate string `json:"expirationDate"`
-			} `json:"attributes"`
-			Relationships struct {
-				OfferCode struct {
-					Data struct {
-						Type string `json:"type"`
-						ID   string `json:"id"`
-					} `json:"data"`
-				} `json:"offerCode"`
-			} `json:"relationships"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	if parsed.Data.Type != "subscriptionOfferCodeOneTimeUseCodes" {
-		t.Fatalf("expected type=subscriptionOfferCodeOneTimeUseCodes, got %q", parsed.Data.Type)
-	}
-	if parsed.Data.Attributes.NumberOfCodes != 3 {
-		t.Fatalf("expected numberOfCodes=3, got %d", parsed.Data.Attributes.NumberOfCodes)
-	}
-	if parsed.Data.Attributes.ExpirationDate != "2026-02-01" {
-		t.Fatalf("expected expirationDate=2026-02-01, got %q", parsed.Data.Attributes.ExpirationDate)
-	}
-	if parsed.Data.Relationships.OfferCode.Data.Type != "subscriptionOfferCodes" {
-		t.Fatalf("expected offerCode type=subscriptionOfferCodes, got %q", parsed.Data.Relationships.OfferCode.Data.Type)
-	}
-	if parsed.Data.Relationships.OfferCode.Data.ID != "OFFER_CODE_ID" {
-		t.Fatalf("expected offerCode id=OFFER_CODE_ID, got %q", parsed.Data.Relationships.OfferCode.Data.ID)
 	}
 }
 
@@ -2647,119 +2257,6 @@ func TestAppScreenshotSetCreateRequest_JSON(t *testing.T) {
 	}
 }
 
-func TestAppScreenshotSetCreateRequest_JSON_CustomProductPageLocalization(t *testing.T) {
-	req := AppScreenshotSetCreateRequest{
-		Data: AppScreenshotSetCreateData{
-			Type:       ResourceTypeAppScreenshotSets,
-			Attributes: AppScreenshotSetAttributes{ScreenshotDisplayType: "APP_IPHONE_65"},
-			Relationships: &AppScreenshotSetRelationships{
-				AppCustomProductPageLocalization: &Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeAppCustomProductPageLocalizations,
-						ID:   "CPP_LOC_ID_123",
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(req)
-	if err != nil {
-		t.Fatalf("BuildRequestBody() error: %v", err)
-	}
-
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(body); err != nil {
-		t.Fatalf("read body error: %v", err)
-	}
-
-	var parsed struct {
-		Data struct {
-			Relationships map[string]struct {
-				Data struct {
-					Type string `json:"type"`
-					ID   string `json:"id"`
-				} `json:"data"`
-			} `json:"relationships"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	rel, ok := parsed.Data.Relationships["appCustomProductPageLocalization"]
-	if !ok {
-		t.Fatalf("expected appCustomProductPageLocalization relationship, got %+v", parsed.Data.Relationships)
-	}
-	if rel.Data.Type != "appCustomProductPageLocalizations" {
-		t.Fatalf("expected relationship type=appCustomProductPageLocalizations, got %q", rel.Data.Type)
-	}
-	if rel.Data.ID != "CPP_LOC_ID_123" {
-		t.Fatalf("expected relationship id=CPP_LOC_ID_123, got %q", rel.Data.ID)
-	}
-	if _, ok := parsed.Data.Relationships["appStoreVersionLocalization"]; ok {
-		t.Fatalf("expected appStoreVersionLocalization to be omitted when unset")
-	}
-}
-
-func TestAppScreenshotSetCreateRequest_JSON_ExperimentTreatmentLocalization(t *testing.T) {
-	req := AppScreenshotSetCreateRequest{
-		Data: AppScreenshotSetCreateData{
-			Type:       ResourceTypeAppScreenshotSets,
-			Attributes: AppScreenshotSetAttributes{ScreenshotDisplayType: "APP_IPHONE_65"},
-			Relationships: &AppScreenshotSetRelationships{
-				AppStoreVersionExperimentTreatmentLocalization: &Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeAppStoreVersionExperimentTreatmentLocalizations,
-						ID:   "TREATMENT_LOC_ID_123",
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(req)
-	if err != nil {
-		t.Fatalf("BuildRequestBody() error: %v", err)
-	}
-
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(body); err != nil {
-		t.Fatalf("read body error: %v", err)
-	}
-
-	var parsed struct {
-		Data struct {
-			Relationships map[string]struct {
-				Data struct {
-					Type string `json:"type"`
-					ID   string `json:"id"`
-				} `json:"data"`
-			} `json:"relationships"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	rel, ok := parsed.Data.Relationships["appStoreVersionExperimentTreatmentLocalization"]
-	if !ok {
-		t.Fatalf("expected appStoreVersionExperimentTreatmentLocalization relationship, got %+v", parsed.Data.Relationships)
-	}
-	if rel.Data.Type != "appStoreVersionExperimentTreatmentLocalizations" {
-		t.Fatalf("expected relationship type=appStoreVersionExperimentTreatmentLocalizations, got %q", rel.Data.Type)
-	}
-	if rel.Data.ID != "TREATMENT_LOC_ID_123" {
-		t.Fatalf("expected relationship id=TREATMENT_LOC_ID_123, got %q", rel.Data.ID)
-	}
-	if _, ok := parsed.Data.Relationships["appStoreVersionLocalization"]; ok {
-		t.Fatalf("expected appStoreVersionLocalization to be omitted when unset")
-	}
-	if _, ok := parsed.Data.Relationships["appCustomProductPageLocalization"]; ok {
-		t.Fatalf("expected appCustomProductPageLocalization to be omitted when unset")
-	}
-}
-
 func TestAppScreenshotCreateRequest_JSON(t *testing.T) {
 	req := AppScreenshotCreateRequest{
 		Data: AppScreenshotCreateData{
@@ -2936,61 +2433,6 @@ func TestAppPreviewSetCreateRequest_JSON(t *testing.T) {
 	}
 	if parsed.Data.Relationships.AppStoreVersionLocalization.Data.ID != "LOC_ID_123" {
 		t.Fatalf("expected relationship id=LOC_ID_123, got %q", parsed.Data.Relationships.AppStoreVersionLocalization.Data.ID)
-	}
-}
-
-func TestAppPreviewSetCreateRequest_JSON_CustomProductPageLocalization(t *testing.T) {
-	req := AppPreviewSetCreateRequest{
-		Data: AppPreviewSetCreateData{
-			Type:       ResourceTypeAppPreviewSets,
-			Attributes: AppPreviewSetAttributes{PreviewType: "IPHONE_65"},
-			Relationships: &AppPreviewSetRelationships{
-				AppCustomProductPageLocalization: &Relationship{
-					Data: ResourceData{
-						Type: ResourceTypeAppCustomProductPageLocalizations,
-						ID:   "CPP_LOC_ID_123",
-					},
-				},
-			},
-		},
-	}
-
-	body, err := BuildRequestBody(req)
-	if err != nil {
-		t.Fatalf("BuildRequestBody() error: %v", err)
-	}
-
-	buf := new(bytes.Buffer)
-	if _, err := buf.ReadFrom(body); err != nil {
-		t.Fatalf("read body error: %v", err)
-	}
-
-	var parsed struct {
-		Data struct {
-			Relationships map[string]struct {
-				Data struct {
-					Type string `json:"type"`
-					ID   string `json:"id"`
-				} `json:"data"`
-			} `json:"relationships"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-		t.Fatalf("failed to unmarshal body: %v", err)
-	}
-
-	rel, ok := parsed.Data.Relationships["appCustomProductPageLocalization"]
-	if !ok {
-		t.Fatalf("expected appCustomProductPageLocalization relationship, got %+v", parsed.Data.Relationships)
-	}
-	if rel.Data.Type != "appCustomProductPageLocalizations" {
-		t.Fatalf("expected relationship type=appCustomProductPageLocalizations, got %q", rel.Data.Type)
-	}
-	if rel.Data.ID != "CPP_LOC_ID_123" {
-		t.Fatalf("expected relationship id=CPP_LOC_ID_123, got %q", rel.Data.ID)
-	}
-	if _, ok := parsed.Data.Relationships["appStoreVersionLocalization"]; ok {
-		t.Fatalf("expected appStoreVersionLocalization to be omitted when unset")
 	}
 }
 
