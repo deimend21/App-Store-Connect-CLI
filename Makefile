@@ -16,14 +16,23 @@ RELEASE_BUILD_FLAGS := -trimpath
 
 # Go variables
 GO := go
+# CGO's external linker otherwise inherits the installed macOS SDK minimum.
+override MACOSX_DEPLOYMENT_TARGET := 13.0
+export MACOSX_DEPLOYMENT_TARGET
+ifeq ($(shell $(GO) env GOHOSTOS),darwin)
+# Include the target in Go's CGO cache key, preserving other compiler flags.
+override CGO_CFLAGS := $(filter-out -mmacosx-version-min=%,$(or $(CGO_CFLAGS),-O2 -g)) -mmacosx-version-min=13.0
+override CGO_LDFLAGS := $(filter-out -mmacosx-version-min=%,$(or $(CGO_LDFLAGS),-O2 -g)) -mmacosx-version-min=13.0
+export CGO_CFLAGS CGO_LDFLAGS
+endif
 GOMOD := go.mod
 GOBIN := $(shell $(GO) env GOPATH)/bin
 GO_TOOLCHAIN_VERSION := $(shell $(GO) env GOVERSION)
 # Cold hosted runners can require more than ten minutes for the full-module lint.
 GOLANGCI_LINT_TIMEOUT ?= 15m
 INSTALL_PREFIX ?= /usr/local/bin
-GOFUMPT_VERSION ?= v0.10.0
-GOLANGCI_LINT_VERSION ?= v2.12.1
+GOFUMPT_VERSION ?= v0.12.0
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION ?= v1.6.0
 
 # Test environment
@@ -155,7 +164,6 @@ format:
 		echo "$(YELLOW)gofumpt not found; install with: make tools (or: $(GO) install mvdan.cc/gofumpt@latest)$(NC)"; \
 		exit 1; \
 	fi
-	$(GO) fmt ./...
 	gofumpt -w .
 
 .PHONY: format-check
@@ -237,8 +245,7 @@ generate-command-docs:
 check-command-docs:
 	@echo "$(BLUE)Checking command docs sync...$(NC)"
 	python3 ./scripts/test_generate_command_docs.py
-	python3 ./scripts/generate-command-docs.py --check
-	python3 ./scripts/check-commands-docs.py
+	python3 ./scripts/check-commands-docs.py --check-generated
 
 .PHONY: check-repo-docs
 check-repo-docs:
@@ -266,7 +273,11 @@ check-openapi:
 	python3 ./scripts/generate-schema-index.py --check
 
 .PHONY: check-docs
-check-docs: check-command-docs check-repo-docs check-website-docs check-agent-skills check-openapi
+check-docs: check-repo-docs check-agent-skills check-openapi
+	python3 ./scripts/test_generate_command_docs.py
+	python3 ./scripts/test_check_docs_commands.py
+	python3 ./scripts/check_website_docs.py
+	python3 ./scripts/check_docs_commands.py
 
 .PHONY: check-wall-of-apps
 check-wall-of-apps:
