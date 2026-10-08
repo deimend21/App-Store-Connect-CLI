@@ -1551,19 +1551,11 @@ func lookupKeychainCredential(profile string) (keychainLookup, error) {
 	if err != nil {
 		return keychainLookup{}, err
 	}
-	// The full listing migrates legacy entries into the current keychain.
-	legacyMarkedEmpty := legacyKeychainMarkedEmpty()
-	if !legacyMarkedEmpty && legacyKeychainHasCredentials() {
+	if !legacyKeychainMarkedEmpty() && legacyKeychainHasCredentials() {
+		// The full listing migrates legacy entries into the current keychain.
 		return lookupKeychainCredentialFromListing(profile)
 	}
-	lookup, err := lookupCurrentKeychainCredential(kr, names, profile)
-	if err != nil || lookup.found || !legacyMarkedEmpty || !legacyKeychainHasCredentials() {
-		return lookup, err
-	}
-	return lookupKeychainCredentialFromListing(profile)
-}
 
-func lookupCurrentKeychainCredential(kr keyring.Keyring, names []string, profile string) (keychainLookup, error) {
 	lookup := keychainLookup{stored: len(names)}
 	selected, defaultKey, err := selectedCredentialName(profile)
 	if err != nil {
@@ -1643,9 +1635,8 @@ func keychainCredentialNames(kr keyring.Keyring) ([]string, error) {
 }
 
 // legacyKeychainEmptyMarkerPath names a file recording that the legacy "asc"
-// keychain held no credentials. Only old releases write that keychain, so once
-// it is empty, lookups probe it again only when the current keychain does not
-// resolve the requested credential.
+// keychain held no credentials. Only releases before 0.9.0 wrote that keychain,
+// so lookups stop probing it; listing paths still read and migrate it.
 var legacyKeychainEmptyMarkerPath = func() (string, error) {
 	path, err := config.GlobalPath()
 	if err != nil {
