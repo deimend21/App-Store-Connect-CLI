@@ -54,10 +54,22 @@ Examples:
 			}
 
 			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			setsResp, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
+			firstPage, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
 			cancel()
 			if err != nil {
 				return fmt.Errorf("video-previews list: failed to fetch sets: %w", err)
+			}
+			allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+				requestCtx, cancel := shared.ContextWithTimeout(ctx)
+				defer cancel()
+				return client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, "", asc.WithAppStoreVersionLocalizationPreviewSetsNextURL(nextURL))
+			})
+			if err != nil {
+				return fmt.Errorf("video-previews list: failed to fetch sets: %w", err)
+			}
+			setsResp, ok := allPages.(*asc.AppPreviewSetsResponse)
+			if !ok {
+				return fmt.Errorf("video-previews list: unexpected sets response type %T", allPages)
 			}
 
 			sets, err := client.AppPreviewSetsWithPreviews(ctx, setsResp, shared.ContextWithTimeout)
@@ -152,15 +164,15 @@ Examples:
 
 			previewType, err := normalizePreviewType(deviceValue)
 			if err != nil {
-				return fmt.Errorf("video-previews upload: %w", err)
+				return invalidDeviceTypeError(fmt.Errorf("video-previews upload: %w", err))
 			}
 
 			files, err := collectAssetFiles(pathValue)
 			if err != nil {
-				return fmt.Errorf("video-previews upload: %w", err)
+				return ClassifyMediaInputError(fmt.Errorf("video-previews upload: %w", err), "--path")
 			}
 			if err := validatePreviewFiles(files, !*skipExisting); err != nil {
-				return fmt.Errorf("video-previews upload: %w", err)
+				return ClassifyMediaInputError(fmt.Errorf("video-previews upload: %w", err), "--path")
 			}
 
 			client, err := deps.GetClient()
@@ -341,10 +353,22 @@ Examples:
 				})
 			} else {
 				requestCtx, cancel := shared.ContextWithTimeout(ctx)
-				setsResp, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
+				firstPage, err := client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, locID, asc.WithAppStoreVersionLocalizationPreviewSetsIncludePreviews())
 				cancel()
 				if err != nil {
 					return fmt.Errorf("video-previews download: failed to fetch sets: %w", err)
+				}
+				allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
+					requestCtx, cancel := shared.ContextWithTimeout(ctx)
+					defer cancel()
+					return client.GetAppStoreVersionLocalizationPreviewSets(requestCtx, "", asc.WithAppStoreVersionLocalizationPreviewSetsNextURL(nextURL))
+				})
+				if err != nil {
+					return fmt.Errorf("video-previews download: failed to fetch sets: %w", err)
+				}
+				setsResp, ok := allPages.(*asc.AppPreviewSetsResponse)
+				if !ok {
+					return fmt.Errorf("video-previews download: unexpected sets response type %T", allPages)
 				}
 				includedPreviews := asc.IncludedAppPreviews(setsResp)
 
@@ -865,14 +889,14 @@ func ValidatePreviewFiles(files []string, enforceCapacity bool) error {
 
 func validatePreviewFiles(files []string, enforceCapacity bool) error {
 	if enforceCapacity && len(files) > maxPreviewsPerSet {
-		return fmt.Errorf("preview sets accept at most %d files; got %d", maxPreviewsPerSet, len(files))
+		return markMediaInput(fmt.Errorf("preview sets accept at most %d files; got %d", maxPreviewsPerSet, len(files)), shared.DiagnosticInvalidInput)
 	}
 	for _, filePath := range files {
 		if err := asc.ValidateImageFile(filePath); err != nil {
-			return err
+			return markMediaInput(err, shared.DiagnosticFileInvalidFormat)
 		}
 		if _, err := detectPreviewMimeType(filePath); err != nil {
-			return err
+			return markMediaInput(err, shared.DiagnosticFileInvalidFormat)
 		}
 	}
 	return nil

@@ -47,7 +47,11 @@ asc asset-library images upload --library-id LIBRARY_ID \
   --file ./duo-screenshot.png --category APP_SCREENSHOTS_AND_PREVIEWS
 asc asset-library videos upload --library-id LIBRARY_ID \
   --file ./duo-preview.mp4 --category APP_SCREENSHOTS_AND_PREVIEWS
+asc asset-library images upload --library-id LIBRARY_ID \
+  --file ./cms-8f3a21.png --reference-name "Hero en-US 3.14"
 ```
+
+Apple derives each asset's file name and default reference name from the uploaded file, and the file name cannot change after upload. Pass `--reference-name` to set the searchable reference name at upload instead of running `asc asset-library images rename` (or `videos rename`) afterwards.
 
 Image files must meet the selected category's media specifications. Screenshots and creative images cannot contain an alpha channel or transparency, even when all pixels appear opaque.
 
@@ -55,7 +59,7 @@ Video upload requires `ffprobe` from FFmpeg and a regular, nonempty `.mp4`, `.m4
 
 [Creative asset specifications](https://developer.apple.com/help/app-store-connect/reference/app-information/creative-assets-specifications) distinguish header/search videos, typically 5–30 seconds at 30 or 60 fps, from app previews. [App preview specifications](https://developer.apple.com/help/app-store-connect/reference/app-information/app-preview-specifications) require 15–30 seconds and have their own delivery and encoding requirements. Check `asc asset-library specs` for the current reference data rather than treating these examples as a complete specification.
 
-`ASC_UPLOAD_TIMEOUT` bounds upload and processing. Processing may continue after the command times out; increase the timeout when needed. A failure after reservation prints a partial receipt containing the asset ID. Inspect that ID with `asc asset-library videos view --id VIDEO_ID` (or `images view`) before retrying or deleting it; the CLI does not delete the reservation automatically.
+`ASC_UPLOAD_TIMEOUT` bounds upload and processing. Video uploads default to `30m`, because Apple commonly takes 10 to 15 minutes to process a video; images use the general `5m` default. Processing may continue after the command times out; increase the timeout when needed. A failure after reservation prints a partial receipt containing the asset ID. Inspect that ID with `asc asset-library videos view --id VIDEO_ID` (or `images view`) before retrying or deleting it; the CLI does not delete the reservation automatically.
 
 Video transfer or a completed poster thumbnail does not prove the video is playable. Readiness requires the expected preparation state, a matched specification, and a usable video asset URL. Processing failures return an error with the reserved ID.
 
@@ -119,7 +123,7 @@ asc product-pages custom-pages localizations placements swap \
   --image-id IMAGE_ID --placement-type PRODUCT_PAGE_HEADER_ASSET --confirm
 ```
 
-`swap` uses a live-supported extension outside the OpenAPI 4.5.1 create schema to link the existing placement to its replacement in one request. It accepts an image or video of the same media type as the existing placement, sends no placement group, and requires `--confirm`. Apple validates the existing context, group, media, and editability. A failed swap does not trigger a separate deletion or fallback removal.
+`swap` uses a live-supported extension outside the OpenAPI 4.5.1 create schema to link the existing placement to its replacement in one request. It accepts an image or video of the same media type as the existing placement and requires `--confirm`. Apple requires the replacement to keep the existing placement's group, so the command first reads that group from the existing placement and sends it with the swap; there is no group flag. Apple validates the existing context, media, and editability. A failed swap does not trigger a separate deletion or fallback removal.
 
 For an already-live version, Apple's website guides users through **Next → Publish** when selecting an approved replacement. The CLI's swap receipt does not promise storefront publication; no separate public publication command is available. New-version assets still follow the version's review and release workflow.
 

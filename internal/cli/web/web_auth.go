@@ -29,8 +29,15 @@ const (
 	webAppleIDEnv              = "ASC_WEB_APPLE_ID"
 	webDontStorePasswordEnv    = "ASC_WEB_DONT_STORE_PASSWORD"
 	webTwoFactorCodeCommandEnv = "ASC_WEB_2FA_CODE_COMMAND"
-	webTwoFactorCommandTimeout = 60 * time.Second
-	passwordReadPollInterval   = 100 * time.Millisecond
+	// webNoAutoLoginEnv opts out of automatic sign-in: only `asc web auth
+	// login` may sign in, and every other web command uses the cached session
+	// or fails without contacting Apple.
+	webNoAutoLoginEnv = "ASC_WEB_NO_AUTO_LOGIN"
+	// webTwoFactorCodeRequestedAtEnv tells the 2FA code command when asc asked
+	// Apple for the current code, so it can ignore codes from earlier attempts.
+	webTwoFactorCodeRequestedAtEnv = "ASC_WEB_2FA_CODE_REQUESTED_AT"
+	webTwoFactorCommandTimeout     = 60 * time.Second
+	passwordReadPollInterval       = 100 * time.Millisecond
 )
 
 func webPasswordEnvDisplay() string {
@@ -79,6 +86,7 @@ var (
 	sessionCacheWarningWriter      io.Writer = os.Stderr
 	sessionDefaultNoticeWriter     io.Writer = os.Stderr
 	passwordStoreWarningWriter     io.Writer = os.Stderr
+	signinBackoffNowFn                       = time.Now
 	invalidWebPasswordOptOutMu     sync.Mutex
 	invalidWebPasswordOptOutValues = map[string]struct{}{}
 )
@@ -420,11 +428,26 @@ func twoFactorCodeCommandShellArgs(command string) []string {
 	return []string{"-c", command}
 }
 
+type twoFactorCodeRequestedAtContextKey struct{}
+
+// contextWithTwoFactorCodeRequestedAt records when asc asked Apple for the code
+// the next 2FA code command run should return.
+func contextWithTwoFactorCodeRequestedAt(ctx context.Context, requestedAt time.Time) context.Context {
+	return context.WithValue(ctx, twoFactorCodeRequestedAtContextKey{}, requestedAt)
+}
+
+func twoFactorCodeRequestedAt(ctx context.Context) (time.Time, bool) {
+	requestedAt, ok := ctx.Value(twoFactorCodeRequestedAtContextKey{}).(time.Time)
+	return requestedAt, ok
+}
+
 func readTwoFactorCodeFromCommand(ctx context.Context, command string) (string, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return "", fmt.Errorf("2fa required: empty 2fa code command")
 	}
+	// Read before the timeout strip below, which drops layered context values.
+	requestedAt, hasRequestedAt := twoFactorCodeRequestedAt(ctx)
 
 	commandCtx, cancel := shared.ContextWithResolvedTimeout(shared.ContextWithoutTimeout(ctx), webTwoFactorCommandTimeout)
 	defer cancel()
@@ -435,6 +458,9 @@ func readTwoFactorCodeFromCommand(ctx context.Context, command string) (string, 
 		cmd = exec.CommandContext(commandCtx, "/bin/sh", twoFactorCodeCommandShellArgs(command)...)
 	}
 
+	if hasRequestedAt {
+		cmd.Env = append(os.Environ(), webTwoFactorCodeRequestedAtEnv+"="+requestedAt.UTC().Format(time.RFC3339Nano))
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		if ctxErr := commandCtx.Err(); ctxErr != nil {
@@ -495,6 +521,10 @@ func readRotatedTwoFactorCodeFromCommand(ctx context.Context, command, consumed 
 	waitCtx := shared.ContextWithoutTimeout(ctx)
 	rotationCtx, cancel := context.WithTimeout(waitCtx, webTwoFactorCodeRotationTimeout)
 	defer cancel()
+	// Stripping the timeout also drops the code request time layered above it.
+	if requestedAt, ok := twoFactorCodeRequestedAt(ctx); ok {
+		rotationCtx = contextWithTwoFactorCodeRequestedAt(rotationCtx, requestedAt)
+	}
 	rotationExhausted := func() error {
 		return fmt.Errorf("2fa required: the configured two-factor code command did not produce a code other than the one the expired session already consumed within %s: wait for it to produce a new code, then re-run", webTwoFactorCodeRotationTimeout)
 	}
@@ -584,17 +614,21 @@ func publicAPIAlternativeFromContext(ctx context.Context) string {
 // expired one, and the required_input_missing --apple-id diagnostic the usage
 // error it replaced reported. alternative, when set, is appended to the hint.
 func newMissingWebSessionError(appleID, alternative string) error {
-	message := "no Apple web session is cached"
-	trimmedAppleID := strings.TrimSpace(appleID)
-	if trimmedAppleID != "" {
-		message = "no usable Apple web session for " + shared.SanitizeTerminal(trimmedAppleID)
-	}
 	hint := fmt.Sprintf(
 		"asc web commands need a signed-in Apple Account session, and signing in needs an interactive terminal for the password and two-factor code. Run 'asc web auth login --apple-id EMAIL' in a terminal, or load a session exported elsewhere with 'asc web auth import --file FILE'. Unattended sign-in needs %s and %s, plus --apple-id or %s.",
 		webPasswordEnvDisplay(),
 		webTwoFactorCodeCommandEnv,
 		webAppleIDEnv,
 	)
+	return missingWebSessionErrorWithHint(appleID, hint, alternative)
+}
+
+func missingWebSessionErrorWithHint(appleID, hint, alternative string) error {
+	message := "no Apple web session is cached"
+	trimmedAppleID := strings.TrimSpace(appleID)
+	if trimmedAppleID != "" {
+		message = "no usable Apple web session for " + shared.SanitizeTerminal(trimmedAppleID)
+	}
 	if alternative = strings.TrimSpace(alternative); alternative != "" {
 		hint += " " + alternative
 	}
@@ -761,7 +795,7 @@ func storedWebPasswordStatus(appleID string) bool {
 // code and then failing the App Store Connect session bootstrap is reported as a
 // finalization failure carrying the HTTP status, because calling it a
 // verification failure misleads users into retrying a code that was accepted.
-func twoFactorSubmitFailure(err error, afterPhoneDelivery bool) error {
+func twoFactorSubmitFailure(err error, afterPhoneDelivery, smsCode bool) error {
 	stage := "2fa verification failed"
 	var finalizeErr *webcore.TwoFactorFinalizationError
 	if errors.As(err, &finalizeErr) {
@@ -770,14 +804,25 @@ func twoFactorSubmitFailure(err error, afterPhoneDelivery bool) error {
 	if afterPhoneDelivery {
 		stage += " after switching to phone delivery"
 	}
-	err = fmt.Errorf("%s: %w", stage, err)
-	if errors.Is(err, webcore.ErrTwoFactorCodeRejected) {
-		return shared.WithDiagnostic(err, shared.DiagnosticAuthenticationRejected, "")
+	if !errors.Is(err, webcore.ErrTwoFactorCodeRejected) {
+		return fmt.Errorf("%s: %w", stage, err)
 	}
-	return err
+	// Apple can still show a code on trusted devices during SMS delivery,
+	// but only the texted code verifies against the phone endpoint.
+	reason := "Apple rejected the verification code"
+	if smsCode {
+		reason += "; enter the code from the latest SMS, not one shown on a trusted device"
+	}
+	err = fmt.Errorf("%s: %s: %w", stage, reason, err)
+	return shared.WithDiagnostic(err, shared.DiagnosticAuthenticationRejected, "")
 }
 
 func loginWithOptionalTwoFactorUsing(ctx context.Context, progressMessage, appleID, password, twoFactorCode string, loginFn func(context.Context, webcore.LoginCredentials) (*webcore.AuthSession, error), twoFactorStarted func(), readCommandCode twoFactorCodeCommandReader, twoFactorCodeCommand ...string) (*webcore.AuthSession, error) {
+	// Read before the timeout strip below, which drops layered context values.
+	twoFactorPreference, err := twoFactorPreferenceForSignIn(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// Credential/keychain prompts may consume the initial command budget.
 	ctx, cancel := shared.ContextWithTimeout(shared.ContextWithoutTimeout(ctx))
 	defer cancel()
@@ -806,8 +851,13 @@ func loginWithOptionalTwoFactorUsing(ctx context.Context, progressMessage, apple
 		if code == "" && command == "" && !twoFactorPromptAvailableFn() {
 			return nil, twoFactorInputError(errNoTwoFactorCodeSource, shared.DiagnosticRequiredInputMissing)
 		}
+		session.SetTwoFactorPreference(twoFactorPreference)
 		challenge, prepErr := prepareTwoFactorChallengeFn(ctx, session)
 		if prepErr != nil {
+			var phoneSelection *appleauth.TrustedPhoneSelectionError
+			if errors.As(prepErr, &phoneSelection) {
+				return nil, fmt.Errorf("2fa challenge setup failed: %w; pass --two-factor-phone-id or set %s", prepErr, webTwoFactorPhoneIDEnv)
+			}
 			return nil, fmt.Errorf("2fa challenge setup failed: %w", prepErr)
 		}
 
@@ -839,13 +889,14 @@ func loginWithOptionalTwoFactorUsing(ctx context.Context, progressMessage, apple
 			}
 			_, _ = fmt.Fprintln(twoFactorStatusWriter, "Need a phone verification code? Enter an incorrect trusted-device code once; Apple will then deliver a verification code to your registered phone number.")
 		}
+		codeRequestedAt := time.Now()
 		readCode := func() (string, error) {
 			if command != "" {
 				read := readTwoFactorCodeFromCommandFn
 				if readCommandCode != nil {
 					read = readCommandCode
 				}
-				code, err := read(ctx, command)
+				code, err := read(contextWithTwoFactorCodeRequestedAt(ctx, codeRequestedAt), command)
 				if err != nil {
 					return "", twoFactorInputError(err, shared.DiagnosticDependencyFailed)
 				}
@@ -862,6 +913,7 @@ func loginWithOptionalTwoFactorUsing(ctx context.Context, progressMessage, apple
 				writeInitialPhoneFallbackGuidance()
 			}
 			if challenge != nil && challenge.IsPhoneMethod() {
+				codeRequestedAt = time.Now()
 				challenge, prepErr = ensureTwoFactorCodeRequestedFn(ctx, session)
 				if prepErr != nil {
 					return nil, fmt.Errorf("2fa challenge setup failed: %w", prepErr)
@@ -883,21 +935,29 @@ func loginWithOptionalTwoFactorUsing(ctx context.Context, progressMessage, apple
 				return submitTwoFactorCodeFn(verifyCtx, session, code)
 			})
 		}
+		// Phone delivery can also be a voice call, so only SMS gets SMS guidance.
+		smsDelivery := func() bool {
+			return session.TwoFactorMethod() == appleauth.TwoFactorMethodPhone && session.TwoFactorPhoneMode() == appleauth.TwoFactorDeliverySMS
+		}
+		// A rejected trusted-device code makes Apple send a phone code during
+		// this submission, so a fallback read must ignore anything older.
+		submittedAt := time.Now()
 		if err := submitCode(code); err != nil {
 			var phoneCodeRequestedErr *appleauth.PhoneCodeRequestedError
 			if errors.As(err, &phoneCodeRequestedErr) {
 				writeDeliveryNotice(phoneCodeRequestedErr.Destination)
 				writeFallbackGuidance(command != "")
+				codeRequestedAt = submittedAt
 				resolvedCode, codeErr := readCode()
 				if codeErr != nil {
 					return nil, codeErr
 				}
 				if err := submitCode(resolvedCode); err != nil {
-					return nil, twoFactorSubmitFailure(err, true)
+					return nil, twoFactorSubmitFailure(err, true, smsDelivery())
 				}
 				return session, nil
 			}
-			return nil, twoFactorSubmitFailure(err, false)
+			return nil, twoFactorSubmitFailure(err, false, smsDelivery())
 		}
 		return session, nil
 	}
@@ -985,6 +1045,94 @@ func resolveKnownWebSessionFromSource(ctx context.Context, appleID string, sourc
 
 func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode string, opts webSessionResolveOptions) (*webcore.AuthSession, string, error) {
 	shared.ApplyRootLoggingOverrides()
+	if err := webcore.SessionBackendConflict(); err != nil {
+		return nil, "", shared.UsageError(err.Error())
+	}
+	noAutoSignIn, err := webAutoSignInDisabled()
+	if err != nil {
+		return nil, "", err
+	}
+	policy := &webSignInPolicy{
+		automatic:    !isWebSignIn(ctx),
+		noAutoSignIn: noAutoSignIn,
+		alternative:  publicAPIAlternativeFromContext(ctx),
+	}
+	session, source, err := resolveWebSessionWithPolicy(ctx, appleID, password, twoFactorCode, opts, policy)
+	return session, source, policy.finish(err)
+}
+
+// webSignInPolicy decides whether a resolution may contact Apple's sign-in
+// service and remembers the outcome of the attempts it made. Automatic sign-in
+// is any sign-in started by a command other than `asc web auth login`.
+type webSignInPolicy struct {
+	automatic    bool
+	noAutoSignIn bool
+	alternative  string
+	// failure is Apple's most recent sign-in 5xx that no later answer from
+	// Apple superseded; it becomes the recorded cooldown if the resolution fails.
+	failure         *webcore.SigninServiceError
+	failureAppleID  string
+	failureAt       time.Time
+	signedInAppleID string
+	signedInAt      time.Time
+}
+
+// allowSignIn runs before anything is sent to Apple for appleID. It refuses an
+// automatic sign-in when ASC_WEB_NO_AUTO_LOGIN is set or while a recorded
+// sign-in cooldown is active; explicit `asc web auth login` is never refused.
+func (p *webSignInPolicy) allowSignIn(appleID string) error {
+	if !p.automatic {
+		return nil
+	}
+	if p.noAutoSignIn {
+		return newAutoSignInDisabledError(appleID, p.alternative)
+	}
+	return checkSigninBackoff(appleID)
+}
+
+// observe records the outcome of one sign-in attempt for appleID. A 5xx from
+// Apple's sign-in service becomes the pending failure; any answer that shows
+// the service accepted the request (success, a two-factor challenge, or a
+// credential rejection) supersedes it. Local failures change nothing.
+func (p *webSignInPolicy) observe(appleID string, err error, reachedTwoFactor bool) {
+	// Outcomes are stamped when Apple answers, not when they are persisted, so
+	// concurrent processes can order them.
+	var serviceErr *webcore.SigninServiceError
+	switch {
+	case err == nil:
+		p.failure, p.failureAppleID = nil, ""
+		p.signedInAppleID, p.signedInAt = appleID, signinBackoffNowFn()
+	case errors.As(err, &serviceErr) && serviceErr.IsServerError() && !reachedTwoFactor:
+		p.failure, p.failureAppleID, p.failureAt = serviceErr, appleID, signinBackoffNowFn()
+	case reachedTwoFactor, errors.Is(err, webcore.ErrInvalidAppleAccountCredentials):
+		p.failure, p.failureAppleID = nil, ""
+	}
+}
+
+// finish persists the outcome: a resolution that failed after Apple's sign-in
+// service last answered with a 5xx records a cooldown, and one in which Apple
+// accepted a sign-in clears it, even if a later local step such as caching the
+// session failed.
+func (p *webSignInPolicy) finish(err error) error {
+	if p.signedInAppleID != "" {
+		clearSigninBackoff(p.signedInAppleID, p.signedInAt)
+	}
+	if err == nil || p.failure == nil {
+		return err
+	}
+	notBefore, recorded := recordSigninBackoff(p.failureAppleID, p.failure, p.failureAt)
+	if recorded && isSigninServerError(err) {
+		return fmt.Errorf("%w. Other asc web commands will not sign in automatically before %s; `asc web auth login` can still be run explicitly", err, notBefore.UTC().Format(time.RFC3339))
+	}
+	return err
+}
+
+func resolveWebSessionWithPolicy(ctx context.Context, appleID, password, twoFactorCode string, opts webSessionResolveOptions, policy *webSignInPolicy) (*webcore.AuthSession, string, error) {
+	twoFactorPreference, err := twoFactorPreferenceForSignIn(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	ctx = contextWithTwoFactorPreference(ctx, twoFactorPreference)
 
 	resolvedAppleID := strings.TrimSpace(appleID)
 	// ASC_WEB_APPLE_ID sits between the flag and the cached-session default: it
@@ -1109,6 +1257,9 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		} else {
 			resumed, ok, cacheExpired, err = resolveKnownWebSessionFromSource(ctx, targetAppleID, source)
 		}
+		if errors.Is(err, webcore.ErrSessionKeychainBypassed) {
+			return nil, "", false, shared.UsageError(err.Error())
+		}
 		if err != nil {
 			printCacheLookupWarning(sessionCacheWarningWriter, err)
 			return nil, "", false, nil
@@ -1152,6 +1303,9 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		if resolvedAppleID == "" {
 			resolvedAppleID = reauthAppleID
 		}
+		if err := policy.allowSignIn(reauthAppleID); err != nil {
+			return nil, "", false, err
+		}
 
 		silentPassword := resolveNonInteractiveWebPassword(reauthAppleID, password, skipStoredPassword)
 		if !webPasswordProvided(silentPassword.value) {
@@ -1160,6 +1314,7 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		}
 
 		session, twoFactorStarted, loginErr := loginWithOptionalTwoFactorClientTracked(ctx, expiredCachedSession.Client, reauthAppleID, silentPassword.value, twoFactorCode, readCommandTwoFactorCode, command)
+		policy.observe(reauthAppleID, loginErr, twoFactorStarted)
 		if loginErr == nil {
 			if opts.persistAutoReauth != nil {
 				opts.persistAutoReauth(session)
@@ -1217,10 +1372,16 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		// cached account when there is exactly one. Only an empty cache may
 		// still prompt (apps create); an ambiguous cache never guesses.
 		defaultAppleID, defaultSource, cacheEmpty, defaultErr := resolveDefaultCachedAppleID()
+		// Prompting for an Apple ID only leads to a sign-in, which the
+		// no-automatic-sign-in policy forbids.
+		promptAppleID := opts.promptAppleID
+		if policy.automatic && policy.noAutoSignIn {
+			promptAppleID = nil
+		}
 		switch {
 		case defaultErr == nil:
 			resolvedAppleID = defaultAppleID
-		case opts.promptAppleID == nil || !cacheEmpty:
+		case promptAppleID == nil || !cacheEmpty:
 			var ambiguous *webcore.AmbiguousCachedSessionError
 			if errors.As(defaultErr, &ambiguous) {
 				return nil, "", ambiguousAppleIDUsageError(ambiguous.AppleIDs)
@@ -1228,9 +1389,12 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 			if isWebSignIn(ctx) {
 				return nil, "", missingAppleIDUsageError()
 			}
+			if policy.noAutoSignIn {
+				return nil, "", newAutoSignInDisabledError("", policy.alternative)
+			}
 			return nil, "", newMissingWebSessionError("", publicAPIAlternativeFromContext(ctx))
 		default:
-			if err := opts.promptAppleID(&resolvedAppleID); err != nil {
+			if err := promptAppleID(&resolvedAppleID); err != nil {
 				return nil, "", err
 			}
 			resolvedAppleID = strings.TrimSpace(resolvedAppleID)
@@ -1245,6 +1409,9 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 
 	if opts.resolvePassword == nil {
 		return nil, "", fmt.Errorf("password resolver is required")
+	}
+	if err := policy.allowSignIn(resolvedAppleID); err != nil {
+		return nil, "", err
 	}
 	resolvedPassword := fallbackPassword
 	if !webPasswordProvided(resolvedPassword.value) {
@@ -1296,17 +1463,22 @@ func resolveWebSession(ctx context.Context, appleID, password, twoFactorCode str
 		// untimed parent context instead of an already-expired one.
 		loginCtx, cancel := shared.ContextWithTimeout(shared.ContextWithoutTimeout(ctx))
 		defer cancel()
+		// Stripping the timeout also drops values layered above it.
+		loginCtx = contextWithTwoFactorPreference(loginCtx, twoFactorPreference)
 		code := twoFactorCode
 		if twoFactorCodeConsumed {
 			code = ""
 		}
 		if expiredCachedSession != nil && expiredCachedSession.Client != nil {
-			return loginWithOptionalTwoFactorClientTracked(loginCtx, expiredCachedSession.Client, resolvedAppleID, candidate.value, code, readCommandTwoFactorCode, command)
+			session, twoFactorStarted, err := loginWithOptionalTwoFactorClientTracked(loginCtx, expiredCachedSession.Client, resolvedAppleID, candidate.value, code, readCommandTwoFactorCode, command)
+			policy.observe(resolvedAppleID, err, twoFactorStarted)
+			return session, twoFactorStarted, err
 		}
 		reachedTwoFactor := false
 		session, err := loginWithOptionalTwoFactor(loginCtx, resolvedAppleID, candidate.value, code, func() {
 			reachedTwoFactor = true
 		}, readCommandTwoFactorCode, command)
+		policy.observe(resolvedAppleID, err, reachedTwoFactor)
 		if err == nil || reachedTwoFactor {
 			discardServerRejectedCache()
 		}
@@ -1480,6 +1652,7 @@ Manage Apple web-session authentication used by "asc web" commands.
 			WebAuthLoginCommand(),
 			WebAuthStatusCommand(),
 			WebAuthCapabilitiesCommand(),
+			WebAuthMessagesCodeCommand(),
 			WebAuthExportCommand(),
 			WebAuthImportCommand(),
 			WebAuthLogoutCommand(),
@@ -1496,6 +1669,7 @@ func WebAuthLoginCommand() *ffcli.Command {
 
 	appleID := fs.String("apple-id", "", "Apple Account email (defaults to "+webAppleIDEnv+", then the last or only cached session)")
 	twoFactorCodeCommand := fs.String("two-factor-code-command", "", "Shell command that prints the 2FA code to stdout if verification is required")
+	twoFactorDelivery := bindTwoFactorDeliveryFlags(fs)
 	providerID := fs.Int64("provider-id", 0, "Numeric App Store Connect provider ID to select for this web session")
 	publicProviderID := fs.String("public-provider-id", "", "Public App Store Connect provider/team ID to select for this web session")
 	output := shared.BindOutputFlags(fs)
@@ -1527,10 +1701,26 @@ Two-factor input options:
 Without a terminal, a fresh sign-in needs a 2FA code command; without one it
 fails before the password is sent, so Apple does not send a code nobody can enter.
 
+Automatic sign-in:
+  - other web commands sign in again on their own when the cached session expires
+  - %s=1 makes this command the only one that signs in
+  - after Apple's sign-in service answers with a 5xx, other web commands pause
+    automatic sign-in for that account (Retry-After, else 15 minutes; at most
+    1 hour); this command is never paused, and a successful login ends the pause
+
 Phone-code fallback (including SMS):
   - interactive: if Apple offers a registered phone fallback, enter an incorrect trusted-device code once
   - Apple then delivers a phone verification code and asc prompts again
   - automated: asc reruns the configured 2FA code command after phone fallback
+
+SMS delivery:
+  - --two-factor-method sms (or %s=sms) asks Apple to text the code to a
+    trusted phone number up front, even when trusted devices are available
+  - --two-factor-phone-id (or %s) selects the number when the account has several;
+    without it, asc fails and lists the available IDs
+  - asc requests the SMS before prompting or running the 2FA code command
+  - Apple may still show a sign-in alert on trusted devices; only the texted
+    code completes this sign-in
 
 Provider selection:
   - --public-provider-id selects the public App Store Connect provider/team ID
@@ -1542,22 +1732,36 @@ Examples:
   asc web auth login --apple-id "user@example.com" --public-provider-id "Z4N6A5FQKW"
 
   # Non-interactive (agents, CI): supply the password and a 2FA code source
-  %s %s='osascript /path/to/get-apple-2fa-code.scpt' asc web auth login --apple-id "user@example.com"`,
+  %s %s='osascript /path/to/get-apple-2fa-code.scpt' asc web auth login --apple-id "user@example.com"
+
+  # Text the code to a trusted phone number instead of trusted devices
+  asc web auth login --apple-id "user@example.com" --two-factor-method sms --two-factor-code-command "/path/to/read-apple-sms-code"
+
+  # macOS: read an SMS code forwarded to this Mac's Messages app
+  asc web auth login --apple-id "user@example.com" --two-factor-method sms --two-factor-code-command "asc web auth messages-code"`,
 			webAppleIDEnv,
 			webPasswordEnvDisplay(),
 			webDontStorePasswordEnv,
 			webTwoFactorCodeCommandEnv,
+			webNoAutoLoginEnv,
+			webTwoFactorMethodEnv,
+			webTwoFactorPhoneIDEnv,
 			webPasswordEnvAssignmentExample(),
 			webTwoFactorCodeCommandEnv,
 		),
 		FlagSet:   fs,
 		UsageFunc: shared.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
+			preference, err := twoFactorDelivery.resolve()
+			if err != nil {
+				return err
+			}
 			selection := webcore.ProviderSelection{
 				ProviderID:       *providerID,
 				PublicProviderID: *publicProviderID,
 			}
-			session, source, err := callResolveSessionForProviderSelection(contextForWebSignIn(ctx), *appleID, "", "", *twoFactorCodeCommand, selection)
+			signInCtx := contextWithTwoFactorPreference(contextForWebSignIn(ctx), preference)
+			session, source, err := callResolveSessionForProviderSelection(signInCtx, *appleID, "", "", *twoFactorCodeCommand, selection)
 			if err != nil {
 				return err
 			}

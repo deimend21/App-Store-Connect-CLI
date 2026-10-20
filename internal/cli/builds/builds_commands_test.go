@@ -290,13 +290,6 @@ func TestBuildSelectorCommandsExposeExcludeExpiredFlags(t *testing.T) {
 	}
 }
 
-func TestBuildsUpdateCommand_HelpContainsExamples(t *testing.T) {
-	cmd := BuildsUpdateCommand()
-	if !strings.Contains(cmd.LongHelp, "--uses-non-exempt-encryption=false") {
-		t.Fatalf("expected long help to include encryption example, got %q", cmd.LongHelp)
-	}
-}
-
 func TestBuildsUpdateCommand_ShortUsageShowsRequiredFlag(t *testing.T) {
 	cmd := BuildsUpdateCommand()
 	want := "asc builds update (--build-id BUILD_ID | --app APP --latest | --app APP --build-number BUILD_NUMBER --platform PLATFORM [--version VERSION]) --uses-non-exempt-encryption [true|false] [flags]"
@@ -327,5 +320,42 @@ func TestBuildUpdateAttributes_JSONMarshal(t *testing.T) {
 	}
 	if string(data) != "{}" {
 		t.Fatalf("expected empty JSON object, got %q", string(data))
+	}
+}
+
+func TestBuildsMutationCommandsRejectUnexpectedPositionalArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func() *ffcli.Command
+		args []string
+		want string
+	}{
+		{
+			name: "update rejects positional argument before flag validation or client setup",
+			cmd:  BuildsUpdateCommand,
+			args: []string{"--build-id", "BUILD_1", "--uses-non-exempt-encryption", "false", "extra-arg"},
+			want: "Error: unexpected argument(s): extra-arg\n",
+		},
+		{
+			name: "remove-groups rejects positional argument before flag validation or client setup",
+			cmd:  BuildsRemoveGroupsCommand,
+			args: []string{"--build-id", "BUILD_1", "--group", "GROUP_1", "--confirm", "extra-arg"},
+			want: "Error: unexpected argument(s): extra-arg\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var err error
+			stderr := captureBuildsDiagnosticStderr(t, func() {
+				err = test.cmd().ParseAndRun(t.Context(), test.args)
+			})
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("ParseAndRun(%v) error = %v, want flag.ErrHelp", test.args, err)
+			}
+			if !strings.Contains(stderr, test.want) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.want)
+			}
+		})
 	}
 }

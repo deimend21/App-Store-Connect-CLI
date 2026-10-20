@@ -152,6 +152,19 @@ They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
   store and prints a warning to stderr. `ASC_BYPASS_KEYCHAIN` disables it too.
 </ParamField>
 
+<ParamField path="ASC_WEB_NO_AUTO_LOGIN" type="boolean">
+  Never sign in automatically from `asc web` commands other than
+  `asc web auth login`
+
+  Set to `true`, `1`, `yes`, or `on` for scripts and agents that cannot finish
+  two-factor verification. Every web command except `asc web auth login` then
+  uses only the cached session; when it is missing or expired, the command
+  exits with code `2` and a hint to run `asc web auth login`, without contacting
+  Apple. `asc web auth login` still signs in and still uses the saved password.
+  `0`, `false`, `no`, `off`, and an empty value keep automatic sign-in on (the
+  default); any other value fails with a usage error.
+</ParamField>
+
 <ParamField path="ASC_WEB_2FA_CODE_COMMAND" type="string">
   Shell command whose stdout supplies the two-factor code when a fresh `asc web`
   login needs verification
@@ -163,6 +176,35 @@ They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
   `ASC_TIMEOUT_SECONDS` when either is set. When neither the flag nor
   `ASC_WEB_2FA_CODE_COMMAND` supplies a command, a login that needs verification
   requires an interactive terminal.
+</ParamField>
+
+<ParamField path="ASC_WEB_2FA_METHOD" type="string">
+  Two-factor code delivery for a fresh `asc web` login: `auto` or `sms`
+
+  `auto` (the default) keeps Apple's order: trusted devices first, with phone
+  fallback after a rejected trusted-device code. `sms` asks Apple to text the
+  code to a trusted phone number before prompting or running the 2FA code
+  command, even when trusted devices are available. `--two-factor-method` wins
+  when it is set, and any other value fails with a usage error before sign-in.
+</ParamField>
+
+<ParamField path="ASC_WEB_2FA_PHONE_ID" type="integer">
+  Trusted phone number ID used with `ASC_WEB_2FA_METHOD=sms` or
+  `--two-factor-method sms`
+
+  Needed only when the account has several trusted phone numbers; without it
+  such a login fails and lists the available IDs with their masked numbers.
+  `--two-factor-phone-id` wins when it is set. The value must be a positive
+  integer, and it is rejected unless SMS delivery is selected.
+</ParamField>
+
+<ParamField path="ASC_WEB_2FA_CODE_REQUESTED_AT" type="string">
+  Set by `asc` for the 2FA code command: when it asked Apple for the current
+  code, as an RFC 3339 timestamp in UTC
+
+  You do not set this yourself. A code command can use it to ignore codes from
+  earlier sign-in attempts; `asc web auth messages-code` accepts only messages
+  received after it unless `--since` is passed.
 </ParamField>
 
 <ParamField path="ASC_WEB_SESSION" type="string">
@@ -200,7 +242,9 @@ They do not replace `ASC_KEY_ID`, `ASC_ISSUER_ID`, or the other API credentials.
   Directory for the file-backed `asc web` session cache
 
   Default: `~/.asc/web`. Set it with `ASC_WEB_SESSION_CACHE_BACKEND=file` to
-  keep tests and automation away from the operator's real session cache.
+  keep tests and automation away from the operator's real session cache. The
+  per-account sign-in cooldown that follows an Apple sign-in server error is
+  stored in this directory too.
 </ParamField>
 
 <ParamField path="ASC_WEB_SESSION_PROVIDER" type="string">
@@ -281,7 +325,7 @@ For `subscriptions offers introductory create`, an explicit request timeout also
   preview, and dSYM download commands. Each file gets its own budget; parent cancellation and earlier
   deadlines still apply. Listing and metadata requests use `ASC_TIMEOUT`.
 
-  Default: `5m`
+  Default: `5m` (`30m` for `asc asset-library videos upload`, which also waits for Apple's video processing)
 </ParamField>
 
 <ParamField path="ASC_UPLOAD_TIMEOUT_SECONDS" type="number">

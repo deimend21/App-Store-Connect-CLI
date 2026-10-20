@@ -12,6 +12,7 @@ import (
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/appleads"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/registry"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
@@ -35,6 +36,11 @@ type commandPathRecoveryRule struct {
 }
 
 var commonCommandPathRecoveryRules = []commandPathRecoveryRule{
+	{
+		invalid:     []string{"builds", "view"},
+		destination: []string{"builds", "info"},
+		validate:    validateBuildsInfoSelectorRecovery,
+	},
 	{
 		invalid:     []string{"versions", "info"},
 		destination: []string{"versions", "view"},
@@ -413,8 +419,79 @@ func commandSuffixUsesDefinedFlags(command *ffcli.Command, suffix []string) (map
 }
 
 // These validators intentionally mirror only side-effect-free checks performed
-// before authentication by the three mapped destinations. Keep their tests in
+// before authentication by the four mapped destinations. Keep their tests in
 // sync when those commands add or change semantic flag constraints.
+func validateBuildsInfoSelectorRecovery(fs *flag.FlagSet, provided map[string]struct{}) bool {
+	processingStateRaw := recoveryFlagValue(fs, "processing-state")
+	processingStateValues := shared.SplitCSVUpper(processingStateRaw)
+	if strings.TrimSpace(processingStateRaw) != "" && len(processingStateValues) == 0 {
+		return false
+	}
+	for _, state := range processingStateValues {
+		if state == "ALL" && len(processingStateValues) > 1 {
+			return false
+		}
+		switch state {
+		case "VALID", "PROCESSING", "FAILED", "INVALID", "ALL":
+		default:
+			return false
+		}
+	}
+
+	buildID := strings.TrimSpace(recoveryFlagValue(fs, "build-id"))
+	if _, ok := provided["build-id"]; ok && buildID == "" {
+		return false
+	}
+	appInput := strings.TrimSpace(recoveryFlagValue(fs, "app"))
+	if _, ok := provided["app"]; ok && appInput == "" {
+		return false
+	}
+	version := strings.TrimSpace(recoveryFlagValue(fs, "version"))
+	buildNumber := strings.TrimSpace(recoveryFlagValue(fs, "build-number"))
+	platform := strings.TrimSpace(recoveryFlagValue(fs, "platform"))
+	latest := recoveryBoolFlagValue(fs, "latest")
+	excludeExpired := recoveryBoolFlagValue(fs, "exclude-expired") || recoveryBoolFlagValue(fs, "not-expired")
+
+	hasExplicitAppSelectors := appInput != "" ||
+		latest ||
+		buildNumber != "" ||
+		version != "" ||
+		platform != "" ||
+		len(processingStateValues) > 0 ||
+		excludeExpired
+	if buildID != "" && hasExplicitAppSelectors {
+		return false
+	}
+	if latest && buildNumber != "" {
+		return false
+	}
+	if buildID != "" {
+		return true
+	}
+
+	if shared.ResolveAppID(appInput) == "" {
+		return false
+	}
+	if len(processingStateValues) > 0 && !latest {
+		return false
+	}
+	if excludeExpired && !latest {
+		return false
+	}
+	if !latest && buildNumber == "" {
+		return false
+	}
+	if buildNumber != "" && platform == "" {
+		return false
+	}
+	if platform != "" {
+		if _, err := shared.NormalizeAppStoreVersionPlatform(platform); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func validateVersionsViewRecovery(fs *flag.FlagSet, provided map[string]struct{}) bool {
 	versionID := strings.TrimSpace(recoveryFlagValue(fs, "version-id"))
 	legacyID := strings.TrimSpace(recoveryFlagValue(fs, "id"))
@@ -762,6 +839,11 @@ func runtimeFailureContext(analysis invocationAnalysis, err error, exitCode int)
 	}
 	if diagnostic, ok := shared.DiagnosticFromError(err); ok {
 		eventContext.FailureParameter = diagnostic.Parameter
+	} else if ambiguous, ok := errors.AsType[*shared.AmbiguousSelectionError](err); ok {
+		// An unwrapped ambiguity names the flag that picks one candidate. Paths
+		// that report it as a usage error keep their own classification above.
+		eventContext.DiagnosticCode = string(shared.DiagnosticInvalidInput)
+		eventContext.FailureParameter = strings.TrimSpace(ambiguous.Flag)
 	}
 	if shared.IsLocalProcessFailure(err) {
 		// A local child status never describes an API result, even when the
@@ -780,7 +862,7 @@ func runtimeFailureContext(analysis invocationAnalysis, err error, exitCode int)
 		return eventContext
 	}
 	switch {
-	case errors.Is(err, shared.ErrMissingAuth):
+	case errors.Is(err, shared.ErrMissingAuth), errors.Is(err, appleads.ErrMissingCredentials):
 		eventContext.FailureStage = telemetry.FailureStageValidation
 	case shared.IsValidationError(err), errors.Is(err, shared.ErrPending):
 		eventContext.FailureStage = telemetry.FailureStageValidation
@@ -811,7 +893,7 @@ func runtimeOutcomeKind(err error, exitCode int, eventContext telemetry.EventCon
 	switch {
 	case errors.Is(err, context.Canceled):
 		return telemetry.OutcomeCancelled
-	case errors.Is(err, shared.ErrMissingAuth), errors.Is(err, webcore.ErrInvalidAppleAccountCredentials), exitCode == ExitAuth:
+	case errors.Is(err, shared.ErrMissingAuth), errors.Is(err, appleads.ErrMissingCredentials), errors.Is(err, webcore.ErrInvalidAppleAccountCredentials), exitCode == ExitAuth:
 		return telemetry.OutcomeAuthError
 	case shared.IsValidationError(err), errors.Is(err, shared.ErrPending):
 		return telemetry.OutcomeExpectedNegative
