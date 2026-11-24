@@ -39,7 +39,11 @@ func TestEveryNextCommandRejectsLimit(t *testing.T) {
 
 	for _, path := range paths {
 		t.Run(strings.Join(path, " "), func(t *testing.T) {
-			args := append(path, "--next", "https://api.appstoreconnect.apple.com/v1/apps?cursor=AQ", "--limit", "5")
+			next := "https://api.appstoreconnect.apple.com/v1/apps?cursor=AQ"
+			if path[0] == "web" {
+				next = "https://appstoreconnect.apple.com/iris/v1/apps?filter[removed]=true&cursor=AQ"
+			}
+			args := append(path, "--next", next, "--limit", "5")
 			var code int
 			stdout, stderr := captureOutput(t, func() {
 				code = rootcmd.Run(args, "1.2.3")
@@ -79,7 +83,16 @@ func TestNextRejectsIgnoredQueryFlags(t *testing.T) {
 		{"apps info territory-age-ratings list", "fields", "ageRating"},
 		{"apps search-keywords list", "platform", "IOS"},
 		{"background-assets list", "archived", "true"},
+		{"background-assets list", "sort", "createdDate"},
+		{"background-assets list", "versions-platform", "IOS"},
+		{"background-assets versions list", "app-store-state", "IN_REVIEW"},
+		{"background-assets versions list", "external-beta-state", "IN_REVIEW"},
+		{"background-assets versions list", "internal-beta-state", "SUPERSEDED"},
 		{"background-assets versions list", "locale", "en-US"},
+		{"background-assets versions list", "platform", "IOS"},
+		{"background-assets versions list", "sort", "-version"},
+		{"background-assets versions list", "state", "COMPLETE"},
+		{"background-assets versions list", "version", "1"},
 		{"builds test-notes list", "locale", "en-US"},
 		{"builds uploads list", "state", "COMPLETE"},
 		{"devices list", "platform", "IOS"},

@@ -2,8 +2,10 @@ package cmdtest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func TestOfferCodesValidationErrors(t *testing.T) {
@@ -297,5 +300,173 @@ func TestOfferCodesValuesRejectsInvalidFormat(t *testing.T) {
 				t.Fatalf("expected format error, got %q", stderr)
 			}
 		})
+	}
+}
+
+// TestOfferCodeBatchUpdatesSendActive guards the path that turns codes off:
+// each command must PATCH its own resource and send false, not drop it.
+func TestOfferCodeBatchUpdatesSendActive(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	commands := []struct {
+		name         string
+		args         []string
+		resourceType string
+		confirmOff   bool
+	}{
+		{
+			name:         "subscription one-time codes",
+			args:         []string{"subscriptions", "offers", "offer-codes", "one-time-codes", "update", "--batch-id", "code-1"},
+			resourceType: "subscriptionOfferCodeOneTimeUseCodes",
+			confirmOff:   true,
+		},
+		{
+			name:         "iap custom codes",
+			args:         []string{"iap", "offer-codes", "custom-codes", "update", "--custom-code-id", "code-1"},
+			resourceType: "inAppPurchaseOfferCodeCustomCodes",
+		},
+		{
+			name:         "iap one-time codes",
+			args:         []string{"iap", "offer-codes", "one-time-codes", "update", "--one-time-code-id", "code-1"},
+			resourceType: "inAppPurchaseOfferCodeOneTimeUseCodes",
+			confirmOff:   true,
+		},
+	}
+
+	for _, command := range commands {
+		for _, active := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s active=%t", command.name, active), func(t *testing.T) {
+				reg := asctest.NewRegistry(t)
+				reg.Install()
+				reg.Register(asctest.PATCH("/v1/"+command.resourceType+"/code-1").JSONBody(fmt.Sprintf(`{"data":{"type":%q,"id":"code-1","attributes":{"active":%t}}}`, command.resourceType, active)),
+					asctest.JSON(http.StatusOK, fmt.Sprintf(`{"data":{"type":%q,"id":"code-1","attributes":{"active":%t}}}`, command.resourceType, active)))
+
+				args := append(append([]string{}, command.args...), "--active", fmt.Sprint(active), "--output", "json")
+				if !active && command.confirmOff {
+					args = append(args, "--confirm")
+				}
+				stdout, _, err := runCommand(t, args)
+				if err != nil {
+					t.Fatalf("run error: %v", err)
+				}
+				if requests := len(reg.Requests()); requests != 1 {
+					t.Fatalf("expected 1 request, got %d", requests)
+				}
+				if !strings.Contains(stdout, `"id":"code-1"`) {
+					t.Fatalf("expected updated resource in stdout, got %q", stdout)
+				}
+			})
+		}
+	}
+}
+
+// TestOneTimeCodeBatchTurnOffRequiresConfirm guards against permanently
+// turning off a one-time use code batch without --confirm: Apple returns 409
+// "Given oneTimeUse code is inactive" when --active true follows.
+func TestOneTimeCodeBatchTurnOffRequiresConfirm(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	for _, args := range [][]string{
+		{"subscriptions", "offers", "offer-codes", "one-time-codes", "update", "--batch-id", "code-1", "--active", "false"},
+		{"iap", "offer-codes", "one-time-codes", "update", "--one-time-code-id", "code-1", "--active", "false"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			reg := asctest.NewRegistry(t)
+			reg.Install()
+
+			assertUsageExitCode(t, args, "--confirm is required to turn off a one-time use code batch; turning it off is permanent")
+			if requests := len(reg.Requests()); requests != 0 {
+				t.Fatalf("expected no request, got %d", requests)
+			}
+		})
+	}
+}
+
+func TestOfferCodesGenerateEnvironmentRequestAndOutput(t *testing.T) {
+	baseArgs := []string{
+		"subscriptions", "offers", "offer-codes", "generate",
+		"--offer-code-id", "offer-1",
+		"--quantity", "5",
+		"--expiration-date", "2026-12-31",
+	}
+	withEnvironment := map[string]any{"numberOfCodes": float64(5), "expirationDate": "2026-12-31", "environment": "SANDBOX"}
+	withoutEnvironment := map[string]any{"numberOfCodes": float64(5), "expirationDate": "2026-12-31"}
+
+	tests := []struct {
+		name       string
+		extraArgs  []string
+		wantAttrs  map[string]any
+		wantStdout []string
+	}{
+		{
+			name:       "lowercase value is sent normalized and the JSON output keeps Apple's environment",
+			extraArgs:  []string{"--environment", "sandbox"},
+			wantAttrs:  withEnvironment,
+			wantStdout: []string{`"environment":"SANDBOX"`},
+		},
+		{
+			name:       "table output shows the environment",
+			extraArgs:  []string{"--environment", "SANDBOX", "--output-format", "table"},
+			wantAttrs:  withEnvironment,
+			wantStdout: []string{"Environment", "SANDBOX"},
+		},
+		{
+			name:      "omitted flag does not send the attribute",
+			wantAttrs: withoutEnvironment,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+			attrs, err := json.Marshal(test.wantAttrs)
+			if err != nil {
+				t.Fatalf("marshal attributes: %v", err)
+			}
+			reg := asctest.NewRegistry(t)
+			reg.Install()
+			reg.Register(asctest.POST("/v1/subscriptionOfferCodeOneTimeUseCodes").JSONBody(`{"data":{"type":"subscriptionOfferCodeOneTimeUseCodes","attributes":`+string(attrs)+`,"relationships":{"offerCode":{"data":{"type":"subscriptionOfferCodes","id":"offer-1"}}}}}`),
+				asctest.JSON(http.StatusCreated, `{"data":{"type":"subscriptionOfferCodeOneTimeUseCodes","id":"batch-1","attributes":{"numberOfCodes":5,"expirationDate":"2026-12-31","active":true,"environment":"SANDBOX"}}}`))
+
+			args := append(append([]string{}, baseArgs...), test.extraArgs...)
+			stdout, stderr, runErr := runCommand(t, args)
+			if runErr != nil {
+				t.Fatalf("run error: %v (stderr=%q)", runErr, stderr)
+			}
+			for _, want := range test.wantStdout {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("expected stdout to contain %q, got %q", want, stdout)
+				}
+			}
+		})
+	}
+}
+
+func TestOfferCodesGenerateInvalidEnvironmentFailsBeforeHTTP(t *testing.T) {
+	setupAuth(t)
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	asctest.NewRegistry(t).Install()
+
+	stdout, stderr, runErr := runCommand(t, []string{
+		"subscriptions", "offers", "offer-codes", "generate",
+		"--offer-code-id", "offer-1",
+		"--quantity", "5",
+		"--expiration-date", "2026-12-31",
+		"--environment", "beta",
+	})
+
+	if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, runErr)
+	}
+	if stdout != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "Error: --environment must be one of: PRODUCTION, SANDBOX") {
+		t.Fatalf("expected environment validation error, got %q", stderr)
 	}
 }

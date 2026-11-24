@@ -9,8 +9,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"reflect"
 	"slices"
 	"strconv"
@@ -42,6 +44,8 @@ const (
 	profileEnvVar          = "ASC_PROFILE"
 	strictAuthEnvVar       = "ASC_STRICT_AUTH"
 	defaultOutputEnvVar    = "ASC_DEFAULT_OUTPUT"
+	bearerTokenEnvVar      = "ASC_BEARER_TOKEN"
+	bearerTokenCommandEnv  = "ASC_BEARER_TOKEN_COMMAND"
 )
 
 const (
@@ -83,6 +87,20 @@ func (e missingAuthError) Unwrap() error {
 
 func (e missingAuthError) Is(target error) bool {
 	return target == ErrMissingAuth
+}
+
+// unusableCredentialsError reports a credential setup the command cannot use
+// the way missing authentication is reported, with the diagnostic that names
+// what is wrong with it.
+func unusableCredentialsError(err error, code DiagnosticCode) error {
+	return WithDiagnostic(missingAuthError{msg: err.Error(), cause: err}, code, "")
+}
+
+// UnreadableKeychainError reports a system keychain this process cannot read
+// the way credential resolution does: as an authentication failure with the
+// dependency_failed diagnostic. The message is err's text.
+func UnreadableKeychainError(err error) error {
+	return unusableCredentialsError(err, DiagnosticDependencyFailed)
 }
 
 var (
@@ -192,12 +210,17 @@ func RootFlagsForReinvocation() (args []string, ok bool) {
 }
 
 // ProgressEnabled reports whether it's safe/appropriate to emit progress messages.
-// Progress must be stderr-only and must not appear when stderr is non-interactive.
-func ProgressEnabled() bool {
+// Progress must be stderr-only and must not appear when d's stderr is
+// non-interactive.
+func (d *Deps) ProgressEnabled() bool {
+	return progressEnabledFor(d.IO.StderrTTY)
+}
+
+func progressEnabledFor(stderrTTY bool) bool {
 	if noProgress {
 		return false
 	}
-	return isTerminal(int(os.Stderr.Fd()))
+	return stderrTTY
 }
 
 // SetNoProgress sets progress suppression (tests only).
@@ -210,16 +233,15 @@ func SetSelectedProfile(value string) {
 	selectedProfile = value
 }
 
-// ResetDefaultOutputFormat clears the cached default output format so that
-// DefaultOutputFormat() re-reads ASC_DEFAULT_OUTPUT on its next call. Tests only.
+// ResetDefaultOutputFormat clears the cached ASC_DEFAULT_OUTPUT value so that
+// the next DefaultOutputFormat call re-reads it. Tests only.
 func ResetDefaultOutputFormat() {
-	defaultOutputOnce = sync.Once{}
-	defaultOutputValue = ""
+	defaultOutputEnvOnce = sync.Once{}
+	defaultOutputEnvValue = ""
 }
 
-// Bold returns the string wrapped in ANSI bold codes
-func Bold(s string) string {
-	if !supportsANSI() {
+func boldFor(stderrTTY bool, s string) string {
+	if !supportsANSIFor(stderrTTY) {
 		return s
 	}
 	return bold + s + reset
@@ -234,32 +256,39 @@ func OrNA(value string) string {
 	return trimmed
 }
 
-// RenderSection renders a titled section as markdown or table output.
-func RenderSection(title string, headers []string, rows [][]string, markdown bool) {
+// renderSectionTo writes the section to w; the table title is bold when
+// stderrTTY allows ANSI codes.
+func renderSectionTo(w io.Writer, stderrTTY bool, title string, headers []string, rows [][]string, markdown bool) {
 	if markdown {
-		fmt.Fprintf(os.Stdout, "### %s\n\n", title)
-		asc.RenderMarkdown(headers, rows)
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintf(w, "### %s\n\n", title)
+		asc.RenderMarkdownTo(w, headers, rows)
+		fmt.Fprintln(w)
 		return
 	}
 
-	fmt.Fprintf(os.Stdout, "%s\n", Bold(strings.ToUpper(title)))
-	asc.RenderTable(headers, rows)
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprintf(w, "%s\n", boldFor(stderrTTY, strings.ToUpper(title)))
+	asc.RenderTableTo(w, headers, rows)
+	fmt.Fprintln(w)
 }
 
-func supportsANSI() bool {
+func supportsANSIFor(stderrTTY bool) bool {
 	if _, ok := os.LookupEnv("NO_COLOR"); ok {
 		return false
 	}
 	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
 		return false
 	}
-	return isTerminal(int(os.Stderr.Fd()))
+	return stderrTTY
 }
 
 // DefaultUsageFunc returns a usage string with bold section headers
 func DefaultUsageFunc(c *ffcli.Command) string {
+	return defaultUsage(isTerminal(int(os.Stderr.Fd())), c)
+}
+
+// defaultUsage renders c's help, with bold headings when stderrTTY allows
+// ANSI codes.
+func defaultUsage(stderrTTY bool, c *ffcli.Command) string {
 	var b strings.Builder
 
 	shortHelp := strings.TrimSpace(c.ShortHelp)
@@ -271,7 +300,7 @@ func DefaultUsageFunc(c *ffcli.Command) string {
 
 	// DESCRIPTION
 	if shortHelp != "" {
-		b.WriteString(Bold("DESCRIPTION"))
+		b.WriteString(boldFor(stderrTTY, "DESCRIPTION"))
 		b.WriteString("\n")
 		b.WriteString("  ")
 		b.WriteString(shortHelp)
@@ -284,7 +313,7 @@ func DefaultUsageFunc(c *ffcli.Command) string {
 		usage = strings.TrimSpace(c.Name)
 	}
 	if usage != "" {
-		b.WriteString(Bold("USAGE"))
+		b.WriteString(boldFor(stderrTTY, "USAGE"))
 		b.WriteString("\n")
 		b.WriteString("  ")
 		b.WriteString(usage)
@@ -304,7 +333,7 @@ func DefaultUsageFunc(c *ffcli.Command) string {
 
 	// SUBCOMMANDS
 	if len(c.Subcommands) > 0 {
-		b.WriteString(Bold("SUBCOMMANDS"))
+		b.WriteString(boldFor(stderrTTY, "SUBCOMMANDS"))
 		b.WriteString("\n")
 		tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 		for _, sub := range c.Subcommands {
@@ -318,7 +347,7 @@ func DefaultUsageFunc(c *ffcli.Command) string {
 	if c.FlagSet != nil {
 		visibleFlags := VisibleHelpFlags(c.FlagSet)
 		if len(visibleFlags) > 0 {
-			b.WriteString(Bold("FLAGS"))
+			b.WriteString(boldFor(stderrTTY, "FLAGS"))
 			b.WriteString("\n")
 			tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 			for _, f := range visibleFlags {
@@ -345,6 +374,7 @@ type envCredentials struct {
 	keyID    string
 	issuerID string
 	keyPath  string
+	keyPEM   string
 	keyType  string
 	complete bool
 }
@@ -430,21 +460,21 @@ func resolveEnvCredentialsWithPrivateKey(includePrivateKey bool) (envCredentials
 	keyID := strings.TrimSpace(os.Getenv("ASC_KEY_ID"))
 	issuerID := strings.TrimSpace(os.Getenv("ASC_ISSUER_ID"))
 	keyType := config.NormalizeCredentialKeyType(os.Getenv(keyTypeEnvVar))
-	hasKeyPathEnv := strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY_PATH")) != "" ||
+	hasKeyMaterial := strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY_PATH")) != "" ||
 		strings.TrimSpace(os.Getenv(privateKeyEnvVar)) != "" ||
 		strings.TrimSpace(os.Getenv(privateKeyBase64EnvVar)) != ""
 
-	if keyID == "" && issuerID == "" && !hasKeyPathEnv && strings.TrimSpace(os.Getenv(keyTypeEnvVar)) == "" {
+	if keyID == "" && issuerID == "" && !hasKeyMaterial && strings.TrimSpace(os.Getenv(keyTypeEnvVar)) == "" {
 		return envCredentials{}, nil
 	}
 	if !config.IsValidCredentialKeyType(keyType) {
-		return envCredentials{}, fmt.Errorf("%s must be one of: team, individual", keyTypeEnvVar)
+		return envCredentials{}, fmt.Errorf("%s must be one of: team, individual, enterprise", keyTypeEnvVar)
 	}
 
-	keyPath := ""
+	var keyPath, keyPEM string
 	if includePrivateKey {
 		var err error
-		keyPath, err = resolvePrivateKeyPath()
+		keyPath, keyPEM, err = resolveEnvKeyMaterial()
 		if err != nil {
 			return envCredentials{}, err
 		}
@@ -454,10 +484,11 @@ func resolveEnvCredentialsWithPrivateKey(includePrivateKey bool) (envCredentials
 		keyID:    keyID,
 		issuerID: issuerID,
 		keyPath:  keyPath,
+		keyPEM:   keyPEM,
 		keyType:  normalizedResolvedKeyType(keyType),
 	}
 	creds.complete = keyID != "" &&
-		keyPath != "" &&
+		(keyPath != "" || keyPEM != "") &&
 		(issuerID != "" || config.IsIndividualCredentialKeyType(keyType))
 	return creds, nil
 }
@@ -484,19 +515,18 @@ func resolveCredentialsForProfile(profileOverride string) (resolvedCredentials, 
 	// Environment resolution errors are surfaced below, only when stored
 	// credentials leave gaps, matching the previous behavior.
 	if profile == "" && !auth.ShouldBypassKeychain() {
-		if _, complete := resolveCompleteEnvCredentialMetadata(); complete {
-			if resolved, envErr := resolveEnvCredentials(); envErr == nil {
-				issuerID := resolved.issuerID
-				if config.IsIndividualCredentialKeyType(resolved.keyType) {
-					issuerID = ""
-				}
-				return resolvedCredentials{
-					keyID:    resolved.keyID,
-					issuerID: issuerID,
-					keyPath:  resolved.keyPath,
-					keyType:  normalizedResolvedKeyType(resolved.keyType),
-				}, nil
+		if resolved, envErr := resolveEnvCredentials(); envErr == nil && resolved.complete {
+			issuerID := resolved.issuerID
+			if config.IsIndividualCredentialKeyType(resolved.keyType) {
+				issuerID = ""
 			}
+			return resolvedCredentials{
+				keyID:    resolved.keyID,
+				issuerID: issuerID,
+				keyPath:  resolved.keyPath,
+				keyPEM:   resolved.keyPEM,
+				keyType:  normalizedResolvedKeyType(resolved.keyType),
+			}, nil
 		}
 	}
 
@@ -520,6 +550,11 @@ func resolveCredentialsForProfile(profileOverride string) (resolvedCredentials, 
 		if actualKeyPath != "" || actualKeyPEM != "" {
 			sources.keyMaterial = storedSource
 		}
+		if profile == "" {
+			if err := checkIgnoredEnvCredentialIDs(actualKeyID, actualIssuerID, storedSource); err != nil {
+				return resolvedCredentials{}, err
+			}
+		}
 	}
 
 	// Priority 2: Environment variables (fallback for CI/CD or when keychain unavailable)
@@ -529,7 +564,7 @@ func resolveCredentialsForProfile(profileOverride string) (resolvedCredentials, 
 		needsPrivateKey := actualKeyPath == "" && actualKeyPEM == ""
 		envCreds, err := resolveEnvCredentialsWithPrivateKey(needsPrivateKey)
 		if err != nil {
-			return resolvedCredentials{}, fmt.Errorf("invalid private key environment: %w", err)
+			return resolvedCredentials{}, unusableCredentialsError(fmt.Errorf("invalid private key environment: %w", err), DiagnosticInvalidInput)
 		}
 		if actualKeyID == "" && envCreds.keyID != "" {
 			actualKeyID = envCreds.keyID
@@ -542,8 +577,8 @@ func resolveCredentialsForProfile(profileOverride string) (resolvedCredentials, 
 		if actualKeyType == "" && envCreds.keyType != "" {
 			actualKeyType = envCreds.keyType
 		}
-		if actualKeyPath == "" && actualKeyPEM == "" && envCreds.keyPath != "" {
-			actualKeyPath = envCreds.keyPath
+		if needsPrivateKey && (envCreds.keyPath != "" || envCreds.keyPEM != "") {
+			actualKeyPath, actualKeyPEM = envCreds.keyPath, envCreds.keyPEM
 			sources.keyMaterial = "env"
 		}
 	}
@@ -626,33 +661,17 @@ func resolveCredentialsMetadataForProfile(profileOverride string) (ResolvedAuthC
 }
 
 func resolveCompleteEnvCredentialMetadata() (ResolvedAuthCredentials, bool) {
-	keyID := strings.TrimSpace(os.Getenv("ASC_KEY_ID"))
-	issuerID := strings.TrimSpace(os.Getenv("ASC_ISSUER_ID"))
-	keyType := config.NormalizeCredentialKeyType(os.Getenv(keyTypeEnvVar))
-	if !config.IsValidCredentialKeyType(keyType) {
+	resolved, err := resolveEnvCredentials()
+	if err != nil || !resolved.complete {
 		return ResolvedAuthCredentials{}, false
 	}
-
-	hasValidKeyMaterial := false
-	switch {
-	case strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY_PATH")) != "":
-		hasValidKeyMaterial = true
-	case strings.TrimSpace(os.Getenv(privateKeyBase64EnvVar)) != "":
-		_, err := decodeBase64Secret(os.Getenv(privateKeyBase64EnvVar))
-		hasValidKeyMaterial = err == nil
-	case strings.TrimSpace(os.Getenv(privateKeyEnvVar)) != "":
-		hasValidKeyMaterial = true
-	}
-	if keyID == "" || !hasValidKeyMaterial || (issuerID == "" && !config.IsIndividualCredentialKeyType(keyType)) {
-		return ResolvedAuthCredentials{}, false
-	}
-	if config.IsIndividualCredentialKeyType(keyType) {
-		issuerID = ""
+	if config.IsIndividualCredentialKeyType(resolved.keyType) {
+		resolved.issuerID = ""
 	}
 	return ResolvedAuthCredentials{
-		KeyID:    keyID,
-		IssuerID: issuerID,
-		KeyType:  normalizedResolvedKeyType(keyType),
+		KeyID:    resolved.keyID,
+		IssuerID: resolved.issuerID,
+		KeyType:  resolved.keyType,
 	}, true
 }
 
@@ -662,14 +681,6 @@ func resolveCompleteEnvCredentialMetadata() (ResolvedAuthCredentials, bool) {
 func HasCompleteEnvironmentCredentials() bool {
 	_, complete := resolveCompleteEnvCredentialMetadata()
 	return complete
-}
-
-// CanResolveCompleteEnvironmentCredentials reports whether complete environment
-// credentials can be selected by the no-profile, no-bypass fast path. Inline
-// key material is materialized the same way it is during credential resolution.
-func CanResolveCompleteEnvironmentCredentials() bool {
-	resolved, err := resolveEnvCredentials()
-	return err == nil && resolved.complete
 }
 
 func resolveStoredCredentialsMetadataFallback(profile string) (ResolvedAuthCredentials, error) {
@@ -915,6 +926,10 @@ func storedCredentialsError(profile string, err error) error {
 		return missingAuthError{msg: fmt.Sprintf("keychain access denied; set ASC_BYPASS_KEYCHAIN=1 to bypass: %v", err), cause: err}
 	case errors.Is(err, config.ErrParse):
 		return missingAuthError{msg: err.Error(), cause: err}
+	case errors.Is(err, os.ErrPermission):
+		return unusableCredentialsError(err, DiagnosticFilePermissionDenied)
+	case errors.Is(err, auth.ErrKeychainReadFailed):
+		return unusableCredentialsError(fmt.Errorf("keychain read failed; set ASC_BYPASS_KEYCHAIN=1 to bypass: %w", err), DiagnosticDependencyFailed)
 	case profile != "" && (errors.Is(err, config.ErrNotFound) || errors.Is(err, auth.ErrProfileNotFound)):
 		return missingAuthError{msg: profileNotFoundMessage(profile), cause: err}
 	}
@@ -944,7 +959,81 @@ func allowsEnvFallbackForStoredError(err error) bool {
 	return errors.Is(err, config.ErrNotFound) || errors.Is(err, auth.ErrDefaultCredentialsNotFound)
 }
 
+// bearerTokenClient returns a client for ASC_BEARER_TOKEN, a token signed by
+// a service that keeps the private key, renewed through
+// ASC_BEARER_TOKEN_COMMAND when that is set. Either variable takes precedence
+// over every stored or environment key; ok is false when both are unset.
+func bearerTokenClient(timeout time.Duration) (client *asc.Client, ok bool, err error) {
+	token, command := BearerTokenEnv()
+	if token == "" && command == "" {
+		return nil, false, nil
+	}
+	if err := BearerTokenSelectionError(); err != nil {
+		return nil, true, err
+	}
+	ApplyRootLoggingOverrides()
+	var renew asc.BearerTokenRenewer
+	if command != "" {
+		renew = func(ctx context.Context) (string, error) { return readBearerTokenFromCommand(ctx, command) }
+	}
+	// Client creation has no command context, so Ctrl-C must stop a stalled
+	// first token fetch here.
+	ctx, stopInterrupt := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopInterrupt()
+	client, err = asc.NewClientFromBearerToken(ctx, token, renew, timeout)
+	if errors.Is(err, context.Canceled) {
+		return nil, true, err
+	}
+	if errors.Is(err, asc.ErrBearerTokenRenewal) {
+		// readBearerTokenFromCommand already names the variable.
+		return nil, true, missingAuthError{msg: err.Error(), cause: err}
+	}
+	if err != nil {
+		return nil, true, missingAuthError{msg: fmt.Sprintf("%s: %v", bearerTokenEnvVar, err), cause: err}
+	}
+	return client, true, nil
+}
+
+// BearerTokenEnv returns ASC_BEARER_TOKEN and ASC_BEARER_TOKEN_COMMAND, trimmed.
+// When either is set, every App Store Connect API client uses it instead of
+// stored or environment keys.
+func BearerTokenEnv() (token, command string) {
+	return strings.TrimSpace(os.Getenv(bearerTokenEnvVar)), strings.TrimSpace(os.Getenv(bearerTokenCommandEnv))
+}
+
+// BearerTokenSelectionError reports a credential selection that a token from
+// ASC_BEARER_TOKEN or ASC_BEARER_TOKEN_COMMAND cannot honor, so every command
+// refuses the token. It returns nil when neither variable is set.
+func BearerTokenSelectionError() error {
+	token, command := BearerTokenEnv()
+	if token == "" && command == "" {
+		return nil
+	}
+	source := bearerTokenEnvVar
+	if command != "" {
+		source = bearerTokenCommandEnv
+	}
+	// The token already names its key and team, so a selection that would
+	// pick other credentials or another API host cannot be honored.
+	if profile := resolveProfileName(); profile != "" {
+		return fmt.Errorf("%s cannot be combined with profile %q from --profile or %s; unset one of them", source, profile, profileEnvVar)
+	}
+	if config.IsEnterpriseCredentialKeyType(config.NormalizeCredentialKeyType(os.Getenv(keyTypeEnvVar))) {
+		return fmt.Errorf("%s does not support %s=enterprise; unset %s or use the enterprise private key", source, keyTypeEnvVar, keyTypeEnvVar)
+	}
+	return nil
+}
+
+// BearerTokenClient returns the client every command would get from
+// ASC_BEARER_TOKEN or ASC_BEARER_TOKEN_COMMAND; ok is false when both are unset.
+func BearerTokenClient(timeout time.Duration) (client *asc.Client, ok bool, err error) {
+	return bearerTokenClient(timeout)
+}
+
 func getASCClient() (*asc.Client, error) {
+	if client, ok, err := bearerTokenClient(0); ok {
+		return client, err
+	}
 	resolved, err := resolveCredentials()
 	if err != nil {
 		return nil, err
@@ -953,6 +1042,9 @@ func getASCClient() (*asc.Client, error) {
 }
 
 func getASCClientWithTimeout(timeout time.Duration) (*asc.Client, error) {
+	if client, ok, err := bearerTokenClient(timeout); ok {
+		return client, err
+	}
 	resolved, err := resolveCredentials()
 	if err != nil {
 		return nil, err
@@ -967,9 +1059,9 @@ func newASCClientFromResolvedCredentials(resolved resolvedCredentials, timeout t
 		err    error
 	)
 	switch {
-	case strings.TrimSpace(resolved.keyPEM) != "" && timeout > 0:
+	case resolved.keyPEM != "" && timeout > 0:
 		client, err = asc.NewClientFromPEMWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPEM, timeout)
-	case strings.TrimSpace(resolved.keyPEM) != "":
+	case resolved.keyPEM != "":
 		client, err = asc.NewClientFromPEM(resolved.keyID, resolved.issuerID, resolved.keyPEM)
 	case timeout > 0:
 		client, err = asc.NewClientWithTimeout(resolved.keyID, resolved.issuerID, resolved.keyPath, timeout)
@@ -980,6 +1072,9 @@ func newASCClientFromResolvedCredentials(resolved resolvedCredentials, timeout t
 		// An unusable private key leaves the command without working
 		// credentials, so report it like missing authentication.
 		return nil, WithPrivateKeyDiagnostic(missingAuthError{msg: err.Error(), cause: err}, err)
+	}
+	if err == nil && config.IsEnterpriseCredentialKeyType(resolved.keyType) {
+		client.UseEnterpriseProgramAPI()
 	}
 	return client, err
 }
@@ -1033,10 +1128,6 @@ func ApplyRootLoggingOverrides() {
 	}
 }
 
-func checkMixedCredentialSources(sources credentialSource) error {
-	return checkMixedCredentialSourcesForKeyType(sources, config.CredentialKeyTypeTeam)
-}
-
 func checkMixedCredentialSourcesForKeyType(sources credentialSource, keyType string) error {
 	keyIDSource := strings.TrimSpace(sources.keyID)
 	issuerSource := strings.TrimSpace(sources.issuerID)
@@ -1055,7 +1146,7 @@ func checkMixedCredentialSourcesForKeyType(sources credentialSource, keyType str
 			keyMaterialSource,
 		)
 		if strictAuthEnabled() {
-			return fmt.Errorf("mixed authentication sources detected:\n  Key ID: %s\n  Private Key: %s", keyIDSource, keyMaterialSource)
+			return unusableCredentialsError(fmt.Errorf("mixed authentication sources detected:\n  Key ID: %s\n  Private Key: %s", keyIDSource, keyMaterialSource), DiagnosticConflictingInput)
 		}
 		fmt.Fprint(os.Stderr, message)
 		return nil
@@ -1072,37 +1163,50 @@ func checkMixedCredentialSourcesForKeyType(sources credentialSource, keyType str
 		keyMaterialSource,
 	)
 	if strictAuthEnabled() {
-		return fmt.Errorf("mixed authentication sources detected:\n  Key ID: %s\n  Issuer ID: %s\n  Private Key: %s", keyIDSource, issuerSource, keyMaterialSource)
+		return unusableCredentialsError(fmt.Errorf("mixed authentication sources detected:\n  Key ID: %s\n  Issuer ID: %s\n  Private Key: %s", keyIDSource, issuerSource, keyMaterialSource), DiagnosticConflictingInput)
 	}
 	fmt.Fprint(os.Stderr, message)
 	return nil
 }
 
-func resolvePrivateKeyPath() (string, error) {
+func checkIgnoredEnvCredentialIDs(storedKeyID, storedIssuerID, storedSource string) error {
+	hasKeyEnv := strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY_PATH")) != "" ||
+		strings.TrimSpace(os.Getenv(privateKeyEnvVar)) != "" ||
+		strings.TrimSpace(os.Getenv(privateKeyBase64EnvVar)) != ""
+	if hasKeyEnv && strings.TrimSpace(os.Getenv("ASC_KEY_ID")) != "" &&
+		(strings.TrimSpace(os.Getenv("ASC_ISSUER_ID")) != "" || config.IsIndividualCredentialKeyType(os.Getenv(keyTypeEnvVar))) {
+		return nil
+	}
+	var ignored []string
+	if envKeyID := strings.TrimSpace(os.Getenv("ASC_KEY_ID")); envKeyID != "" && storedKeyID != "" && envKeyID != strings.TrimSpace(storedKeyID) {
+		ignored = append(ignored, "ASC_KEY_ID")
+	}
+	if envIssuerID := strings.TrimSpace(os.Getenv("ASC_ISSUER_ID")); envIssuerID != "" && storedIssuerID != "" && envIssuerID != strings.TrimSpace(storedIssuerID) {
+		ignored = append(ignored, "ASC_ISSUER_ID")
+	}
+	if len(ignored) == 0 {
+		return nil
+	}
+	names := strings.Join(ignored, " and ")
+	if strictAuthEnabled() {
+		return unusableCredentialsError(fmt.Errorf("mixed authentication sources detected: %s ignored because the environment credentials are incomplete; using %s credentials", names, storedSource), DiagnosticConflictingInput)
+	}
+	fmt.Fprintf(os.Stderr, "Warning: %s ignored because the environment credentials are incomplete; using %s credentials\n", names, storedSource)
+	return nil
+}
+
+func resolveEnvKeyMaterial() (path, keyPEM string, err error) {
 	if path := strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY_PATH")); path != "" {
-		return path, nil
+		return path, "", nil
 	}
 	if value := strings.TrimSpace(os.Getenv(privateKeyBase64EnvVar)); value != "" {
-		compact := strings.Join(strings.Fields(value), "")
-		cacheKey := tempPrivateKeyCacheKey("b64", compact)
-		if path := cachedTempPrivateKeyPath(cacheKey); path != "" {
-			return path, nil
-		}
 		decoded, err := decodeBase64Secret(value)
 		if err != nil {
-			return "", fmt.Errorf("%s: %w", privateKeyBase64EnvVar, err)
+			return "", "", fmt.Errorf("%s: %w", privateKeyBase64EnvVar, err)
 		}
-		return writeTempPrivateKey(decoded, cacheKey)
+		return "", string(decoded), nil
 	}
-	if value := strings.TrimSpace(os.Getenv(privateKeyEnvVar)); value != "" {
-		normalized := normalizePrivateKeyValue(value)
-		cacheKey := tempPrivateKeyCacheKey("raw", normalized)
-		if path := cachedTempPrivateKeyPath(cacheKey); path != "" {
-			return path, nil
-		}
-		return writeTempPrivateKey([]byte(normalized), cacheKey)
-	}
-	return "", nil
+	return "", normalizePrivateKeyValue(os.Getenv(privateKeyEnvVar)), nil
 }
 
 func tempPrivateKeyCacheKey(kind, value string) string {
@@ -1135,7 +1239,7 @@ func decodeBase64Secret(value string) ([]byte, error) {
 }
 
 func normalizePrivateKeyValue(value string) string {
-	return strings.ReplaceAll(value, "\\n", "\n")
+	return auth.NormalizePrivateKeyPEM(value)
 }
 
 func writeTempPrivateKey(data []byte, cacheKey string) (string, error) {
@@ -1255,36 +1359,36 @@ func resetInvalidStrictAuthWarnings() {
 	strictAuthWarned = map[string]struct{}{}
 }
 
-func printOutput(data any, format string, pretty bool) error {
+func printOutputTo(out, errOut io.Writer, data any, format string, pretty bool) error {
 	format, err := validateOutputFormat(format, pretty)
 	if err != nil {
 		return err
 	}
 	switch format {
 	case "json":
-		err = printJSONOutput(data, pretty)
+		err = printJSONOutput(out, data, pretty)
 	case "markdown":
-		err = asc.PrintMarkdown(data)
+		err = asc.PrintMarkdownTo(out, data)
 	case "table":
-		err = asc.PrintTable(data)
+		err = asc.PrintTableTo(out, data)
 	default:
 		return outputFormatEnumError("output", format, nil)
 	}
 	if err != nil {
 		return err
 	}
-	warnMorePages(data)
+	warnMorePages(errOut, data)
 	return nil
 }
 
-func printOutputWithRenderers(data any, format string, pretty bool, tableRenderer, markdownRenderer func() error) error {
+func printOutputWithRenderersTo(out, errOut io.Writer, data any, format string, pretty bool, tableRenderer, markdownRenderer func() error) error {
 	format, err := validateOutputFormat(format, pretty)
 	if err != nil {
 		return err
 	}
 	switch format {
 	case "json":
-		err = printJSONOutput(data, pretty)
+		err = printJSONOutput(out, data, pretty)
 	case "table":
 		if tableRenderer == nil {
 			return fmt.Errorf("table renderer is required")
@@ -1301,14 +1405,26 @@ func printOutputWithRenderers(data any, format string, pretty bool, tableRendere
 	if err != nil {
 		return err
 	}
-	warnMorePages(data)
+	warnMorePages(errOut, data)
 	return nil
+}
+
+func printOutputRowsTo(out, errOut io.Writer, data any, format string, pretty bool, headers []string, rows [][]string) error {
+	return printOutputWithRenderersTo(
+		out,
+		errOut,
+		data,
+		format,
+		pretty,
+		func() error { return asc.WriteTableTo(out, headers, rows) },
+		func() error { return asc.WriteMarkdownTo(out, headers, rows) },
+	)
 }
 
 // warnMorePages emits a stderr notice when rendered output is a single page of
 // a larger collection. PaginateAll clears links.next on aggregated results, so
 // a non-empty next link at print time means the output is one unpaginated page.
-func warnMorePages(data any) {
+func warnMorePages(w io.Writer, data any) {
 	page, ok := data.(asc.PaginatedResponse)
 	if !ok {
 		return
@@ -1328,21 +1444,21 @@ func warnMorePages(data any) {
 	if countOK {
 		if withMeta, hasMeta := page.(interface{ GetMeta() json.RawMessage }); hasMeta {
 			if total, totalOK := asc.ParsePagingTotalOK(withMeta.GetMeta()); totalOK {
-				fmt.Fprintf(os.Stderr, "Warning: showing %d of %d results; more pages exist (use --paginate or --next where supported)\n", count, total)
+				fmt.Fprintf(w, "Warning: showing %d of %d results; more pages exist (use --paginate or --next where supported)\n", count, total)
 				return
 			}
 		}
-		fmt.Fprintf(os.Stderr, "Warning: showing %d results; more pages exist (use --paginate or --next where supported)\n", count)
+		fmt.Fprintf(w, "Warning: showing %d results; more pages exist (use --paginate or --next where supported)\n", count)
 		return
 	}
-	fmt.Fprintln(os.Stderr, "Warning: more pages exist (use --paginate or --next where supported)")
+	fmt.Fprintln(w, "Warning: more pages exist (use --paginate or --next where supported)")
 }
 
-func printJSONOutput(data any, pretty bool) error {
+func printJSONOutput(w io.Writer, data any, pretty bool) error {
 	if pretty {
-		return asc.PrintPrettyJSON(data)
+		return asc.PrintPrettyJSONTo(w, data)
 	}
-	return asc.PrintJSON(data)
+	return asc.PrintJSONTo(w, data)
 }
 
 // NormalizeOutputFormat lowercases format and canonicalizes aliases.
@@ -1353,6 +1469,28 @@ func NormalizeOutputFormat(format string) string {
 	default:
 		return strings.ToLower(strings.TrimSpace(format))
 	}
+}
+
+// RejectOutputFormatAsPath reports a usage error, with its "Error:" line on d's
+// stderr, when a command whose --output flag takes a path is given an output
+// format name there. formatFlag is the command's flag that chooses json, table
+// or markdown, or "" when it has none.
+func (d *Deps) RejectOutputFormatAsPath(path, formatFlag string) error {
+	return rejectOutputFormatAsPathTo(d.IO.ErrOut, path, formatFlag)
+}
+
+func rejectOutputFormatAsPathTo(stderr io.Writer, path, formatFlag string) error {
+	value := strings.TrimSpace(path)
+	format := NormalizeOutputFormat(value)
+	if format != "json" && format != "table" && format != "markdown" {
+		return nil
+	}
+	if formatFlag == "" {
+		fmt.Fprintf(stderr, "Error: --output takes a path in this command, not an output format, and no flag here chooses json, table or markdown output; use --output ./%s to write to a path named %s\n", value, value)
+	} else {
+		fmt.Fprintf(stderr, "Error: --output takes a path in this command, not an output format; use %s %s to choose the format, or --output ./%s to write to a path named %s\n", formatFlag, format, value, value)
+	}
+	return InvalidValueUsageError("--output")
 }
 
 // outputFormatEnumError reports an unsupported output format the way every
@@ -1421,10 +1559,6 @@ func validateOutputFormatAllowed(flagName, format string, pretty bool, allowed .
 	return normalized, nil
 }
 
-func printStreamPage(data any) error {
-	return asc.PrintJSON(data)
-}
-
 func normalizeDate(value, flagName string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -1470,38 +1604,41 @@ func isAppAvailabilityMissing(err error) bool {
 }
 
 var (
-	defaultOutputOnce  sync.Once
-	defaultOutputValue string
+	defaultOutputEnvOnce  sync.Once
+	defaultOutputEnvValue string
 )
 
-// DefaultOutputFormat returns the default output format for CLI commands.
-// It checks ASC_DEFAULT_OUTPUT first. When unset, local interactive terminals
-// default to table output while CI and non-interactive contexts default to JSON.
-// Valid ASC_DEFAULT_OUTPUT values are "json", "table", "markdown", and "md".
-func DefaultOutputFormat() string {
-	defaultOutputOnce.Do(func() {
-		defaultOutputValue = resolveDefaultOutput()
-	})
-	return defaultOutputValue
+func defaultOutputFormatFor(stdoutTTY bool, errOut io.Writer) string {
+	if format := defaultOutputFromEnv(errOut); format != "" {
+		return format
+	}
+	if isCIEnvironment() || !stdoutTTY {
+		return "json"
+	}
+	return "table"
 }
 
-func resolveDefaultOutput() string {
+// defaultOutputFromEnv reads ASC_DEFAULT_OUTPUT once, so an invalid value is
+// reported once per process, to the first caller's errOut, however many
+// commands bind --output.
+func defaultOutputFromEnv(errOut io.Writer) string {
+	defaultOutputEnvOnce.Do(func() {
+		defaultOutputEnvValue = resolveDefaultOutputEnv(errOut)
+	})
+	return defaultOutputEnvValue
+}
+
+func resolveDefaultOutputEnv(errOut io.Writer) string {
 	env := strings.TrimSpace(os.Getenv(defaultOutputEnvVar))
 	if env == "" {
-		if isCIEnvironment() {
-			return "json"
-		}
-		if isTerminal(int(os.Stdout.Fd())) {
-			return "table"
-		}
-		return "json"
+		return ""
 	}
 	normalized := strings.ToLower(env)
 	switch normalized {
 	case "json", "table", "markdown", "md":
 		return normalized
 	default:
-		fmt.Fprintf(os.Stderr, "Warning: invalid %s value %q (expected json, table, markdown, or md); using json\n", defaultOutputEnvVar, env)
+		fmt.Fprintf(errOut, "Warning: invalid %s value %q (expected json, table, markdown, or md); using json\n", defaultOutputEnvVar, env)
 		return "json"
 	}
 }
@@ -1552,6 +1689,11 @@ func BindOutputFlagsWithAllowed(fs *flag.FlagSet, flagName, defaultValue, usage 
 		pretty:  &prettyValue,
 		allowed: slices.Clone(allowed),
 	}, name, usage)
+	// Callers carry `--json` over from other CLIs; on a format selector that
+	// offers json it is a hidden second spelling of `--output json`.
+	if name == "output" && slices.Contains(allowed, "json") && fs.Lookup("json") == nil {
+		BindFlagValueAlias(fs, "json", name, "json")
+	}
 
 	return OutputFlags{
 		Output: &outputValue,
@@ -1568,11 +1710,6 @@ func BindPrettyJSONFlag(fs *flag.FlagSet) *bool {
 func bindPrettyJSONFlagWithValue(fs *flag.FlagSet, value *bool) *bool {
 	fs.BoolVar(value, "pretty", false, "Pretty-print JSON output")
 	return value
-}
-
-// BindOutputFlags registers --output and --pretty flags on the provided flagset.
-func BindOutputFlags(fs *flag.FlagSet) OutputFlags {
-	return BindOutputFlagsWith(fs, "output", DefaultOutputFormat(), "Output format: json, table, markdown")
 }
 
 // BindMetadataOutputFlags registers --output-format and --pretty flags on the provided flagset.
@@ -1619,20 +1756,21 @@ func validateCommandOutputPath(commands []*ffcli.Command) error {
 	return nil
 }
 
-// WrapCommandOutputValidation ensures shared output flags are validated before
-// command execution so invalid format combinations fail before side effects.
-func WrapCommandOutputValidation(cmd *ffcli.Command) {
-	wrapCommandOutputValidation(cmd, nil)
+// WrapCommandOutputValidation ensures an --app given on the command line is
+// not blank and shared output flags are valid before command execution, so
+// both fail before side effects. The diagnostic goes to d's stderr.
+func WrapCommandOutputValidation(cmd *ffcli.Command, d *Deps) {
+	wrapCommandOutputValidation(cmd, d, nil)
 }
 
-func wrapCommandOutputValidation(cmd *ffcli.Command, parents []*ffcli.Command) {
+func wrapCommandOutputValidation(cmd *ffcli.Command, d *Deps, parents []*ffcli.Command) {
 	if cmd == nil {
 		return
 	}
 
 	path := append(append([]*ffcli.Command(nil), parents...), cmd)
 	for _, sub := range cmd.Subcommands {
-		wrapCommandOutputValidation(sub, path)
+		wrapCommandOutputValidation(sub, d, path)
 	}
 
 	if cmd.Exec == nil {
@@ -1641,26 +1779,73 @@ func wrapCommandOutputValidation(cmd *ffcli.Command, parents []*ffcli.Command) {
 
 	originalExec := cmd.Exec
 	cmd.Exec = func(ctx context.Context, args []string) error {
+		if err := rejectGivenEmptyAppFlag(path, d.IO.ErrOut); err != nil {
+			return err
+		}
 		if err := validateCommandOutputPath(path); err != nil {
 			// Output-flag diagnostics already name the flag, its valid set,
 			// and the rejected value, so report them without dragging the
 			// command's full help page along.
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+			fmt.Fprintf(d.IO.ErrOut, "Error: %s\n", err)
 			return NewReportedUsageError(UsageErrorInvalidValue, err.Error())
 		}
 		return originalExec(ctx, args)
 	}
 }
 
-func resolveAppID(appID string) string {
-	return appSelfLinkID(resolveRawAppID(appID))
+// rejectGivenEmptyAppFlag fails when --app was set on the command line, on
+// the command or on any group above it, to a value that is empty after
+// trimming, so a blank value never falls back to ASC_APP_ID or the config and
+// never reaches the API.
+func rejectGivenEmptyAppFlag(path []*ffcli.Command, stderr io.Writer) error {
+	blank := false
+	for _, command := range path {
+		if command.FlagSet == nil {
+			continue
+		}
+		command.FlagSet.Visit(func(f *flag.Flag) {
+			if f.Name == "app" && strings.TrimSpace(f.Value.String()) == "" {
+				blank = true
+			}
+		})
+	}
+	if !blank {
+		return nil
+	}
+	return WithDiagnostic(usageErrorTo(stderr, "--app must not be empty"), DiagnosticInvalidInput, "--app")
 }
 
-func resolveRawAppID(appID string) string {
+func resolveAppID(appID string) string {
+	return resolveAppIDWith(os.LookupEnv, appID)
+}
+
+// ResolveAppID is ResolveAppID with ASC_APP_ID read through d.LookupEnv.
+func (d *Deps) ResolveAppID(appID string) string {
+	return resolveAppIDWith(d.lookupEnv, appID)
+}
+
+// Getenv is os.Getenv through d.LookupEnv.
+func (d *Deps) Getenv(name string) string {
+	value, _ := d.lookupEnv(name)
+	return value
+}
+
+func (d *Deps) lookupEnv(name string) (string, bool) {
+	if d.LookupEnv == nil {
+		return "", false
+	}
+	return d.LookupEnv(name)
+}
+
+func resolveAppIDWith(lookupEnv func(string) (string, bool), appID string) string {
+	return appSelfLinkID(resolveRawAppID(lookupEnv, appID))
+}
+
+func resolveRawAppID(lookupEnv func(string) (string, bool), appID string) string {
 	if appID != "" {
 		return appID
 	}
-	if env, ok := os.LookupEnv("ASC_APP_ID"); ok {
+	if env, ok := lookupEnv("ASC_APP_ID"); ok {
 		return strings.TrimSpace(env)
 	}
 	cfg, err := config.Load()
@@ -1879,7 +2064,7 @@ func validateNextURL(next string) error {
 	if err != nil {
 		return fmt.Errorf("--next must be a valid URL: %w", err)
 	}
-	if parsed.Scheme != "https" || parsed.Host != "api.appstoreconnect.apple.com" {
+	if parsed.Scheme != "https" || !asc.IsAPIHost(parsed.Host) {
 		return fmt.Errorf("--next must be an App Store Connect URL")
 	}
 	return nil
@@ -1901,7 +2086,7 @@ func validateSort(value string, allowed ...string) error {
 func ValidateInclude(value string, allowed ...string) error {
 	for _, item := range SplitCSV(value) {
 		if !slices.Contains(allowed, item) {
-			return fmt.Errorf("--include must be a comma-separated list of: %s", strings.Join(allowed, ", "))
+			return fmt.Errorf("--include must be a comma-separated list of: %s (unknown value %q)", strings.Join(allowed, ", "), item)
 		}
 	}
 	return nil
@@ -1968,25 +2153,6 @@ func ResolveProfileName() string {
 	return resolveProfileName()
 }
 
-func PrintOutput(data any, format string, pretty bool) error {
-	return printOutput(data, format, pretty)
-}
-
-func PrintOutputWithRenderers(data any, format string, pretty bool, tableRenderer, markdownRenderer func() error) error {
-	return printOutputWithRenderers(data, format, pretty, tableRenderer, markdownRenderer)
-}
-
-// PrintOutputRows prints data as JSON, or as one table of headers and rows.
-func PrintOutputRows(data any, format string, pretty bool, headers []string, rows [][]string) error {
-	return printOutputWithRenderers(
-		data,
-		format,
-		pretty,
-		func() error { return asc.WriteTable(headers, rows) },
-		func() error { return asc.WriteMarkdown(headers, rows) },
-	)
-}
-
 func ValidateOutputFormat(format string, pretty bool) (string, error) {
 	return validateOutputFormat(format, pretty)
 }
@@ -2012,13 +2178,6 @@ func ContextWithTimeout(ctx context.Context) (context.Context, context.CancelFun
 }
 
 func ContextWithUploadTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	return contextWithUploadTimeout(ctx)
-}
-
-// ContextWithDownloadTimeout bounds a streamed download, including the body
-// copy. Client and request timeouts also cover that copy, so the short request
-// budget aborts a large report mid-transfer. Downloads use the upload budget.
-func ContextWithDownloadTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return contextWithUploadTimeout(ctx)
 }
 
@@ -2052,11 +2211,4 @@ func ValidateNextURL(next string) error {
 
 func ValidateSort(value string, allowed ...string) error {
 	return validateSort(value, allowed...)
-}
-
-// PrintStreamPage writes a single page of data as a JSON line to stdout.
-// Used with --stream --paginate to emit results page-by-page as NDJSON
-// instead of buffering all pages in memory.
-func PrintStreamPage(data any) error {
-	return printStreamPage(data)
 }

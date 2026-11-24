@@ -1,7 +1,6 @@
 package asc
 
 import (
-	"fmt"
 	"strconv"
 )
 
@@ -40,12 +39,6 @@ func reviewSubmissionItemsRows(resp *ReviewSubmissionItemsResponse) ([]string, [
 	return headers, rows
 }
 
-func reviewSubmissionItemDeleteResultRows(result *ReviewSubmissionItemDeleteResult) ([]string, [][]string) {
-	headers := []string{"ID", "Deleted"}
-	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
-	return headers, rows
-}
-
 func reviewSubmissionAppID(rel *ReviewSubmissionRelationships) string {
 	if rel == nil || rel.App == nil {
 		return ""
@@ -69,6 +62,7 @@ func reviewSubmissionItemTarget(rel *ReviewSubmissionItemRelationships) (string,
 		rel.InAppPurchaseVersion,
 		rel.SubscriptionVersion,
 		rel.SubscriptionGroupVersion,
+		rel.RetentionMessageVersion,
 		rel.AppStoreVersion,
 		rel.AppCustomProductPageVersion,
 		rel.AppAssetLibraryImage,

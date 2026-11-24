@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -49,6 +51,16 @@ func setBundleIDPlatformTestServer(t *testing.T, handler http.HandlerFunc) {
 	t.Cleanup(restoreClient)
 }
 
+// bundleIDPlatformTestClient returns a client factory whose clients send every
+// request to a test server running handler.
+func bundleIDPlatformTestClient(t *testing.T, handler http.HandlerFunc) func() (*asc.Client, error) {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return stubServerClient(t, server)
+}
+
 func TestDevicesListUsesBundleIDPlatformFilter(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
@@ -80,11 +92,10 @@ func TestDevicesListUsesBundleIDPlatformFilter(t *testing.T) {
 }
 
 func TestBundleIDsCreateUsesBundleIDPlatformPayload(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
 	requestCount := 0
-	setBundleIDPlatformTestServer(t, func(w http.ResponseWriter, req *http.Request) {
+	client := bundleIDPlatformTestClient(t, func(w http.ResponseWriter, req *http.Request) {
 		requestCount++
 		if req.Method != http.MethodPost || req.URL.Path != "/v1/bundleIds" {
 			t.Fatalf("expected POST /v1/bundleIds, got %s %s", req.Method, req.URL.Path)
@@ -110,12 +121,7 @@ func TestBundleIDsCreateUsesBundleIDPlatformPayload(t *testing.T) {
 		_, _ = io.WriteString(w, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.universal","name":"Universal","platform":"UNIVERSAL"}}}`)
 	})
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	if err := root.Parse([]string{"bundle-ids", "create", "--identifier", "com.example.universal", "--name", "Universal", "--platform", "universal"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	if err := root.Run(context.Background()); err != nil {
+	if _, _, err := runRootWithDeps(t, client, "bundle-ids", "create", "--identifier", "com.example.universal", "--name", "Universal", "--platform", "universal"); err != nil {
 		t.Fatalf("run error: %v", err)
 	}
 	if requestCount != 1 {
@@ -123,29 +129,107 @@ func TestBundleIDsCreateUsesBundleIDPlatformPayload(t *testing.T) {
 	}
 }
 
-func TestBundleIDPlatformCommandsRejectGeneralPlatforms(t *testing.T) {
+func TestBundleIDsCreateSeedIDRequestAttributes(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name  string
+		flags []string
+		want  map[string]any
 	}{
-		{name: "devices list tvOS", args: []string{"devices", "list", "--platform", "TV_OS"}},
-		{name: "devices register visionOS", args: []string{"devices", "register", "--name", "Invalid", "--udid", "INVALID", "--platform", "VISION_OS"}},
-		{name: "bundle ID create tvOS", args: []string{"bundle-ids", "create", "--identifier", "com.example.invalid", "--name", "Invalid", "--platform", "TV_OS"}},
+		{
+			name: "omitted flag leaves Apple to assign the prefix",
+			want: map[string]any{"identifier": "com.example.app", "name": "Example", "platform": "IOS"},
+		},
+		{
+			name:  "chosen prefix is sent trimmed",
+			flags: []string{"--seed-id", " ABCDE12345 "},
+			want:  map[string]any{"identifier": "com.example.app", "name": "Example", "platform": "IOS", "seedId": "ABCDE12345"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-			if err := root.Parse(tt.args); err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-			_, stderr := captureOutput(t, func() {
-				err := root.Run(context.Background())
-				if err == nil || !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("error = %v, want usage error", err)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+			var got map[string]any
+			client := bundleIDPlatformTestClient(t, func(w http.ResponseWriter, req *http.Request) {
+				var payload struct {
+					Data struct {
+						Attributes map[string]any `json:"attributes"`
+					} `json:"data"`
 				}
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				got = payload.Data.Attributes
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{"data":{"type":"bundleIds","id":"bundle-1","attributes":{"identifier":"com.example.app","name":"Example","platform":"IOS"}}}`)
 			})
+
+			args := append([]string{"bundle-ids", "create", "--identifier", "com.example.app", "--name", "Example"}, tt.flags...)
+			if _, _, err := runRootWithDeps(t, client, args...); err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("attributes = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBundleIDsCreateRejectsBlankSeedIDBeforeRequest(t *testing.T) {
+	for _, value := range []string{"", "   "} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+			requestCount := 0
+			client := bundleIDPlatformTestClient(t, func(w http.ResponseWriter, req *http.Request) {
+				requestCount++
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+			})
+
+			_, stderr, err := runRootWithDeps(t, client, "bundle-ids", "create", "--identifier", "com.example.app", "--name", "Example", "--seed-id", value)
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("error = %v, want usage error", err)
+			}
+			assertUsageDiagnosticFirstLine(t, stderr, "--seed-id must not be empty")
+			if requestCount != 0 {
+				t.Fatalf("request count = %d, want 0", requestCount)
+			}
+		})
+	}
+}
+
+func TestBundleIDPlatformCommandsRejectGeneralPlatforms(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		deps bool // the command is built on shared.Deps: run it on test deps
+	}{
+		{name: "devices list tvOS", args: []string{"devices", "list", "--platform", "TV_OS"}, deps: true},
+		{name: "devices register visionOS", args: []string{"devices", "register", "--name", "Invalid", "--udid", "INVALID", "--platform", "VISION_OS"}, deps: true},
+		{name: "bundle ID create tvOS", args: []string{"bundle-ids", "create", "--identifier", "com.example.invalid", "--name", "Invalid", "--platform", "TV_OS"}, deps: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr string
+			var err error
+			if tt.deps {
+				_, stderr, err = runRootWithDeps(t, nil, tt.args...)
+			} else {
+				root := RootCommand("1.2.3")
+				root.FlagSet.SetOutput(io.Discard)
+				if parseErr := root.Parse(tt.args); parseErr != nil {
+					t.Fatalf("parse error: %v", parseErr)
+				}
+				_, stderr = captureOutput(t, func() {
+					err = root.Run(context.Background())
+				})
+			}
+			if err == nil || !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("error = %v, want usage error", err)
+			}
 			const diagnostic = "Error: --platform must be one of: IOS, MAC_OS, UNIVERSAL\n"
 			if count := strings.Count(stderr, diagnostic); count != 1 {
 				t.Fatalf("diagnostic count = %d in stderr %q", count, stderr)

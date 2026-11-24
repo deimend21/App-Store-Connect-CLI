@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Protect CI runner, build, artifact, and security-check contracts."""
 
+import json
 import os
 import re
 import shutil
@@ -19,6 +20,53 @@ WEBSITE_WORKFLOW = ROOT / ".github/workflows/website-checks.yml"
 GOVULNCHECK_WORKFLOW = ROOT / ".github/workflows/govulncheck.yml"
 DEPENDABOT_CONFIG = ROOT / ".github/dependabot.yml"
 MAKEFILE = ROOT / "Makefile"
+
+
+def assert_nix_cache_contract() -> None:
+    workflow = (ROOT / ".github/workflows/nix.yml").read_text()
+    for name in ("nix.yml", "autofix.yml"):
+        content = (ROOT / ".github/workflows" / name).read_text()
+        keys = re.findall(r"^\s+primary-key: (.*)", content, re.MULTILINE)
+        assert keys, f"{name}: missing Nix cache key"
+        for key in keys:
+            inputs = re.search(r"hashFiles\((.*?)\)", key)
+            assert inputs and "'go.mod'" in inputs.group(1), f"{name}: Go upgrades must invalidate the Nix cache"
+    autofix = (ROOT / ".github/workflows/autofix.yml").read_text()
+    assert "if: github.event.pull_request.user.login != 'dependabot[bot]'\n        uses: autofix-ci/action@" in autofix, (
+        "autofix.yml: a commit on a Dependabot branch stops Dependabot from rebasing it"
+    )
+    build = job_block(workflow, "nix")
+    assert "actions: write" not in build, "PR-controlled Nix builds must not receive Actions write permission"
+    purge = job_block(workflow, "purge-cache")
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in purge
+    assert "needs: nix" in purge, "purge only after the new cache has been saved"
+    assert "actions: write" in purge
+    assert "nix build" not in purge and "nix run" not in purge, "privileged cleanup must not execute build output"
+    script = textwrap.dedent(purge.split("run: |\n", 1)[1])
+    for has_current, is_latest in ((False, True), (True, True), (True, False)):
+        with tempfile.TemporaryDirectory(prefix="asc-nix-cache-") as directory:
+            root = Path(directory)
+            caches = [
+                {"id": 1, "key": "old", "created_at": "2026-01-01T00:00:00Z"},
+                {"id": 3, "key": "newer", "created_at": "2026-01-03T00:00:00Z"},
+                {"id": 4, "key": "current", "created_at": "2026-01-01T00:00:00Z"},
+            ]
+            if not has_current:
+                caches = [cache for cache in caches if cache["key"] != "current"]
+            if has_current:
+                caches.append({"id": 2, "key": "current", "created_at": "2026-01-02T00:00:00Z"})
+            (root / "caches.json").write_text(json.dumps([{"actions_caches": caches}]))
+            gh = root / "gh"
+            gh.write_text('#!/bin/sh\ncase "$*" in *git/ref/heads/main*) echo main-tip ;; *GET*) cat caches.json ;; *) printf "%s\\n" "$*" >> deletions ;; esac\n')
+            gh.chmod(0o755)
+            env = dict(os.environ, PATH=directory + os.pathsep + os.environ["PATH"],
+                       CURRENT_KEY="current", CACHE_PREFIX="nix-Linux-", GITHUB_REPOSITORY="owner/repo",
+                       GITHUB_SHA="main-tip" if is_latest else "old-tip")
+            subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=root, env=env, check=True)
+            deletions = root / "deletions"
+            actual = deletions.read_text() if deletions.exists() else ""
+            expected = "".join(f"api --method DELETE repos/owner/repo/actions/caches/{cache_id}\n" for cache_id in (1, 4)) if has_current and is_latest else ""
+            assert actual == expected, "purge must keep the current/newer caches and retain fallback after a failed save"
 
 
 def assert_lint_timeout_budget() -> None:
@@ -288,6 +336,9 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
 
     build_platforms = job_block(workflow, "build-platforms")
     assert "needs.changes.outputs.scope == 'full'" in build_platforms
+    assert "if grep -F '[no tests to run]' \"$output\"; then" in build_platforms, (
+        f"{path}: build-platforms must fail when a go test -run pattern matches no test"
+    )
     for runner in ("macos-latest", "ubuntu-latest", "windows-latest"):
         assert f"runner: {runner}" in build_platforms, f"{path}: missing native build runner {runner}"
     assert "go test -short ./internal/screenshots" in build_platforms, f"{path}: missing Darwin-only tests"
@@ -327,6 +378,29 @@ def assert_optimized_workflow_text(path: Path, workflow: str, test_job: str) -> 
     for os_name, arch in (("linux", "amd64"), ("linux", "arm64"), ("windows", "amd64")):
         command = f"CGO_ENABLED=0 GOOS={os_name} GOARCH={arch} go build"
         assert command in build_platforms, f"{path}: missing cgo-disabled {os_name} {arch} build"
+
+    # Native backend failures must block the existing platform build gate.
+    for name, runner, install in (
+        ("security-key macOS", "macos-latest", "brew install libfido2 pkg-config"),
+    ):
+        entry = re.search(
+            rf"          - name: {re.escape(name)}\n(.*?)(?=\n          - name:|\n    steps:)",
+            build_platforms,
+            re.DOTALL,
+        )
+        assert entry is not None, f"{path}: missing native {name} build"
+        command = entry.group(1)
+        for required in (
+            f"runner: {runner}",
+            install,
+            "pkg-config --atleast-version=1.14.0 libfido2",
+            'CGO_LDFLAGS="-O2 -g $(pkg-config --libs libfido2)"',
+            "export CGO_ENABLED=1 GOMAXPROCS=4 GOFLAGS=-p=4 CGO_LDFLAGS",
+            "go build -tags fido2",
+            "ASC_BYPASS_KEYCHAIN=1 go test -race -tags fido2 -p=1 -parallel=4 -count=1",
+            "./internal/securitykey ./internal/web ./internal/cli/web ./internal/cli/cmdtest",
+        ):
+            assert required in command, f"{path}: {name} must run {required!r}"
 
     ordinary_build = job_block(workflow, "ordinary-build")
     assert "needs.changes.outputs.scope == 'telemetry'" in ordinary_build
@@ -370,7 +444,15 @@ def assert_optimized_workflow_rejects_weakened_checks() -> None:
             "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build",
             "CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build",
             "CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build",
+            "brew install libfido2 pkg-config",
+            "pkg-config --atleast-version=1.14.0 libfido2",
+            'CGO_LDFLAGS="-O2 -g $(pkg-config --libs libfido2)"',
+            "export CGO_ENABLED=1 GOMAXPROCS=4 GOFLAGS=-p=4 CGO_LDFLAGS",
+            "go build -tags fido2",
+            "ASC_BYPASS_KEYCHAIN=1 go test -race -tags fido2 -p=1 -parallel=4 -count=1",
+            "./internal/securitykey ./internal/web ./internal/cli/web ./internal/cli/cmdtest",
             "ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/rootfs",
+            "if grep -F '[no tests to run]' \"$output\"; then",
         ):
             assert command in workflow, f"{path}: expected to find {command!r}"
             weakened = workflow.replace(command, "true")
@@ -936,9 +1018,24 @@ updates:
     directory: \"/\"
     schedule:
       interval: \"weekly\"
-""", "Dependabot must monitor root Go modules and GitHub Actions weekly"
+    groups:
+      codeql-action:
+        patterns:
+          - \"github/codeql-action*\"
+
+  - package-ecosystem: \"nix\"
+    directory: \"/\"
+    schedule:
+      interval: \"weekly\"
+
+  - package-ecosystem: \"npm\"
+    directory: \"/website\"
+    schedule:
+      interval: \"weekly\"
+""", "Dependabot must monitor all four dependency ecosystems weekly and update CodeQL actions together"
 
     assert_security_target_contract()
+    assert_nix_cache_contract()
 
     print("CI workflow contracts passed")
 

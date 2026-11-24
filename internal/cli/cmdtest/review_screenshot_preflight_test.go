@@ -2,7 +2,6 @@ package cmdtest
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -19,6 +18,7 @@ import (
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 var (
@@ -60,34 +60,14 @@ func writeOpaquePNG(t *testing.T, path string, width, height int) {
 	}
 }
 
-// failOnAnyRequest installs a transport that records any App Store Connect
-// request, proving the preflight rejected the file before contacting it.
-func failOnAnyRequest(t *testing.T) *int {
+// failOnAnyRequest installs a registry with no stubs that records any App
+// Store Connect request, proving the preflight rejected the file before
+// contacting it.
+func failOnAnyRequest(t *testing.T) *asctest.Registry {
 	t.Helper()
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	requests := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requests++
-		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
-	})
-	return &requests
-}
-
-// runReviewScreenshotCommand runs args and returns stderr and the run error.
-func runReviewScreenshotCommand(t *testing.T, args []string) (string, error) {
-	t.Helper()
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse(args); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-	return stderr, runErr
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	return reg
 }
 
 func writeJPEGNamed(t *testing.T, path string, width, height int) {
@@ -105,7 +85,7 @@ func writeJPEGNamed(t *testing.T, path string, width, height int) {
 // entrypoint and asserts the review screenshot was rejected as a usage error
 // (exit 2) with exactly the one diagnostic line wantError, without the
 // command's usage page, and before any App Store Connect request.
-func assertReviewScreenshotRejectedBeforeRequest(t *testing.T, args []string, requests *int, wantError string) {
+func assertReviewScreenshotRejectedBeforeRequest(t *testing.T, args []string, requests *asctest.Registry, wantError string) {
 	t.Helper()
 	code := -1
 	stdout, stderr := captureOutput(t, func() {
@@ -114,8 +94,8 @@ func assertReviewScreenshotRejectedBeforeRequest(t *testing.T, args []string, re
 	if code != rootcmd.ExitUsage {
 		t.Fatalf("exit code = %d, want %d (usage); stderr = %q", code, rootcmd.ExitUsage, stderr)
 	}
-	if *requests != 0 {
-		t.Fatalf("expected no App Store Connect requests, got %d", *requests)
+	if got := len(requests.Requests()); got != 0 {
+		t.Fatalf("expected no App Store Connect requests, got %d", got)
 	}
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -277,7 +257,7 @@ func runIAPReviewScreenshotCreateWithMockUpload(t *testing.T, path string) (stri
 		}
 	})
 
-	stderr, runErr := runReviewScreenshotCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
+	_, stderr, runErr := runRootCommand(t, []string{"iap", "review-screenshots", "create", "--iap-id", "9000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v", runErr)
 	}
@@ -335,7 +315,7 @@ func TestSubscriptionsReviewScreenshotsCreateWarnsAboutUndocumentedSizeAndUpload
 		}
 	})
 
-	stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	_, stderr, runErr := runRootCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v", runErr)
 	}
@@ -401,21 +381,16 @@ func TestIAPImportRechecksReviewScreenshotReplacedAfterPlanning(t *testing.T) {
 	filePath := writeIAPImportFile(t, dir, `{"products":[{"type":"CONSUMABLE","referenceName":"Coins","productId":"com.example.coins","reviewScreenshot":"shots/coins.png"}]}`)
 	screenshotPath := writeIAPImportScreenshot(t, dir)
 
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/apps/123456789/inAppPurchasesV2", "fields[inAppPurchases]=productId", "filter[productId]=com.example.coins", "limit=200"), func(req *http.Request) (*http.Response, error) {
+		writeJPEGNamed(t, screenshotPath, 640, 920)
+		return asctest.JSON(http.StatusOK, `{"data":[]}`)(req)
+	})
 	createdProduct := false
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
-			writeJPEGNamed(t, screenshotPath, 640, 920)
-			return jsonResponse(http.StatusOK, `{"data":[]}`)
-		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
-			createdProduct = true
-			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
-		default:
-			t.Fatalf("unexpected request after the screenshot was replaced: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
+	reg.Register(asctest.POST("/v2/inAppPurchases").JSONBody(`{"data":{"type":"inAppPurchases","attributes":{"name":"Coins","productId":"com.example.coins","inAppPurchaseType":"CONSUMABLE"},"relationships":{"app":{"data":{"type":"apps","id":"123456789"}}}}}`), func(req *http.Request) (*http.Response, error) {
+		createdProduct = true
+		return asctest.JSON(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)(req)
 	})
 
 	_, stderr, err := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
@@ -444,22 +419,16 @@ func TestIAPImportWarnsOnceAtUpload(t *testing.T) {
 		t.Fatalf("write png: %v", err)
 	}
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/apps/123456789/inAppPurchasesV2", "fields[inAppPurchases]=productId", "filter[productId]=com.example.coins", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[]}`))
+	reg.Register(asctest.POST("/v2/inAppPurchases").JSONBody(`{"data":{"type":"inAppPurchases","attributes":{"name":"Coins","productId":"com.example.coins","inAppPurchaseType":"CONSUMABLE"},"relationships":{"app":{"data":{"type":"apps","id":"123456789"}}}}}`),
+		asctest.JSON(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`))
 	reserved := false
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/apps/123456789/inAppPurchasesV2":
-			return jsonResponse(http.StatusOK, `{"data":[]}`)
-		case req.Method == http.MethodPost && req.URL.Path == "/v2/inAppPurchases":
-			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchases","id":"iap-1","attributes":{}}}`)
-		case req.Method == http.MethodPost && req.URL.Path == "/v1/inAppPurchaseAppStoreReviewScreenshots":
-			reserved = true
-			return jsonResponse(http.StatusCreated, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"coins.png"}}}`)
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
+	reg.Register(asctest.POST("/v1/inAppPurchaseAppStoreReviewScreenshots").JSONBody(fmt.Sprintf(`{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","attributes":{"fileSize":%d,"fileName":"coins.png"},"relationships":{"inAppPurchaseV2":{"data":{"type":"inAppPurchases","id":"iap-1"}}}}}`, buf.Len())), func(req *http.Request) (*http.Response, error) {
+		reserved = true
+		return asctest.JSON(http.StatusCreated, `{"data":{"type":"inAppPurchaseAppStoreReviewScreenshots","id":"shot-1","attributes":{"fileName":"coins.png"}}}`)(req)
 	})
 
 	_, stderr, _ := runIAPImport(t, []string{"iap", "import", "--app", "123456789", "--file", filePath, "--confirm", "--output", "json"})
@@ -531,7 +500,7 @@ func TestSubscriptionsReviewScreenshotsCreateUploadsTheCheckedBytes(t *testing.T
 		}
 	})
 
-	stderr, runErr := runReviewScreenshotCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
+	_, stderr, runErr := runRootCommand(t, []string{"subscriptions", "review", "screenshots", "create", "--subscription-id", "8000000001", "--file", path, "--output", "json"})
 	if runErr != nil {
 		t.Fatalf("expected success, got %v (stderr %q)", runErr, stderr)
 	}
@@ -550,24 +519,18 @@ func TestSubscriptionsSetupRechecksReviewScreenshotReplacedAfterValidation(t *te
 	path := filepath.Join(t.TempDir(), "review.png")
 	writeReviewScreenshotPNG(t, path)
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/subscriptionGroups/group-1/subscriptions", "filter[productId]=com.example.pro.monthly", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[],"links":{"next":""}}`))
 	createdSubscription := false
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/subscriptionGroups/group-1/subscriptions":
-			return jsonResponse(http.StatusOK, `{"data":[],"links":{"next":""}}`)
-		case req.Method == http.MethodPost && req.URL.Path == "/v1/subscriptions":
-			createdSubscription = true
-			writeJPEGNamed(t, path, 640, 920)
-			return jsonResponse(http.StatusCreated, `{"data":{"type":"subscriptions","id":"sub-1","attributes":{"name":"Pro Monthly","productId":"com.example.pro.monthly","subscriptionPeriod":"ONE_MONTH","state":"MISSING_METADATA"}}}`)
-		default:
-			t.Fatalf("unexpected request after the screenshot was replaced: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
+	reg.Register(asctest.POST("/v1/subscriptions").JSONBody(`{"data":{"type":"subscriptions","attributes":{"name":"Pro Monthly","productId":"com.example.pro.monthly","subscriptionPeriod":"ONE_MONTH"},"relationships":{"group":{"data":{"type":"subscriptionGroups","id":"group-1"}}}}}`), func(req *http.Request) (*http.Response, error) {
+		createdSubscription = true
+		writeJPEGNamed(t, path, 640, 920)
+		return asctest.JSON(http.StatusCreated, `{"data":{"type":"subscriptions","id":"sub-1","attributes":{"name":"Pro Monthly","productId":"com.example.pro.monthly","subscriptionPeriod":"ONE_MONTH","state":"MISSING_METADATA"}}}`)(req)
 	})
 
-	stderr, err := runReviewScreenshotCommand(t, []string{
+	_, stderr, err := runRootCommand(t, []string{
 		"subscriptions", "setup",
 		"--group-id", "group-1",
 		"--reference-name", "Pro Monthly",

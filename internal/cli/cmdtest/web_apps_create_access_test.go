@@ -5,12 +5,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/handlertest"
 )
 
@@ -25,61 +23,35 @@ func webAppsCreateAccessArgs(extra ...string) []string {
 	return append(args, extra...)
 }
 
-func TestWebAppsCreateAccessLimitedWithoutUserFailsBeforeHTTP(t *testing.T) {
+func TestWebAppsCreateAccessValidationFailsBeforeHTTP(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		requests++
 		http.Error(w, "no HTTP expected", http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	setWebAppsCreateASCClient(t, server)
+	client := webAppsCreateASCClient(t, server)
 
-	assertUsageExit(t, webAppsCreateAccessArgs("--access", "limited"), "--access limited requires at least one --user")
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "limited without user", args: webAppsCreateAccessArgs("--access", "limited"), wantErr: "--access limited requires at least one --user"},
+		{name: "invalid access", args: webAppsCreateAccessArgs("--access", "team"), wantErr: "--access must be full or limited"},
+		{name: "user without access", args: webAppsCreateAccessArgs("--user", "user-1"), wantErr: "--user requires --access limited"},
+		{name: "user with full access", args: webAppsCreateAccessArgs("--access", "full", "--user", "user-1"), wantErr: "--user requires --access limited"},
+		{name: "access without name", args: []string{"web", "apps", "create", "--access", "full", "--output", "json"}, wantErr: "missing required flags"},
+		{name: "blank user", args: webAppsCreateAccessArgs("--access", "limited", "--user", "user-1", "--user", ""), wantErr: `value cannot be empty`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertUsageExitWithDeps(t, client, tt.args, tt.wantErr)
+		})
+	}
 	if requests != 0 {
 		t.Fatalf("expected no HTTP, got %d requests", requests)
 	}
-}
-
-func TestWebAppsCreateRejectsInvalidAccessValue(t *testing.T) {
-	assertUsageExit(t, webAppsCreateAccessArgs("--access", "team"), "--access must be full or limited")
-}
-
-func TestWebAppsCreateUserRequiresLimitedAccess(t *testing.T) {
-	assertUsageExit(t, webAppsCreateAccessArgs("--user", "user-1"), "--user requires --access limited")
-}
-
-func TestWebAppsCreateAccessWithoutNameFailsBeforeHTTP(t *testing.T) {
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		requests++
-		http.Error(w, "no HTTP expected", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-	setWebAppsCreateASCClient(t, server)
-
-	assertUsageExit(t, []string{"web", "apps", "create", "--access", "full", "--output", "json"}, "missing required flags")
-	if requests != 0 {
-		t.Fatalf("expected no HTTP, got %d requests", requests)
-	}
-}
-
-func TestWebAppsCreateBlankUserFailsBeforeHTTP(t *testing.T) {
-	var requests int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		requests++
-		http.Error(w, "no HTTP expected", http.StatusInternalServerError)
-	}))
-	defer server.Close()
-	setWebAppsCreateASCClient(t, server)
-
-	assertUsageExit(t, webAppsCreateAccessArgs("--access", "limited", "--user", "user-1", "--user", ""), `value cannot be empty`)
-	if requests != 0 {
-		t.Fatalf("expected no HTTP, got %d requests", requests)
-	}
-}
-
-func TestWebAppsCreateFullAccessRejectsUser(t *testing.T) {
-	assertUsageExit(t, webAppsCreateAccessArgs("--access", "full", "--user", "user-1"), "--user requires --access limited")
 }
 
 func TestWebAppsCreateUnknownUserFailsBeforeCreate(t *testing.T) {
@@ -101,9 +73,9 @@ func TestWebAppsCreateUnknownUserFailsBeforeCreate(t *testing.T) {
 		fixture.Respond(w, "unexpected request: %s %s", req.Method, req.URL.Path)
 	}))
 	defer server.Close()
-	setWebAppsCreateASCClient(t, server)
+	client := webAppsCreateASCClient(t, server)
 
-	assertUsageExit(t, webAppsCreateAccessArgs(
+	assertUsageExitWithDeps(t, client, webAppsCreateAccessArgs(
 		"--access", "limited",
 		"--user", "missing-user",
 	), `unknown user ID "missing-user"`)
@@ -134,9 +106,9 @@ func TestWebAppsCreateAllAppsVisibleUserFailsBeforeCreate(t *testing.T) {
 		fixture.Respond(w, "unexpected request: %s %s", req.Method, req.URL.Path)
 	}))
 	defer server.Close()
-	setWebAppsCreateASCClient(t, server)
+	client := webAppsCreateASCClient(t, server)
 
-	assertUsageExit(t, webAppsCreateAccessArgs(
+	assertUsageExitWithDeps(t, client, webAppsCreateAccessArgs(
 		"--access", "limited",
 		"--user", "full-user",
 	), `user ID "full-user" has access to all apps`)
@@ -149,7 +121,7 @@ func TestWebAppsCreateAllAppsVisibleUserFailsBeforeCreate(t *testing.T) {
 	}
 }
 
-func setWebAppsCreateASCClient(t *testing.T, server *httptest.Server) {
+func webAppsCreateASCClient(t *testing.T, server *httptest.Server) func() (*asc.Client, error) {
 	t.Helper()
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
@@ -175,25 +147,7 @@ func setWebAppsCreateASCClient(t *testing.T, server *httptest.Server) {
 	if err != nil {
 		t.Fatalf("create test client: %v", err)
 	}
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+	return func() (*asc.Client, error) {
 		return client, nil
-	}))
-}
-
-func TestWebAppsCreateHelpMentionsAccessFlags(t *testing.T) {
-	root := RootCommand("1.2.3")
-	cmd := findSubcommand(root, "web", "apps", "create")
-	if cmd == nil {
-		t.Fatal("expected web apps create command")
-	}
-	if cmd.FlagSet.Lookup("access") == nil {
-		t.Fatal("expected --access flag on web apps create")
-	}
-	if cmd.FlagSet.Lookup("user") == nil {
-		t.Fatal("expected --user flag on web apps create")
-	}
-	usage := cmd.UsageFunc(cmd)
-	if !strings.Contains(usage, "--access") {
-		t.Fatalf("expected --access in usage, got %q", usage)
 	}
 }

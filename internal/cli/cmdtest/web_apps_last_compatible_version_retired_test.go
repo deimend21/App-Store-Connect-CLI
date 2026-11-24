@@ -21,12 +21,10 @@ func TestWebAppsLastCompatibleVersionIsRetired(t *testing.T) {
 		return nil, errors.New("unexpected request")
 	}))
 
-	stdout, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"web", "apps", "last-compatible-version", "view", "--app", "6759231657"}, "1.2.3")
-		if code != cmd.ExitUsage {
-			t.Fatalf("exit code = %d, want %d", code, cmd.ExitUsage)
-		}
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "apps", "last-compatible-version", "view", "--app", "6759231657")
+	if code != cmd.ExitUsage {
+		t.Fatalf("exit code = %d, want %d", code, cmd.ExitUsage)
+	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q, want empty", stdout)
 	}
@@ -35,22 +33,5 @@ func TestWebAppsLastCompatibleVersionIsRetired(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "asc web apps --help") {
 		t.Fatalf("stderr = %q, want the group help pointer", stderr)
-	}
-}
-
-// The retired leaf is gone from the registered tree, so `asc web apps --help`
-// cannot advertise it any more.
-func TestWebAppsGroupNoLongerRegistersLastCompatibleVersion(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	root := RootCommand("1.2.3")
-	webApps := findSubcommand(root, "web", "apps")
-	if webApps == nil {
-		t.Fatal("expected registered asc web apps command")
-	}
-	for _, sub := range webApps.Subcommands {
-		if sub != nil && sub.Name == "last-compatible-version" {
-			t.Fatal("asc web apps still registers the retired last-compatible-version group")
-		}
 	}
 }

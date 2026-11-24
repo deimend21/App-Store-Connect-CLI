@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"io"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	webcmd "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/web"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/securitykey"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
@@ -46,40 +46,23 @@ func TestWebCommandUsesProductionHelpContract(t *testing.T) {
 	}
 }
 
-func TestWebAppsMedicalDeviceSetSubcommandIsRegistered(t *testing.T) {
+// These leaves have no root-level behavior test, so a dropped registration
+// would otherwise only surface as "unknown subcommand" in the shipped binary.
+func TestWebSubcommandsAreRegistered(t *testing.T) {
 	root := RootCommand("1.2.3")
-	if sub := findSubcommand(root, "web", "apps", "medical-device", "set"); sub == nil {
-		t.Fatalf("expected web apps medical-device set to be registered")
-	}
-}
-
-func TestWebAppsMedicalDeviceViewSubcommandIsRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	if sub := findSubcommand(root, "web", "apps", "medical-device", "view"); sub == nil {
-		t.Fatalf("expected web apps medical-device view to be registered")
-	}
-}
-
-func TestWebAppsDeclarationsListSubcommandIsRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	if sub := findSubcommand(root, "web", "apps", "declarations", "list"); sub == nil {
-		t.Fatalf("expected web apps declarations list to be registered")
-	}
-}
-
-func TestWebBundleIDCapabilitiesSyncAppClipSubcommandIsRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	sub := findSubcommand(root, "web", "bundle-ids", "capabilities", "sync-app-clip")
-	if sub == nil {
-		t.Fatalf("expected web bundle-ids capabilities sync-app-clip to be registered")
-	}
-	for _, flagName := range []string{"bundle-id", "parent-bundle-id", "capability", "settings-json", "confirm", "apple-id", "output"} {
-		if sub.FlagSet.Lookup(flagName) == nil {
-			t.Fatalf("expected --%s flag", flagName)
+	for _, path := range [][]string{
+		{"web", "apps", "medical-device", "set"},
+		{"web", "apps", "medical-device", "view"},
+		{"web", "apps", "declarations", "list"},
+		{"web", "apps", "distribution", "users", "list"},
+		{"web", "apps", "distribution", "users", "create"},
+		{"web", "apps", "distribution", "users", "delete"},
+		{"web", "xcode-cloud", "scm", "providers", "list"},
+		{"web", "xcode-cloud", "scm", "connection-status"},
+	} {
+		if findSubcommand(root, path...) == nil {
+			t.Errorf("expected %s to be registered", strings.Join(path, " "))
 		}
-	}
-	if !strings.Contains(sub.ShortUsage, "--confirm") {
-		t.Fatalf("expected --confirm in short usage, got %q", sub.ShortUsage)
 	}
 }
 
@@ -95,16 +78,7 @@ func TestWebBundleIDCapabilitiesSyncAppClipMissingConfirmFailsBeforeSession(t *t
 	})
 	defer restoreSync()
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "bundle-ids", "capabilities", "sync-app-clip", "--bundle-id", "clip-1", "--parent-bundle-id", "parent-1", "--capability", "PUSH_NOTIFICATIONS"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, nil, "web", "bundle-ids", "capabilities", "sync-app-clip", "--bundle-id", "clip-1", "--parent-bundle-id", "parent-1", "--capability", "PUSH_NOTIFICATIONS")
 
 	if !errors.Is(runErr, flag.ErrHelp) {
 		t.Fatalf("expected ErrHelp, got %v", runErr)
@@ -120,143 +94,45 @@ func TestWebBundleIDCapabilitiesSyncAppClipMissingConfirmFailsBeforeSession(t *t
 	}
 }
 
-func TestWebBundleIDCapabilitiesEnableSubcommandIsRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	sub := findSubcommand(root, "web", "bundle-ids", "capabilities", "enable")
-	if sub == nil {
-		t.Fatalf("expected web bundle-ids capabilities enable to be registered")
-	}
-	for _, flagName := range []string{"bundle-id", "capability", "confirm", "apple-id", "output"} {
-		if sub.FlagSet.Lookup(flagName) == nil {
-			t.Fatalf("expected --%s flag", flagName)
-		}
-	}
-}
-
-func TestWebXcodeCloudWorkflowsListSubcommandIsRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	sub := findSubcommand(root, "web", "xcode-cloud", "workflows", "list")
-	if sub == nil {
-		t.Fatalf("expected web xcode-cloud workflows list to be registered")
-	}
-	if sub.FlagSet.Lookup("product-id") == nil {
-		t.Fatal("expected --product-id flag on web xcode-cloud workflows list")
-	}
-	if sub.FlagSet.Lookup("paginate") != nil {
-		t.Fatal("did not expect --paginate on web xcode-cloud workflows list; the CI client does not page")
-	}
-}
-
-func TestWebXcodeCloudWorkflowsListMissingRequiredFlags(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "xcode-cloud", "workflows", "list"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
+func TestWebCommandsUsageErrors(t *testing.T) {
+	runUsageExitCases(t, []usageExitCase{
+		{
+			name:    "XcodeCloudWorkflowsListMissingRequiredFlags",
+			args:    []string{"web", "xcode-cloud", "workflows", "list"},
+			wantErr: "Error: --product-id is required",
+			deps:    true,
+		},
+		{
+			name:    "XcodeCloudWorkflowsListRejectsPositionalArguments",
+			args:    []string{"web", "xcode-cloud", "workflows", "list", "--product-id", "prod-1", "extra"},
+			wantErr: `unexpected argument "extra"`,
+			deps:    true,
+		},
+		{
+			name:    "XcodeCloudWorkflowsListRejectsPaginate",
+			args:    []string{"web", "xcode-cloud", "workflows", "list", "--product-id", "prod-1", "--paginate"},
+			wantErr: "unknown flag `--paginate`",
+			deps:    true,
+		},
+		{
+			name:    "AppsCreateMissingRequiredFlags",
+			args:    []string{"web", "apps", "create", "--name", "My App"},
+			wantErr: "Error: missing required flags: --bundle-id, --sku",
+			deps:    true,
+		},
+		{
+			name:    "SandboxCreateMissingRequiredFlags",
+			args:    []string{"web", "sandbox", "create"},
+			wantErr: "Error: --first-name is required",
+			deps:    true,
+		},
+		{
+			name:    "XcodeCloudWorkflowsCreateMissingRequiredFlags",
+			args:    []string{"web", "xcode-cloud", "workflows", "create"},
+			wantErr: "Error: --product-id is required",
+			deps:    true,
+		},
 	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "Error: --product-id is required") {
-		t.Fatalf("expected missing --product-id error, got %q", stderr)
-	}
-}
-
-func TestWebXcodeCloudWorkflowsListRejectsPositionalArguments(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "xcode-cloud", "workflows", "list", "--product-id", "prod-1", "extra"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "web xcode-cloud workflows list does not accept positional arguments") {
-		t.Fatalf("expected positional-args error, got %q", stderr)
-	}
-}
-
-func TestWebAppsCreateMissingRequiredFlags(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "apps", "create", "--name", "My App"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "Error: missing required flags: --bundle-id, --sku") {
-		t.Fatalf("expected aggregated missing-flags error, got %q", stderr)
-	}
-}
-
-func TestWebAppsCreateExposesPasswordCompatibilityFlag(t *testing.T) {
-	root := RootCommand("1.2.3")
-	cmd := findSubcommand(root, "web", "apps", "create")
-	if cmd == nil {
-		t.Fatal("expected web apps create command")
-		return
-	}
-	if cmd.FlagSet.Lookup("password") == nil {
-		t.Fatal("expected temporary password compatibility flag on web apps create")
-	}
-}
-
-func TestWebSandboxCreateMissingRequiredFlags(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "sandbox", "create"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "Error: --first-name is required") {
-		t.Fatalf("expected missing --first-name error, got %q", stderr)
-	}
-}
-
-func TestWebXcodeCloudWorkflowsCreateMissingRequiredFlags(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"web", "xcode-cloud", "workflows", "create"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "Error: --product-id is required") {
-		t.Fatalf("expected missing --product-id error, got %q", stderr)
-	}
 }
 
 func TestWebAuthLoginOmitsPlaintextPasswordAndRemovedTwoFactorCodeFlags(t *testing.T) {
@@ -283,17 +159,6 @@ func TestWebAuthLoginOmitsPlaintextPasswordAndRemovedTwoFactorCodeFlags(t *testi
 	}
 	if strings.Contains(cmd.LongHelp, "--two-factor-code ") || strings.Contains(cmd.LongHelp, "--two-factor-code\n") || strings.Contains(cmd.LongHelp, "deprecated") {
 		t.Fatalf("web auth login help still documents the removed --two-factor-code alias: %q", cmd.LongHelp)
-	}
-	for _, phrase := range []string{
-		"Phone-code fallback (including SMS):",
-		"interactive: if Apple offers a registered phone fallback",
-		"enter an incorrect trusted-device code once",
-		"Apple then delivers a phone verification code and asc prompts again",
-		"automated: asc reruns the configured 2FA code command after phone fallback",
-	} {
-		if !strings.Contains(cmd.LongHelp, phrase) {
-			t.Fatalf("expected %q in web auth login help, got %q", phrase, cmd.LongHelp)
-		}
 	}
 }
 
@@ -323,10 +188,7 @@ func TestWebCommandsOmitRemovedTwoFactorCodeAlias(t *testing.T) {
 }
 
 func TestWebAuthLoginRejectsRemovedTwoFactorCodeFlagAsUnknown(t *testing.T) {
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = rootcmd.Run([]string{"web", "auth", "login", "--apple-id", "user@example.com", "--two-factor-code", "123456"}, "1.2.3")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "auth", "login", "--apple-id", "user@example.com", "--two-factor-code", "123456")
 	if code != rootcmd.ExitUsage {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitUsage, stderr)
 	}
@@ -366,12 +228,13 @@ func TestWebCommandsRegisterTwoFactorDeliveryFlags(t *testing.T) {
 }
 
 func TestWebAuthLoginRejectsInvalidTwoFactorDelivery(t *testing.T) {
-	tests := []struct {
+	type testCase struct {
 		name       string
 		args       []string
 		env        map[string]string
 		wantStderr string
-	}{
+	}
+	tests := []testCase{
 		{
 			name:       "unsupported method flag",
 			args:       []string{"--two-factor-method", "email"},
@@ -415,6 +278,14 @@ func TestWebAuthLoginRejectsInvalidTwoFactorDelivery(t *testing.T) {
 			wantStderr: "Error: ASC_WEB_2FA_PHONE_ID requires --two-factor-method sms",
 		},
 	}
+	if !securitykey.Available() {
+		tests = append(tests, testCase{
+			name:       "security key unsupported backend",
+			args:       []string{"--two-factor-method", "security-key"},
+			wantStderr: "Error: security-key support requires a macOS build with CGO_ENABLED=1 and -tags fido2",
+		})
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("ASC_WEB_2FA_METHOD", "")

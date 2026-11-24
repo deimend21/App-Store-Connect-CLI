@@ -14,11 +14,12 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	authsvc "github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
-// AccountCommand returns the account command group.
-func AccountCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("account", flag.ExitOnError)
+// NewAccountCommand returns the account command group built on d.
+func NewAccountCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("account", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "account",
@@ -31,9 +32,9 @@ Examples:
   asc account status --app "123456789"
   asc account status --output table`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			accountStatusCommand(),
+			accountStatusCommand(d),
 		},
 		Exec: func(_ context.Context, _ []string) error {
 			return flag.ErrHelp
@@ -41,11 +42,11 @@ Examples:
 	}
 }
 
-func accountStatusCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("account status", flag.ExitOnError)
+func accountStatusCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("account status", flag.ExitOnError)
 
 	appID := fs.String("app", "", "Optional app ID for access probe (or ASC_APP_ID env)")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "status",
@@ -63,24 +64,20 @@ Examples:
   asc account status --app "123456789"
   asc account status --output markdown`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageErrorf("unexpected argument(s): %s", strings.Join(args, " "))
-			}
-
-			resolvedAppID := shared.ResolveAppID(*appID)
-			resp, err := collectAccountStatus(ctx, resolvedAppID)
+			resolvedAppID := d.ResolveAppID(*appID)
+			resp, err := collectAccountStatus(ctx, d, resolvedAppID)
 			if err != nil {
 				return fmt.Errorf("account status: %w", err)
 			}
 
-			return shared.PrintOutputWithRenderers(
+			return d.PrintOutputWithRenderers(
 				resp,
 				*output.Output,
 				*output.Pretty,
-				func() error { renderAccountStatus(resp, false); return nil },
-				func() error { renderAccountStatus(resp, true); return nil },
+				func() error { renderAccountStatus(d, resp, false); return nil },
+				func() error { renderAccountStatus(d, resp, true); return nil },
 			)
 		},
 	}
@@ -105,11 +102,11 @@ type accountCheck struct {
 	Message string `json:"message"`
 }
 
-func collectAccountStatus(ctx context.Context, appID string) (*accountStatusResponse, error) {
+func collectAccountStatus(ctx context.Context, d *shared.Deps, appID string) (*accountStatusResponse, error) {
 	checks := make([]accountCheck, 0, 3)
 	checks = append(checks, authHealthCheck())
 
-	apiCheck, err := apiAccessCheck(ctx, appID)
+	apiCheck, err := apiAccessCheck(ctx, d, appID)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +118,7 @@ func collectAccountStatus(ctx context.Context, appID string) (*accountStatusResp
 	return &accountStatusResponse{
 		Summary:     summary,
 		Checks:      checks,
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt: d.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
@@ -152,8 +149,8 @@ func authHealthCheck() accountCheck {
 	}
 }
 
-func apiAccessCheck(ctx context.Context, appID string) (accountCheck, error) {
-	client, err := shared.GetASCClient()
+func apiAccessCheck(ctx context.Context, d *shared.Deps, appID string) (accountCheck, error) {
+	client, err := d.Client()
 	if err != nil {
 		return accountCheck{
 			Name:    "api_access",
@@ -162,7 +159,7 @@ func apiAccessCheck(ctx context.Context, appID string) (accountCheck, error) {
 		}, nil
 	}
 
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	defer cancel()
 
 	if strings.TrimSpace(appID) != "" {
@@ -195,7 +192,7 @@ func apiAccessCheck(ctx context.Context, appID string) (accountCheck, error) {
 		}, nil
 	}
 
-	_, err = client.GetApps(requestCtx, asc.WithAppsLimit(1))
+	_, err = client.GetApps(requestCtx, asc.Limit[asc.AppsOption](1))
 	if err == nil {
 		return accountCheck{
 			Name:    "api_access",
@@ -218,10 +215,34 @@ func apiAccessCheck(ctx context.Context, appID string) (accountCheck, error) {
 }
 
 func agreementsAvailabilityCheck() accountCheck {
+	const notInAPI = "account-level agreement status is not in the public App Store Connect API"
+	const agreementCommands = "`asc web agreements status` for Apple Developer Program agreements and App Store Connect agreement alerts, " +
+		"and `asc web business agreements list` for Business agreements such as the Paid Applications Schedule"
+	_, brokered, brokerErr := webcore.BrokerFromEnv()
+	switch {
+	case brokerErr != nil:
+		// Every web command fails on this config before reaching a broker,
+		// so fixing it comes before any broker policy.
+		return accountCheck{
+			Name:   "agreements",
+			Status: "unavailable",
+			Message: notInAPI + ", and the web session broker configuration is incomplete or invalid (" + brokerErr.Error() + "); " +
+				"fix it, or unset both " + webcore.WebBrokerURLEnv + " and " + webcore.WebBrokerTokenEnv + " to use asc's own web session, then check it with " + agreementCommands,
+		}
+	case brokered:
+		// Which requests a broker lends is the broker's policy, and asking
+		// would take a network call, so give both outcomes.
+		return accountCheck{
+			Name:   "agreements",
+			Status: "unavailable",
+			Message: notInAPI + ", and the web session broker at " + webcore.WebBrokerURLEnv + " may not lend the agreement pages; " +
+				"if it does not, " + webcore.BrokerAgreementsHandOff + "; if it does, check it with " + agreementCommands,
+		}
+	}
 	return accountCheck{
 		Name:    "agreements",
 		Status:  "unavailable",
-		Message: "account-level agreement status is not exposed in the current public App Store Connect API surface",
+		Message: notInAPI + "; check it with a web session: " + agreementCommands,
 	}
 }
 
@@ -276,7 +297,7 @@ func errorsIsNotFound(err error) bool {
 	return errors.Is(err, asc.ErrNotFound) || asc.IsNotFound(err)
 }
 
-func renderAccountStatus(resp *accountStatusResponse, markdown bool) {
+func renderAccountStatus(d *shared.Deps, resp *accountStatusResponse, markdown bool) {
 	summaryRows := [][]string{
 		{"health", resp.Summary.Health},
 		{"nextAction", resp.Summary.NextAction},
@@ -284,11 +305,11 @@ func renderAccountStatus(resp *accountStatusResponse, markdown bool) {
 		{"warningCount", strconv.Itoa(resp.Summary.WarningCount)},
 		{"generatedAt", resp.GeneratedAt},
 	}
-	shared.RenderSection("Summary", []string{"field", "value"}, summaryRows, markdown)
+	d.RenderSection("Summary", []string{"field", "value"}, summaryRows, markdown)
 
 	checkRows := make([][]string, 0, len(resp.Checks))
 	for _, check := range resp.Checks {
 		checkRows = append(checkRows, []string{check.Name, check.Status, check.Message})
 	}
-	shared.RenderSection("Checks", []string{"check", "status", "message"}, checkRows, markdown)
+	d.RenderSection("Checks", []string{"check", "status", "message"}, checkRows, markdown)
 }

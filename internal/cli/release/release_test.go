@@ -1,6 +1,7 @@
 package release
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/metadata"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	validatecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
@@ -41,32 +43,26 @@ func releaseJSONResponse(status int, body string) (*http.Response, error) {
 	}, nil
 }
 
-func captureReleaseStderr(t *testing.T, fn func()) string {
+func captureReleaseStderr(t *testing.T, d *shared.Deps, fn func()) string {
 	t.Helper()
 
-	originalStderr := os.Stderr
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stderr pipe: %v", err)
-	}
-
-	readDone := make(chan string, 1)
-	go func() {
-		data, _ := io.ReadAll(reader)
-		readDone <- string(data)
-	}()
-
-	os.Stderr = writer
-	defer func() {
-		os.Stderr = originalStderr
-	}()
-
+	stderr := d.IO.ErrOut.(*bytes.Buffer)
+	start := stderr.Len()
 	fn()
+	return stderr.String()[start:]
+}
 
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close stderr writer: %v", err)
+func releaseTestDeps() *shared.Deps {
+	return &shared.Deps{
+		IO:             &shared.IO{In: strings.NewReader(""), Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}},
+		Now:            time.Now,
+		Timeout:        shared.ContextWithTimeout,
+		UploadTimeout:  shared.ContextWithUploadTimeout,
+		ResolveTimeout: shared.ResolveTimeoutSetting,
+		After:          time.After,
+		LookupEnv:      os.LookupEnv,
+		Getwd:          os.Getwd,
 	}
-	return <-readDone
 }
 
 func newReleaseTestClient(t *testing.T) *asc.Client {
@@ -122,6 +118,8 @@ func releaseBuildAppLinkageResponse(req *http.Request) (*http.Response, bool) {
 	switch req.URL.Path {
 	case "/v1/builds/BUILD_123/relationships/app":
 		body = `{"data":{"type":"apps","id":"APP_123"}}`
+	case "/v1/builds/BUILD_123":
+		body = `{"data":{"type":"builds","id":"BUILD_123","attributes":{"version":"42","buildAudienceType":"APP_STORE_ELIGIBLE"}}}`
 	case "/v1/builds/BUILD_123/preReleaseVersion":
 		body = `{"data":{"type":"preReleaseVersions","id":"PRE_RELEASE_123","attributes":{"version":"2.4.0","platform":"IOS"}}}`
 	default:
@@ -160,7 +158,8 @@ func newReleaseTestPrivateKeyPEM(t *testing.T) []byte {
 }
 
 func TestReleaseStageCommand_MissingRequiredFlags(t *testing.T) {
-	cmd := ReleaseStageCommand()
+	d := releaseTestDeps()
+	cmd := newReleaseStageCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--dry-run"}); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
@@ -170,23 +169,10 @@ func TestReleaseStageCommand_MissingRequiredFlags(t *testing.T) {
 	}
 }
 
-func TestReleaseStageCommandExposesRoutingCoverageFile(t *testing.T) {
-	cmd := ReleaseStageCommand()
-	flag := cmd.FlagSet.Lookup("routing-coverage-file")
-	if flag == nil {
-		t.Fatal("expected --routing-coverage-file flag")
-	}
-
-	if !strings.Contains(flag.Usage, "before readiness") {
-		t.Fatalf("expected routing coverage timing in flag help, got %q", flag.Usage)
-	}
-}
-
 func TestReleaseStageCommandValidatesRoutingCoverageBeforePipeline(t *testing.T) {
-	originalClientFactory := releaseClientFactory
-	t.Cleanup(func() { releaseClientFactory = originalClientFactory })
+	d := releaseTestDeps()
 	clientCalled := false
-	releaseClientFactory = func() (*asc.Client, error) {
+	d.Client = func() (*asc.Client, error) {
 		clientCalled = true
 		return nil, errors.New("client must not be created")
 	}
@@ -197,7 +183,7 @@ func TestReleaseStageCommandValidatesRoutingCoverageBeforePipeline(t *testing.T)
 	}
 	t.Chdir(filepath.Dir(coveragePath))
 
-	cmd := ReleaseStageCommand()
+	cmd := newReleaseStageCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "APP_123",
 		"--version", "2.4.0",
@@ -210,7 +196,7 @@ func TestReleaseStageCommandValidatesRoutingCoverageBeforePipeline(t *testing.T)
 	}
 
 	var execErr error
-	stderr := captureReleaseStderr(t, func() {
+	stderr := captureReleaseStderr(t, d, func() {
 		execErr = cmd.Exec(context.Background(), nil)
 	})
 	if !errors.Is(execErr, flag.ErrHelp) {
@@ -255,8 +241,7 @@ func TestCheckpointModeMatches(t *testing.T) {
 }
 
 func TestExecuteStageExplainsLegacyReleaseRunCheckpoint(t *testing.T) {
-	originalClientFactory := releaseClientFactory
-	t.Cleanup(func() { releaseClientFactory = originalClientFactory })
+	d := releaseTestDeps()
 
 	for _, test := range []struct {
 		name string
@@ -267,13 +252,13 @@ func TestExecuteStageExplainsLegacyReleaseRunCheckpoint(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			clientCalled := false
-			releaseClientFactory = func() (*asc.Client, error) {
+			d.Client = func() (*asc.Client, error) {
 				clientCalled = true
 				return nil, errors.New("client must not be created")
 			}
 
 			checkpointPath := filepath.Join(t.TempDir(), "legacy-run-checkpoint.json")
-			if err := saveCheckpoint(checkpointPath, runCheckpoint{
+			if err := saveCheckpoint(d, checkpointPath, runCheckpoint{
 				AppID:            "APP_123",
 				Version:          "2.4.0",
 				BuildID:          "BUILD_123",
@@ -285,7 +270,7 @@ func TestExecuteStageExplainsLegacyReleaseRunCheckpoint(t *testing.T) {
 				t.Fatalf("save checkpoint: %v", err)
 			}
 
-			_, err := executeStage(context.Background(), runOptions{
+			_, err := executeStage(context.Background(), d, runOptions{
 				AppID:            "APP_123",
 				Version:          "2.4.0",
 				BuildID:          "BUILD_123",
@@ -311,11 +296,10 @@ func TestExecuteStageExplainsLegacyReleaseRunCheckpoint(t *testing.T) {
 }
 
 func TestExecuteStageResumesPartialCheckpointAfterRemovingRoutingCoverage(t *testing.T) {
-	originalClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	originalCopyExecutor := metadataCopyExecutor
 	originalReadinessBuilder := readinessReportBuilder
 	t.Cleanup(func() {
-		releaseClientFactory = originalClientFactory
 		metadataCopyExecutor = originalCopyExecutor
 		readinessReportBuilder = originalReadinessBuilder
 	})
@@ -333,20 +317,20 @@ func TestExecuteStageResumesPartialCheckpointAfterRemovingRoutingCoverage(t *tes
 			return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
 	})
-	releaseClientFactory = func() (*asc.Client, error) { return client, nil }
+	d.Client = func() (*asc.Client, error) { return client, nil }
 	metadataRuns := 0
 	metadataCopyExecutor = func(context.Context, *asc.Client, metadataCopyOptions) (*asc.AppStoreVersionMetadataCopySummary, error) {
 		metadataRuns++
 		return &asc.AppStoreVersionMetadataCopySummary{CopiedLocales: 1}, nil
 	}
 	readinessRuns := 0
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		readinessRuns++
 		return validation.Report{Summary: validation.Summary{}}, nil
 	}
 
 	checkpointPath := filepath.Join(t.TempDir(), "stage-checkpoint.json")
-	if err := saveCheckpoint(checkpointPath, runCheckpoint{
+	if err := saveCheckpoint(d, checkpointPath, runCheckpoint{
 		AppID:               "APP_123",
 		Version:             "2.4.0",
 		BuildID:             "BUILD_123",
@@ -363,7 +347,7 @@ func TestExecuteStageResumesPartialCheckpointAfterRemovingRoutingCoverage(t *tes
 		t.Fatalf("save checkpoint: %v", err)
 	}
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:            "APP_123",
 		Version:          "2.4.0",
 		BuildID:          "BUILD_123",
@@ -390,7 +374,7 @@ func TestExecuteStageResumesPartialCheckpointAfterRemovingRoutingCoverage(t *tes
 	if metadataRuns != 1 || readinessRuns != 1 {
 		t.Fatalf("executeStage() reruns metadata=%d readiness=%d, want 1 each", metadataRuns, readinessRuns)
 	}
-	saved, err := loadCheckpoint(checkpointPath)
+	saved, err := loadCheckpoint(releaseTestDeps(), checkpointPath)
 	if err != nil {
 		t.Fatalf("load checkpoint: %v", err)
 	}
@@ -406,8 +390,7 @@ func TestExecuteStageResumesPartialCheckpointAfterRemovingRoutingCoverage(t *tes
 }
 
 func TestExecuteStageRejectsRemovingRoutingCoverageAfterCompletedOrUnknownStep(t *testing.T) {
-	originalClientFactory := releaseClientFactory
-	t.Cleanup(func() { releaseClientFactory = originalClientFactory })
+	d := releaseTestDeps()
 
 	for _, completedStep := range []string{
 		stepApplyRoutingCoverage,
@@ -418,12 +401,12 @@ func TestExecuteStageRejectsRemovingRoutingCoverageAfterCompletedOrUnknownStep(t
 	} {
 		t.Run(completedStep, func(t *testing.T) {
 			clientCalled := false
-			releaseClientFactory = func() (*asc.Client, error) {
+			d.Client = func() (*asc.Client, error) {
 				clientCalled = true
 				return nil, errors.New("client must not be created")
 			}
 			checkpointPath := filepath.Join(t.TempDir(), "stage-checkpoint.json")
-			if err := saveCheckpoint(checkpointPath, runCheckpoint{
+			if err := saveCheckpoint(d, checkpointPath, runCheckpoint{
 				AppID:               "APP_123",
 				Version:             "2.4.0",
 				BuildID:             "BUILD_123",
@@ -440,7 +423,7 @@ func TestExecuteStageRejectsRemovingRoutingCoverageAfterCompletedOrUnknownStep(t
 				t.Fatalf("save checkpoint: %v", err)
 			}
 
-			_, err := executeStage(context.Background(), runOptions{
+			_, err := executeStage(context.Background(), d, runOptions{
 				AppID:            "APP_123",
 				Version:          "2.4.0",
 				BuildID:          "BUILD_123",
@@ -461,12 +444,11 @@ func TestExecuteStageRejectsRemovingRoutingCoverageAfterCompletedOrUnknownStep(t
 }
 
 func TestExecuteStageResumesCheckpointAfterAddingRoutingCoverage(t *testing.T) {
-	originalClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	originalCopyExecutor := metadataCopyExecutor
 	originalReadinessBuilder := readinessReportBuilder
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = originalClientFactory
 		metadataCopyExecutor = originalCopyExecutor
 		readinessReportBuilder = originalReadinessBuilder
 		http.DefaultTransport = originalTransport
@@ -477,7 +459,7 @@ func TestExecuteStageResumesCheckpointAfterAddingRoutingCoverage(t *testing.T) {
 		t.Fatalf("write routing coverage fixture: %v", err)
 	}
 	checkpointPath := filepath.Join(t.TempDir(), "stage-checkpoint.json")
-	if err := saveCheckpoint(checkpointPath, runCheckpoint{
+	if err := saveCheckpoint(d, checkpointPath, runCheckpoint{
 		AppID:            "APP_123",
 		Version:          "2.4.0",
 		BuildID:          "BUILD_123",
@@ -502,7 +484,7 @@ func TestExecuteStageResumesCheckpointAfterAddingRoutingCoverage(t *testing.T) {
 	}
 	coverageCommitted := false
 	readinessRuns := 0
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		readinessRuns++
 		if !coverageCommitted {
 			t.Fatal("readiness ran before newly added routing coverage completed")
@@ -534,9 +516,9 @@ func TestExecuteStageResumesCheckpointAfterAddingRoutingCoverage(t *testing.T) {
 			return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
 		}
 	})
-	releaseClientFactory = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
+	d.Client = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:               "APP_123",
 		Version:             "2.4.0",
 		BuildID:             "BUILD_123",
@@ -566,7 +548,7 @@ func TestExecuteStageResumesCheckpointAfterAddingRoutingCoverage(t *testing.T) {
 		t.Fatalf("executeStage() routing step = %#v, want newly applied coverage", result.Steps[3])
 	}
 
-	saved, err := loadCheckpoint(checkpointPath)
+	saved, err := loadCheckpoint(releaseTestDeps(), checkpointPath)
 	if err != nil {
 		t.Fatalf("load checkpoint: %v", err)
 	}
@@ -609,11 +591,10 @@ func TestCheckpointRejectsAddingRoutingCoverageAfterUnsafeCompletion(t *testing.
 }
 
 func TestExecuteStage_ResumesCompletedCheckpoint(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 	})
@@ -631,14 +612,14 @@ func TestExecuteStage_ResumesCompletedCheckpoint(t *testing.T) {
 			return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 		}
 	})
-	releaseClientFactory = func() (*asc.Client, error) { return client, nil }
+	d.Client = func() (*asc.Client, error) { return client, nil }
 	metadataRuns := 0
 	readinessRuns := 0
-	metadataPushExecutor = func(context.Context, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(context.Context, *shared.Deps, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		metadataRuns++
 		return metadata.PushPlanResult{VersionID: "VERSION_123"}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		readinessRuns++
 		return validation.Report{Summary: validation.Summary{}}, nil
 	}
@@ -660,11 +641,11 @@ func TestExecuteStage_ResumesCompletedCheckpoint(t *testing.T) {
 			stepValidateReadiness: true,
 		},
 	}
-	if err := saveCheckpoint(checkpointPath, checkpoint); err != nil {
+	if err := saveCheckpoint(d, checkpointPath, checkpoint); err != nil {
 		t.Fatalf("save checkpoint: %v", err)
 	}
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -707,19 +688,18 @@ func TestExecuteStage_ResumesCompletedCheckpoint(t *testing.T) {
 }
 
 func TestExecuteStage_SuccessPath(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
 	metadataCalled := false
-	metadataPushExecutor = func(_ context.Context, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(_ context.Context, _ *shared.Deps, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		metadataCalled = true
 		return metadata.PushPlanResult{
 			AppID:     opts.AppID,
@@ -731,7 +711,7 @@ func TestExecuteStage_SuccessPath(t *testing.T) {
 		}, nil
 	}
 	readinessCalled := false
-	readinessReportBuilder = func(_ context.Context, _ validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(_ context.Context, _ *shared.Deps, _ validatecli.ReadinessOptions) (validation.Report, error) {
 		readinessCalled = true
 		return validation.Report{
 			AppID:     "APP_123",
@@ -764,9 +744,9 @@ func TestExecuteStage_SuccessPath(t *testing.T) {
 		}
 	})
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -802,22 +782,21 @@ func TestExecuteStage_SuccessPath(t *testing.T) {
 }
 
 func TestExecuteStageRejectsIncompleteVersionBeforeMetadata(t *testing.T) {
-	originalClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	originalMetadataExecutor := metadataPushExecutor
 	originalReadinessBuilder := readinessReportBuilder
 	originalTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = originalClientFactory
 		metadataPushExecutor = originalMetadataExecutor
 		readinessReportBuilder = originalReadinessBuilder
 		http.DefaultTransport = originalTransport
 	})
 
-	metadataPushExecutor = func(context.Context, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(context.Context, *shared.Deps, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		t.Fatal("metadata must not run after an incomplete version lookup")
 		return metadata.PushPlanResult{}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		t.Fatal("readiness must not run after an incomplete version lookup")
 		return validation.Report{}, nil
 	}
@@ -830,9 +809,9 @@ func TestExecuteStageRejectsIncompleteVersionBeforeMetadata(t *testing.T) {
 		}
 		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 	})
-	releaseClientFactory = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
+	d.Client = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -847,13 +826,12 @@ func TestExecuteStageRejectsIncompleteVersionBeforeMetadata(t *testing.T) {
 }
 
 func TestExecuteStage_CopyMetadataSuccessPath(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origMetadataCopyExecutor := metadataCopyExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		metadataCopyExecutor = origMetadataCopyExecutor
 		readinessReportBuilder = origReadinessBuilder
@@ -861,7 +839,7 @@ func TestExecuteStage_CopyMetadataSuccessPath(t *testing.T) {
 	})
 
 	copyCalled := false
-	metadataPushExecutor = func(context.Context, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(context.Context, *shared.Deps, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		t.Fatal("metadata dir executor should not be called for copy-metadata stage flow")
 		return metadata.PushPlanResult{}, nil
 	}
@@ -895,7 +873,7 @@ func TestExecuteStage_CopyMetadataSuccessPath(t *testing.T) {
 	}
 
 	readinessCalled := false
-	readinessReportBuilder = func(_ context.Context, opts validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(_ context.Context, _ *shared.Deps, opts validatecli.ReadinessOptions) (validation.Report, error) {
 		readinessCalled = true
 		if opts.VersionID != "VERSION_123" {
 			t.Fatalf("expected readiness version VERSION_123, got %q", opts.VersionID)
@@ -935,9 +913,9 @@ func TestExecuteStage_CopyMetadataSuccessPath(t *testing.T) {
 	})
 
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:              "APP_123",
 		Version:            "2.4.0",
 		BuildID:            "BUILD_123",
@@ -989,12 +967,11 @@ func TestExecuteStage_CopyMetadataSuccessPath(t *testing.T) {
 }
 
 func TestExecuteStageAppliesRoutingCoverageBeforeReadiness(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataCopyExecutor := metadataCopyExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataCopyExecutor = origMetadataCopyExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
@@ -1011,7 +988,7 @@ func TestExecuteStageAppliesRoutingCoverageBeforeReadiness(t *testing.T) {
 	}
 	coverageCommitted := false
 	oldCoverageDeleted := false
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		if !coverageCommitted {
 			t.Fatal("readiness ran before routing coverage completed")
 		}
@@ -1049,8 +1026,8 @@ func TestExecuteStageAppliesRoutingCoverageBeforeReadiness(t *testing.T) {
 		}
 	})
 
-	releaseClientFactory = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
-	result, err := executeStage(context.Background(), runOptions{
+	d.Client = func() (*asc.Client, error) { return newReleaseTestClient(t), nil }
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:               "APP_123",
 		Version:             "2.4.0",
 		BuildID:             "BUILD_123",
@@ -1079,18 +1056,17 @@ func TestExecuteStageAppliesRoutingCoverageBeforeReadiness(t *testing.T) {
 }
 
 func TestExecuteStage_DryRunReadinessStepMarkedDryRun(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
-	metadataPushExecutor = func(_ context.Context, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(_ context.Context, _ *shared.Deps, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		return metadata.PushPlanResult{
 			AppID:     opts.AppID,
 			Version:   opts.Version,
@@ -1100,7 +1076,7 @@ func TestExecuteStage_DryRunReadinessStepMarkedDryRun(t *testing.T) {
 			Includes:  []string{"localizations"},
 		}, nil
 	}
-	readinessReportBuilder = func(_ context.Context, _ validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(_ context.Context, _ *shared.Deps, _ validatecli.ReadinessOptions) (validation.Report, error) {
 		return validation.Report{
 			AppID:     "APP_123",
 			VersionID: "VERSION_123",
@@ -1123,9 +1099,9 @@ func TestExecuteStage_DryRunReadinessStepMarkedDryRun(t *testing.T) {
 	})
 
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -1152,22 +1128,21 @@ func TestExecuteStage_DryRunReadinessStepMarkedDryRun(t *testing.T) {
 }
 
 func TestExecuteStage_DryRunDefersAttachWhenVersionWouldBeCreated(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
-	metadataPushExecutor = func(context.Context, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(context.Context, *shared.Deps, metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		t.Fatal("metadata executor should not run when dry-run defers version creation")
 		return metadata.PushPlanResult{}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		t.Fatal("readiness builder should not run when dry-run defers version creation")
 		return validation.Report{}, nil
 	}
@@ -1183,9 +1158,9 @@ func TestExecuteStage_DryRunDefersAttachWhenVersionWouldBeCreated(t *testing.T) 
 	})
 
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "9.9.9",
 		BuildID:        "BUILD_123",
@@ -1215,22 +1190,21 @@ func TestExecuteStage_DryRunDefersAttachWhenVersionWouldBeCreated(t *testing.T) 
 }
 
 func TestExecuteStage_TimeoutCancelsPipeline(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
-	metadataPushExecutor = func(ctx context.Context, _ metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(ctx context.Context, _ *shared.Deps, _ metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		<-ctx.Done()
 		return metadata.PushPlanResult{}, ctx.Err()
 	}
-	readinessReportBuilder = func(_ context.Context, _ validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(_ context.Context, _ *shared.Deps, _ validatecli.ReadinessOptions) (validation.Report, error) {
 		t.Fatal("readiness should not run when metadata step times out")
 		return validation.Report{}, nil
 	}
@@ -1246,9 +1220,9 @@ func TestExecuteStage_TimeoutCancelsPipeline(t *testing.T) {
 	})
 
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	_, err := executeStage(context.Background(), runOptions{
+	_, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",

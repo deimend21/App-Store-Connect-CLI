@@ -115,21 +115,33 @@ func AssetLibraryRows(payload []byte) ([]string, [][]string, error) {
 	return headers, rows, nil
 }
 
+// AssetLibraryImageUploadEvent contains only bounded, non-identifying diagnostics.
+type AssetLibraryImageUploadEvent struct {
+	Event      string `json:"event"`
+	Stage      string `json:"stage"`
+	Status     string `json:"status"`
+	DurationMs int64  `json:"durationMs"`
+	RetryCount int    `json:"retryCount"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+	ErrorCode  string `json:"errorCode,omitempty"`
+}
+
 // AssetLibraryImageUploadResult reports upload and processing independently.
 // ImageID is retained in a partial result after reservation.
 type AssetLibraryImageUploadResult struct {
-	ImageID       string `json:"imageId"`
-	Category      string `json:"category,omitempty"`
-	LibraryID     string `json:"libraryId"`
-	FileName      string `json:"fileName"`
-	FileSize      int64  `json:"fileSize"`
-	ReferenceName string `json:"referenceName,omitempty"`
-	Uploaded      bool   `json:"uploaded"`
-	Ready         bool   `json:"ready"`
-	State         string `json:"state,omitempty"`
-	SpecID        string `json:"specId,omitempty"`
-	Width         int    `json:"width,omitempty"`
-	Height        int    `json:"height,omitempty"`
+	Diagnostics   []AssetLibraryImageUploadEvent `json:"diagnostics,omitempty"`
+	ImageID       string                         `json:"imageId"`
+	Category      string                         `json:"category,omitempty"`
+	LibraryID     string                         `json:"libraryId"`
+	FileName      string                         `json:"fileName"`
+	FileSize      int64                          `json:"fileSize"`
+	ReferenceName string                         `json:"referenceName,omitempty"`
+	Uploaded      bool                           `json:"uploaded"`
+	Ready         bool                           `json:"ready"`
+	State         string                         `json:"state,omitempty"`
+	SpecID        string                         `json:"specId,omitempty"`
+	Width         int                            `json:"width,omitempty"`
+	Height        int                            `json:"height,omitempty"`
 }
 
 func assetLibraryImageUploadRows(result *AssetLibraryImageUploadResult) ([]string, [][]string) {
@@ -139,20 +151,61 @@ func assetLibraryImageUploadRows(result *AssetLibraryImageUploadResult) ([]strin
 // AssetLibraryVideoUploadResult reports upload and processing independently.
 // VideoID is retained in a partial result after reservation.
 type AssetLibraryVideoUploadResult struct {
-	VideoID       string `json:"videoId"`
-	Category      string `json:"category,omitempty"`
-	LibraryID     string `json:"libraryId"`
-	FileName      string `json:"fileName"`
-	FileSize      int64  `json:"fileSize"`
-	ReferenceName string `json:"referenceName,omitempty"`
-	Uploaded      bool   `json:"uploaded"`
-	Ready         bool   `json:"ready"`
-	State         string `json:"state,omitempty"`
-	SpecID        string `json:"specId,omitempty"`
-	Width         int    `json:"width,omitempty"`
-	Height        int    `json:"height,omitempty"`
+	VideoID              string `json:"videoId"`
+	Category             string `json:"category,omitempty"`
+	LibraryID            string `json:"libraryId"`
+	FileName             string `json:"fileName"`
+	FileSize             int64  `json:"fileSize"`
+	ReferenceName        string `json:"referenceName,omitempty"`
+	PreviewFrameTimeCode string `json:"previewFrameTimeCode,omitempty"`
+	Uploaded             bool   `json:"uploaded"`
+	Ready                bool   `json:"ready"`
+	State                string `json:"state,omitempty"`
+	SpecID               string `json:"specId,omitempty"`
+	Width                int    `json:"width,omitempty"`
+	Height               int    `json:"height,omitempty"`
+	// FailedPhase names the step a failed upload stopped in: reserve,
+	// transfer, commit or processing. It is empty when the upload finished.
+	FailedPhase string `json:"failedPhase,omitempty"`
 }
 
 func assetLibraryVideoUploadRows(result *AssetLibraryVideoUploadResult) ([]string, [][]string) {
 	return []string{"Video ID", "Library ID", "File", "Uploaded", "Ready", "State", "Dimensions"}, [][]string{{result.VideoID, result.LibraryID, result.FileName, fmt.Sprint(result.Uploaded), fmt.Sprint(result.Ready), result.State, fmt.Sprintf("%d x %d", result.Width, result.Height)}}
+}
+
+// AssetLibraryLocalizationUploadItem reports one file. State is would-upload,
+// pending, upload-failed, uploaded, placement-failed or placed.
+type AssetLibraryLocalizationUploadItem struct {
+	FileName       string `json:"fileName"`
+	FilePath       string `json:"filePath"`
+	State          string `json:"state"`
+	AssetID        string `json:"assetId,omitempty"`
+	PlacementID    string `json:"placementId,omitempty"`
+	PlacementState string `json:"placementState,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
+// AssetLibraryLocalizationUploadResult is the receipt for uploading media to the
+// library and placing it on a version localization. Upload and placement are
+// separate steps: Complete is true only when every file is placed and ordered.
+type AssetLibraryLocalizationUploadResult struct {
+	VersionLocalizationID string                               `json:"versionLocalizationId"`
+	LibraryID             string                               `json:"libraryId"`
+	PlacementType         string                               `json:"placementType"`
+	PlacementGroup        string                               `json:"placementGroup"`
+	MaxCount              int                                  `json:"maxCount"`
+	ExistingPlacementIDs  []string                             `json:"existingPlacementIds"`
+	DryRun                bool                                 `json:"dryRun"`
+	Complete              bool                                 `json:"complete"`
+	Ordered               bool                                 `json:"ordered"`
+	OrderingRequestID     string                               `json:"orderingRequestId,omitempty"`
+	Items                 []AssetLibraryLocalizationUploadItem `json:"items"`
+}
+
+func assetLibraryLocalizationUploadRows(result *AssetLibraryLocalizationUploadResult) ([]string, [][]string) {
+	rows := make([][]string, len(result.Items))
+	for i, item := range result.Items {
+		rows[i] = []string{item.FileName, item.State, result.PlacementGroup, item.AssetID, item.PlacementID, item.PlacementState, item.Error}
+	}
+	return []string{"File", "State", "Group", "Asset ID", "Placement ID", "Placement State", "Error"}, rows
 }

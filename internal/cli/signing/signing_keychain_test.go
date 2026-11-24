@@ -7,28 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/artifacts"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
-
-func TestSigningCommandIncludesKeychainInstall(t *testing.T) {
-	command := SigningCommand()
-	for _, subcommand := range command.Subcommands {
-		if subcommand == nil || subcommand.Name != "keychain" {
-			continue
-		}
-		for _, nested := range subcommand.Subcommands {
-			if nested != nil && nested.Name == "install" {
-				return
-			}
-		}
-	}
-	t.Fatal("expected signing keychain install subcommand")
-}
 
 func TestSigningKeychainInstallCommandThreadsOptions(t *testing.T) {
 	previous := installSigningKeychainFn
@@ -44,14 +31,15 @@ func TestSigningKeychainInstallCommandThreadsOptions(t *testing.T) {
 	signingKeychainInstallContext = func(ctx context.Context) (context.Context, func()) {
 		return context.WithValue(ctx, installContextKey{}, true), func() { contextStopped = true }
 	}
-	installSigningKeychainFn = func(ctx context.Context, options signingKeychainInstallOptions) (*asc.SigningKeychainInstallResult, error) {
+	installSigningKeychainFn = func(ctx context.Context, _ *shared.Deps, options signingKeychainInstallOptions) (*asc.SigningKeychainInstallResult, error) {
 		if wrapped, _ := ctx.Value(installContextKey{}).(bool); !wrapped {
 			t.Fatal("install context was not wrapped for termination signals")
 		}
 		got = options
 		return &asc.SigningKeychainInstallResult{Action: "installed"}, nil
 	}
-	command := SigningKeychainInstallCommand()
+	d, depsStdout, _ := newSigningTestDeps()
+	command := newSigningKeychainInstallCommand(d)
 	command.FlagSet.SetOutput(&strings.Builder{})
 	if err := command.Parse([]string{
 		"--identity", "App.p12",
@@ -60,13 +48,14 @@ func TestSigningKeychainInstallCommandThreadsOptions(t *testing.T) {
 		"--keychain-password-file", "keychain-password",
 		"--expected-certificate-sha256", strings.Repeat("a", 64),
 		"--add-to-search-list",
+		"--add-apple-intermediates",
 		"--confirm",
 		"--output", "json",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var runErr error
-	stdout, _ := captureOutput(t, func() { runErr = command.Run(context.Background()) })
+	runErr := command.Run(context.Background())
+	stdout := depsStdout.String()
 	if runErr != nil {
 		t.Fatal(runErr)
 	}
@@ -77,6 +66,8 @@ func TestSigningKeychainInstallCommandThreadsOptions(t *testing.T) {
 		KeychainPasswordPath:      "keychain-password",
 		ExpectedCertificateSHA256: strings.Repeat("A", 64),
 		AddToSearchList:           true,
+		AddAppleIntermediates:     true,
+		LockOnSleep:               true,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("options = %+v, want %+v", got, want)
@@ -93,7 +84,7 @@ func TestSigningKeychainInstallCommandValidatesBeforeExecution(t *testing.T) {
 	previous := installSigningKeychainFn
 	t.Cleanup(func() { installSigningKeychainFn = previous })
 	called := false
-	installSigningKeychainFn = func(context.Context, signingKeychainInstallOptions) (*asc.SigningKeychainInstallResult, error) {
+	installSigningKeychainFn = func(context.Context, *shared.Deps, signingKeychainInstallOptions) (*asc.SigningKeychainInstallResult, error) {
 		called = true
 		return nil, nil
 	}
@@ -108,14 +99,14 @@ func TestSigningKeychainInstallCommandValidatesBeforeExecution(t *testing.T) {
 		{name: "keychain required", args: []string{"--identity", "a", "--identity-password-file", "b", "--keychain-password-file", "c", "--confirm"}, wantErr: "--keychain is required"},
 		{name: "keychain password required", args: []string{"--identity", "a", "--identity-password-file", "b", "--keychain", "c", "--confirm"}, wantErr: "--keychain-password-file is required"},
 		{name: "confirm required", args: []string{"--identity", "a", "--identity-password-file", "b", "--keychain", "c", "--keychain-password-file", "d"}, wantErr: "--confirm is required"},
-		{name: "unexpected argument", args: []string{"--identity", "a", "--identity-password-file", "b", "--keychain", "c", "--keychain-password-file", "d", "--confirm", "extra"}, wantErr: "unexpected argument"},
 		{name: "invalid digest", args: []string{"--identity", "a", "--identity-password-file", "b", "--keychain", "c", "--keychain-password-file", "d", "--expected-certificate-sha256", "short", "--confirm"}, wantErr: "64-character hexadecimal"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			called = false
-			command := SigningKeychainInstallCommand()
+			d, _, stderr := newSigningTestDeps()
+			command := newSigningKeychainInstallCommand(d)
 			command.FlagSet.SetOutput(&strings.Builder{})
 			if err := command.Parse(test.args); err != nil {
 				t.Fatal(err)
@@ -123,6 +114,9 @@ func TestSigningKeychainInstallCommandValidatesBeforeExecution(t *testing.T) {
 			err := command.Run(context.Background())
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+			if line := stderr.String(); !strings.HasPrefix(line, "Error: ") || !strings.Contains(line, test.wantErr) {
+				t.Fatalf("deps stderr = %q, want the %q usage error", line, test.wantErr)
 			}
 			if !errors.Is(err, flag.ErrHelp) || shared.ClassifyUsageError(err) == "" {
 				t.Fatalf("error = %v, want classified usage error", err)
@@ -347,7 +341,7 @@ func TestExecuteSigningKeychainInstallKeepsSearchListUnchangedByDefault(t *testi
 	keychainPath := filepath.Join(t.TempDir(), "release.keychain-db")
 	resolvedKeychainPath := canonicalSigningKeychainTestPath(t, keychainPath)
 
-	var events []string
+	var events, searchList []string
 	result, err := executeSigningKeychainInstallWith(context.Background(), signingKeychainInstallOptions{
 		IdentityPath: identityPath, IdentityPasswordPath: identityPasswordPath,
 		KeychainPath: keychainPath, KeychainPasswordPath: keychainPasswordPath,
@@ -358,13 +352,14 @@ func TestExecuteSigningKeychainInstallKeepsSearchListUnchangedByDefault(t *testi
 		AcquireLock:       acquireSigningKeychainTestLock,
 		KeychainSearchList: func(context.Context) ([]string, error) {
 			events = append(events, "list")
-			return nil, nil
+			return append([]string(nil), searchList...), nil
 		},
 		SetKeychainSearchList: func(_ context.Context, paths []string) error {
 			events = append(events, "set")
 			if !reflect.DeepEqual(paths, []string{resolvedKeychainPath}) {
 				t.Fatalf("staged search list = %v", paths)
 			}
+			searchList = append([]string(nil), paths...)
 			return nil
 		},
 		CreateKeychain: func(context.Context, string, []byte) (bool, error) {
@@ -375,8 +370,9 @@ func TestExecuteSigningKeychainInstallKeepsSearchListUnchangedByDefault(t *testi
 			events = append(events, "import")
 			return nil
 		},
-		RemoveKeychainSearchEntry: func(context.Context, string) error {
+		RemoveKeychainSearchEntry: func(_ context.Context, path string) error {
 			events = append(events, "remove-search-entry")
+			searchList = slices.DeleteFunc(searchList, func(entry string) bool { return entry == path })
 			return nil
 		},
 		DeleteKeychain: func(context.Context, string) error { events = append(events, "delete"); return nil },
@@ -384,11 +380,11 @@ func TestExecuteSigningKeychainInstallKeepsSearchListUnchangedByDefault(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(events, []string{"list", "create", "set", "import", "remove-search-entry"}) {
+	if !reflect.DeepEqual(events, []string{"list", "create", "set", "import", "remove-search-entry", "list"}) {
 		t.Fatalf("events = %v", events)
 	}
-	if result.SearchListUpdated {
-		t.Fatalf("result = %+v, want unchanged search list", result)
+	if result.SearchListUpdated || len(searchList) != 0 {
+		t.Fatalf("result = %+v, search list = %v, want unchanged empty search list", result, searchList)
 	}
 }
 
@@ -403,6 +399,7 @@ func TestExecuteSigningKeychainInstallRemovesPreexistingSearchEntryByDefault(t *
 	keychainPath := filepath.Join(t.TempDir(), "release.keychain-db")
 	resolvedKeychainPath := canonicalSigningKeychainTestPath(t, keychainPath)
 	originalSearchList := []string{"login.keychain-db", resolvedKeychainPath, "system.keychain"}
+	searchList := append([]string(nil), originalSearchList...)
 
 	var events []string
 	result, err := executeSigningKeychainInstallWith(context.Background(), signingKeychainInstallOptions{
@@ -415,7 +412,7 @@ func TestExecuteSigningKeychainInstallRemovesPreexistingSearchEntryByDefault(t *
 		AcquireLock:       acquireSigningKeychainTestLock,
 		KeychainSearchList: func(context.Context) ([]string, error) {
 			events = append(events, "list")
-			return append([]string(nil), originalSearchList...), nil
+			return append([]string(nil), searchList...), nil
 		},
 		SetKeychainSearchList: func(_ context.Context, paths []string) error {
 			events = append(events, "set")
@@ -423,6 +420,7 @@ func TestExecuteSigningKeychainInstallRemovesPreexistingSearchEntryByDefault(t *
 			if !reflect.DeepEqual(paths, want) {
 				t.Fatalf("staged search list = %v, want %v", paths, want)
 			}
+			searchList = append([]string(nil), paths...)
 			return nil
 		},
 		CreateKeychain: func(context.Context, string, []byte) (bool, error) {
@@ -433,8 +431,9 @@ func TestExecuteSigningKeychainInstallRemovesPreexistingSearchEntryByDefault(t *
 			events = append(events, "import")
 			return nil
 		},
-		RemoveKeychainSearchEntry: func(context.Context, string) error {
+		RemoveKeychainSearchEntry: func(_ context.Context, path string) error {
 			events = append(events, "remove-search-entry")
+			searchList = slices.DeleteFunc(searchList, func(entry string) bool { return entry == path })
 			return nil
 		},
 		DeleteKeychain: func(context.Context, string) error { events = append(events, "delete"); return nil },
@@ -442,11 +441,99 @@ func TestExecuteSigningKeychainInstallRemovesPreexistingSearchEntryByDefault(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(events, []string{"list", "create", "remove-search-entry", "set", "import", "remove-search-entry"}) {
+	if !reflect.DeepEqual(events, []string{"list", "create", "remove-search-entry", "set", "import", "remove-search-entry", "list"}) {
 		t.Fatalf("events = %v", events)
 	}
-	if result.SearchListUpdated {
-		t.Fatalf("result = %+v, want unchanged search list", result)
+	if result.SearchListUpdated || !slices.Equal(searchList, []string{"login.keychain-db", "system.keychain"}) {
+		t.Fatalf("result = %+v, search list = %v, want only the destination removed", result, searchList)
+	}
+}
+
+func TestExecuteSigningKeychainInstallVerifiesSearchListChanges(t *testing.T) {
+	fixture := newSigningRunFixture(t, signingRunFixtureOptions{})
+	identityPath := filepath.Join(t.TempDir(), "App.p12")
+	identityPasswordPath := filepath.Join(t.TempDir(), "identity-password")
+	keychainPasswordPath := filepath.Join(t.TempDir(), "keychain-password")
+	writePrivateTestFile(t, identityPath, fixture.identity)
+	writePrivateTestFile(t, identityPasswordPath, []byte(fixture.password))
+	writePrivateTestFile(t, keychainPasswordPath, []byte("keychain-secret"))
+	importErr := errors.New("import failed")
+	readErr := errors.New("search list unavailable")
+	deleteErr := errors.New("delete failed")
+	tests := []struct {
+		name             string
+		importErr        error
+		isolationReadErr error
+		rollbackReadErr  error
+		deleteErr        error
+		rollbackMismatch bool
+		wantText         string
+		wantCauses       []error
+	}{
+		{name: "isolation silently leaves keychain searchable", wantText: "keychain remains in user search list"},
+		{name: "isolation read fails", isolationReadErr: readErr, wantText: "verify keychain isolation", wantCauses: []error{readErr}},
+		{name: "rollback silently keeps a changed list", importErr: importErr, rollbackMismatch: true, wantText: "keychain search list does not match original", wantCauses: []error{importErr}},
+		{name: "rollback read fails", importErr: importErr, rollbackReadErr: readErr, wantText: "verify restored keychain search list", wantCauses: []error{importErr, readErr}},
+		{name: "rollback deletion fails", importErr: importErr, deleteErr: deleteErr, wantText: "delete keychain", wantCauses: []error{importErr, deleteErr}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			keychainPath := filepath.Join(t.TempDir(), "release.keychain-db")
+			var searchList []string
+			var exists, deleteCalled, restoreCalled, rollbackVerified bool
+			result, err := executeSigningKeychainInstallWith(context.Background(), signingKeychainInstallOptions{
+				IdentityPath: identityPath, IdentityPasswordPath: identityPasswordPath,
+				KeychainPath: keychainPath, KeychainPasswordPath: keychainPasswordPath,
+			}, signingKeychainInstallDeps{
+				GOOS: "darwin", SecurityAvailable: true,
+				Now: func() time.Time { return fixture.now }, AcquireLock: acquireSigningKeychainTestLock,
+				CreateKeychain: func(context.Context, string, []byte) (bool, error) { exists = true; return true, nil },
+				ImportIdentity: func(context.Context, string, []byte, []byte, []byte, string) error { return test.importErr },
+				KeychainSearchList: func(context.Context) ([]string, error) {
+					if deleteCalled {
+						rollbackVerified = true
+						return append([]string(nil), searchList...), test.rollbackReadErr
+					}
+					if exists && test.isolationReadErr != nil {
+						return nil, test.isolationReadErr
+					}
+					return append([]string(nil), searchList...), nil
+				},
+				SetKeychainSearchList: func(_ context.Context, paths []string) error {
+					searchList = append([]string(nil), paths...)
+					if deleteCalled {
+						restoreCalled = true
+						if test.rollbackMismatch {
+							searchList = []string{"unexpected.keychain-db"}
+						}
+					}
+					return nil
+				},
+				RemoveKeychainSearchEntry: func(context.Context, string) error { return nil },
+				DeleteKeychain: func(context.Context, string) error {
+					deleteCalled = true
+					if test.deleteErr == nil {
+						exists = false
+						searchList = nil
+					}
+					return test.deleteErr
+				},
+			})
+			if result != nil || err == nil || !strings.Contains(err.Error(), test.wantText) {
+				t.Fatalf("result=%+v error=%v, want no receipt and %q", result, err, test.wantText)
+			}
+			for _, cause := range test.wantCauses {
+				if !errors.Is(err, cause) {
+					t.Errorf("error=%v does not preserve %v", err, cause)
+				}
+			}
+			if !deleteCalled || !restoreCalled || !rollbackVerified || exists != (test.deleteErr != nil) {
+				t.Fatalf("rollback: deleted=%v restored=%v verified=%v keychainExists=%v", deleteCalled, restoreCalled, rollbackVerified, exists)
+			}
+			if test.importErr == nil && !strings.Contains(err.Error(), "new keychain removed and original user search list restored") {
+				t.Fatalf("error=%v, want verified rollback outcome", err)
+			}
+		})
 	}
 }
 
@@ -488,6 +575,96 @@ func TestExecuteSigningKeychainInstallRollsBackAfterImportFailure(t *testing.T) 
 	}, deps)
 	if err == nil || !strings.Contains(err.Error(), "import failed") || !deleted {
 		t.Fatalf("error = %v deleted=%v", err, deleted)
+	}
+}
+
+func TestExecuteSigningKeychainInstallAppleIntermediates(t *testing.T) {
+	fixture := newSigningRunFixture(t, signingRunFixtureOptions{})
+	identityPath := filepath.Join(t.TempDir(), "App.p12")
+	identityPasswordPath := filepath.Join(t.TempDir(), "identity-password")
+	keychainPasswordPath := filepath.Join(t.TempDir(), "keychain-password")
+	writePrivateTestFile(t, identityPath, fixture.identity)
+	writePrivateTestFile(t, identityPasswordPath, []byte(fixture.password))
+	writePrivateTestFile(t, keychainPasswordPath, []byte("keychain-secret"))
+	inspection, err := inspectSigningRunIdentity(fixture.identity, []byte(fixture.password), fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuer := inspection.Certificate
+	expired := *issuer
+	expired.NotAfter = fixture.now.Add(-time.Hour)
+	_, unrelated := makeSigningRunCertificate(t, "Unrelated", "", fixture.now)
+	issuerSHA256 := signingCertificateSHA256(issuer)
+
+	tests := []struct {
+		name       string
+		flag       bool
+		embedded   []artifacts.AppleIntermediateCertificate
+		importErr  error
+		wantEvents []string
+		wantResult []asc.SigningKeychainIntermediate
+		wantStderr string
+		wantErr    string
+	}{
+		{name: "flag off", embedded: []artifacts.AppleIntermediateCertificate{{Name: "issuer", Certificate: issuer}}, wantEvents: []string{"create", "set", "import"}},
+		{name: "issuer added before identity import", flag: true, embedded: []artifacts.AppleIntermediateCertificate{{Name: "unrelated", Certificate: unrelated}, {Name: "issuer", Certificate: issuer}}, wantEvents: []string{"create", "set", "add-certificate", "import"}, wantResult: []asc.SigningKeychainIntermediate{{Name: "issuer", SHA256: issuerSHA256, Status: "added"}}},
+		{name: "expired issuer skipped", flag: true, embedded: []artifacts.AppleIntermediateCertificate{{Name: "issuer", Certificate: &expired}}, wantEvents: []string{"create", "set", "import"}, wantResult: []asc.SigningKeychainIntermediate{{Name: "issuer", SHA256: issuerSHA256, Status: "skipped-expired"}}, wantStderr: "Warning: skipping expired Apple intermediate certificate issuer"},
+		{name: "no matching issuer", flag: true, embedded: []artifacts.AppleIntermediateCertificate{{Name: "unrelated", Certificate: unrelated}}, wantEvents: []string{"create", "set", "import"}, wantStderr: `Warning: no embedded Apple intermediate certificate matches the identity issuer "Distribution"`},
+		{name: "failed import rolls back", flag: true, embedded: []artifacts.AppleIntermediateCertificate{{Name: "issuer", Certificate: issuer}}, importErr: errors.New("add failed"), wantEvents: []string{"create", "set", "add-certificate", "delete", "set"}, wantErr: "import Apple intermediate certificate issuer: add failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var events []string
+			var stderrBuffer strings.Builder
+			deps := signingKeychainInstallDeps{
+				GOOS:              "darwin",
+				SecurityAvailable: true,
+				Now:               func() time.Time { return fixture.now },
+				Stderr:            &stderrBuffer,
+				AcquireLock:       acquireSigningKeychainTestLock,
+				CreateKeychain: func(context.Context, string, []byte) (bool, error) {
+					events = append(events, "create")
+					return true, nil
+				},
+				KeychainSearchList:        func(context.Context) ([]string, error) { return nil, nil },
+				SetKeychainSearchList:     func(context.Context, []string) error { events = append(events, "set"); return nil },
+				RemoveKeychainSearchEntry: func(context.Context, string) error { return nil },
+				DeleteKeychain:            func(context.Context, string) error { events = append(events, "delete"); return nil },
+				ImportIdentity: func(context.Context, string, []byte, []byte, []byte, string) error {
+					events = append(events, "import")
+					return nil
+				},
+				AppleIntermediates: func() ([]artifacts.AppleIntermediateCertificate, error) { return test.embedded, nil },
+				ImportCertificate: func(_ context.Context, path string, der []byte) error {
+					events = append(events, "add-certificate")
+					if filepath.Base(path) != "release.keychain-db" || !reflect.DeepEqual(der, issuer.Raw) {
+						t.Fatalf("certificate import path=%q", path)
+					}
+					return test.importErr
+				},
+			}
+			result, err := executeSigningKeychainInstallWith(context.Background(), signingKeychainInstallOptions{
+				IdentityPath: identityPath, IdentityPasswordPath: identityPasswordPath,
+				KeychainPath: filepath.Join(t.TempDir(), "release.keychain-db"), KeychainPasswordPath: keychainPasswordPath,
+				AddToSearchList: true, AddAppleIntermediates: test.flag,
+			}, deps)
+			stderr := stderrBuffer.String()
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("error = %v, want %q", err, test.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			} else if !reflect.DeepEqual(result.Intermediates, test.wantResult) {
+				t.Fatalf("intermediates = %+v, want %+v", result.Intermediates, test.wantResult)
+			}
+			if !reflect.DeepEqual(events, test.wantEvents) {
+				t.Fatalf("events = %v, want %v", events, test.wantEvents)
+			}
+			if !strings.Contains(stderr, test.wantStderr) || (test.wantStderr == "" && stderr != "") {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+		})
 	}
 }
 

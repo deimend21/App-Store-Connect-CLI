@@ -1,6 +1,7 @@
 package iap
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
@@ -35,7 +36,7 @@ func TestConsumeResolvedIAPPricePage_DateBoundaries(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.now.Format(time.RFC3339), func(t *testing.T) {
 			candidates := make(map[string]resolvedIAPPriceCandidate)
-			if err := consumeResolvedIAPPricePage(candidates, page, test.now); err != nil {
+			if err := consumeResolvedIAPPricePage(candidates, page, test.now, false); err != nil {
 				t.Fatalf("consumeResolvedIAPPricePage() error = %v", err)
 			}
 			if got := candidates["USA"].row.CustomerPrice; got != test.want {
@@ -61,7 +62,7 @@ func TestConsumeResolvedIAPPricePage_PrefersManualSameDay(t *testing.T) {
 	}
 
 	candidates := make(map[string]resolvedIAPPriceCandidate)
-	if err := consumeResolvedIAPPricePage(candidates, page, now); err != nil {
+	if err := consumeResolvedIAPPricePage(candidates, page, now, false); err != nil {
 		t.Fatalf("consumeResolvedIAPPricePage() error = %v", err)
 	}
 
@@ -89,14 +90,68 @@ func TestConsumeResolvedIAPPricePage_SkipsFutureAndExpiredRows(t *testing.T) {
 		}),
 	}
 
-	candidates := make(map[string]resolvedIAPPriceCandidate)
-	if err := consumeResolvedIAPPricePage(candidates, page, now); err != nil {
-		t.Fatalf("consumeResolvedIAPPricePage() error = %v", err)
+	for _, included := range []json.RawMessage{page.Included, nil} {
+		page.Included = included
+		candidates := make(map[string]resolvedIAPPriceCandidate)
+		if err := consumeResolvedIAPPricePage(candidates, page, now, true); err != nil {
+			t.Fatalf("consumeResolvedIAPPricePage() error = %v", err)
+		}
+
+		if len(candidates) != 0 {
+			t.Fatalf("expected no resolved rows, got %+v", candidates)
+		}
+	}
+}
+
+// ASC encodes the price tier ("p") in IDs, and the same tier exists in every territory.
+func TestConsumeResolvedIAPPricePage_SameTierInSeveralTerritories(t *testing.T) {
+	now := time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
+	const iapID = "6758862939"
+	pricePoint := func(territory string) string {
+		return ascEncodedID(t, map[string]any{"s": iapID, "t": territory, "p": "10054"})
+	}
+	price := func(territory string) asc.Resource[asc.InAppPurchasePriceAttributes] {
+		id := ascEncodedID(t, map[string]any{"s": iapID, "t": territory, "p": "10054", "sd": 0, "ed": 0})
+		resource := newResolvedIAPPriceResource(id, pricePoint(territory), "", "", true)
+		resource.Relationships = mustMarshalResolvedIAPValue(map[string]any{
+			"territory":               map[string]any{"data": map[string]any{"type": "territories", "id": territory}},
+			"inAppPurchasePricePoint": map[string]any{"data": map[string]any{"type": "inAppPurchasePricePoints", "id": pricePoint(territory)}},
+		})
+		return resource
 	}
 
-	if len(candidates) != 0 {
-		t.Fatalf("expected no resolved rows, got %+v", candidates)
+	page := &asc.InAppPurchasePricesResponse{
+		Data: []asc.Resource[asc.InAppPurchasePriceAttributes]{price("IND"), price("DEU")},
+		Included: mustMarshalResolvedIAPJSON(t, []map[string]any{
+			inAppPurchasePricePointIncluded(pricePoint("IND"), "185.0", "146.81"),
+			inAppPurchasePricePointIncluded(pricePoint("DEU"), "4.39", "3.12"),
+			resolvedTerritoryIncluded("IND", "INR"),
+			resolvedTerritoryIncluded("DEU", "EUR"),
+		}),
 	}
+
+	for _, relationships := range []bool{true, false} {
+		if !relationships {
+			for i := range page.Data {
+				page.Data[i].Relationships = nil
+			}
+		}
+		candidates := make(map[string]resolvedIAPPriceCandidate)
+		if err := consumeResolvedIAPPricePage(candidates, page, now, true); err != nil {
+			t.Fatalf("consumeResolvedIAPPricePage() error = %v", err)
+		}
+		for territory, want := range map[string]string{"IND": "185.0 INR", "DEU": "4.39 EUR"} {
+			row := candidates[territory].row
+			if got := row.CustomerPrice + " " + row.Currency; got != want {
+				t.Fatalf("relationships=%v %s = %q, want %q", relationships, territory, got, want)
+			}
+		}
+	}
+}
+
+func ascEncodedID(t *testing.T, payload map[string]any) string {
+	t.Helper()
+	return base64.RawURLEncoding.EncodeToString(mustMarshalResolvedIAPJSON(t, payload))
 }
 
 func newResolvedIAPPriceResource(

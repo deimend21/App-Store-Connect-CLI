@@ -59,16 +59,17 @@ type ManagedExport struct {
 	inventory     exportInventory
 	identity      *rootfs.FileIdentity
 	legacyWindows bool
+	deps          *shared.Deps
 }
 
 // PrepareExport rejects malformed ownership and target conflicts before callers
 // write ordinary metadata. Unselected scopes retain their existing ownership.
-func PrepareExport(root rootfs.Root, files []ExportFile, options ExportOptions) (*ManagedExport, error) {
+func PrepareExport(d *shared.Deps, root rootfs.Root, files []ExportFile, options ExportOptions) (*ManagedExport, error) {
 	files = append([]ExportFile(nil), files...)
 	for i := range files {
 		files[i].Path = filepath.ToSlash(files[i].Path)
 	}
-	p := &ManagedExport{root: root, files: files, options: options, inventory: exportInventory{Schema: 1}}
+	p := &ManagedExport{root: root, files: files, options: options, inventory: exportInventory{Schema: 1}, deps: d}
 	if !options.Clip && !options.Previews {
 		return p, nil
 	}
@@ -106,8 +107,24 @@ func PrepareExport(root rootfs.Root, files []ExportFile, options ExportOptions) 
 			return nil, fmt.Errorf("invalid selected asset export path %q", f.Path)
 		}
 	}
-	if err := CheckExportTargets(root, files, options.Overwrite); err != nil {
+	if err := CheckExportTargets(root, files, true); err != nil {
 		return nil, err
+	}
+	if !options.Overwrite {
+		var differing []string
+		for _, f := range files {
+			actual, err := p.readFingerprint(f.Path)
+			if err != nil {
+				return nil, err
+			}
+			// The Windows fallback publishes create-only, so any existing file blocks it.
+			if actual != nil && (runtime.GOOS == "windows" || !p.unchanged(f, actual)) {
+				differing = append(differing, f.Path)
+			}
+		}
+		if len(differing) > 0 {
+			return nil, &DifferingTargetsError{Paths: differing}
+		}
 	}
 	if runtime.GOOS == "windows" {
 		if identity != nil {
@@ -116,6 +133,32 @@ func PrepareExport(root rootfs.Root, files []ExportFile, options ExportOptions) 
 		p.legacyWindows = true
 	}
 	return p, nil
+}
+
+// DifferingTargetsError lists existing destinations, relative to the export
+// root, that an export without Overwrite would have to replace.
+type DifferingTargetsError struct {
+	Paths []string
+}
+
+func (e *DifferingTargetsError) Error() string {
+	return fmt.Sprintf("refusing to overwrite existing files that differ: %s", strings.Join(e.Paths, ", "))
+}
+
+func (e *DifferingTargetsError) Unwrap() error { return os.ErrExist }
+
+// unchanged reports whether an existing destination can be refreshed without
+// Overwrite: it already holds the bytes this export writes, or it is this
+// export's own earlier output, untouched since. Replacing either loses nothing.
+func (p *ManagedExport) unchanged(f ExportFile, actual *exportFingerprint) bool {
+	if index := p.index(f.Path); index >= 0 && matchesFingerprint(actual, p.inventory.Files[index]) {
+		return true
+	}
+	if f.Text == nil {
+		return false
+	}
+	planned, err := fingerprint(strings.NewReader(*f.Text), exportPathLimit(f.Path))
+	return err == nil && planned == *actual
 }
 
 func (p *ManagedExport) selected(scope string) bool {
@@ -285,7 +328,7 @@ func (p *ManagedExport) Write(ctx context.Context) ([]string, []string, error) {
 		return nil, nil, nil
 	}
 	if p.legacyWindows {
-		paths, err := WriteExport(ctx, p.root, p.files, p.options.Overwrite)
+		paths, err := WriteExport(ctx, p.deps, p.root, p.files, p.options.Overwrite)
 		return paths, []string{"owned asset cleanup is unavailable on Windows; stale exported files are preserved and repeated exports are not guaranteed to round-trip"}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -308,7 +351,7 @@ func (p *ManagedExport) Write(ctx context.Context) ([]string, []string, error) {
 		if err != nil {
 			return written, warnings, err
 		}
-		if actual != nil && !p.options.Overwrite {
+		if actual != nil && !p.options.Overwrite && !p.unchanged(f, actual) {
 			return written, warnings, fmt.Errorf("export %s: destination appeared after preflight: %w", f.Path, os.ErrExist)
 		}
 		index := p.index(f.Path)
@@ -317,7 +360,7 @@ func (p *ManagedExport) Write(ctx context.Context) ([]string, []string, error) {
 			warnings = append(warnings, "preserving locally edited asset "+f.Path)
 			continue
 		}
-		staged, fp, closeStage, err := stageExport(ctx, f)
+		staged, fp, closeStage, err := stageExport(ctx, p.deps, f)
 		if err != nil {
 			return written, warnings, fmt.Errorf("export %s: %w", f.Path, err)
 		}
@@ -413,7 +456,7 @@ func (p *ManagedExport) remove(path string, fp exportFingerprint) error {
 	return p.root.RemoveFileIfSHA256Same(path, fp.Size, digest)
 }
 
-func stageExport(ctx context.Context, f ExportFile) (io.Reader, exportFingerprint, func(), error) {
+func stageExport(ctx context.Context, d *shared.Deps, f ExportFile) (io.Reader, exportFingerprint, func(), error) {
 	if f.Text != nil {
 		data := []byte(*f.Text)
 		fp, err := fingerprint(bytes.NewReader(data), exportPathLimit(f.Path))
@@ -425,9 +468,9 @@ func stageExport(ctx context.Context, f ExportFile) (io.Reader, exportFingerprin
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	temp := filepath.Join(dir, "asset")
-	c, cancel := shared.ContextWithUploadTimeout(shared.ContextWithoutTimeout(ctx))
+	c, cancel := d.UploadTimeout(shared.ContextWithoutTimeout(ctx))
 	defer cancel()
-	if _, _, err := assets.DownloadMediaURL(c, f.URL, temp, false); err != nil {
+	if _, _, err := assets.DownloadMediaURL(c, d, f.URL, temp, false); err != nil {
 		cleanup()
 		return nil, exportFingerprint{}, nil, errors.New("media download failed (URL omitted)")
 	}

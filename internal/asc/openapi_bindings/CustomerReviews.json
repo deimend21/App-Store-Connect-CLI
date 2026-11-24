@@ -1,0 +1,11 @@
+{
+  "tag": "CustomerReviews",
+  "file": "customer_reviews_gen.go",
+  "types": [
+    "CustomerReviewResponse"
+  ],
+  "operations": [
+    {"operation":"customerReviews_getInstance","name":"GetCustomerReview","params":["reviewID"],"check":"require","checkFirst":true,"options":"ReviewOption","query":"buildCustomerReviewQuery","single":true},
+    {"operation":"customerReviews_response_getToOneRelated","name":"GetCustomerReviewResponseForReview","params":["reviewID"],"check":"require","response":"CustomerReviewResponseResponse"}
+  ]
+}

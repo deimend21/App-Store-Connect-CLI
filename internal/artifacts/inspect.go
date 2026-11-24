@@ -41,7 +41,9 @@ type IPAManifest struct {
 	Version          string
 	BuildNumber      string
 	MinimumOSVersion string
-	Platforms        []string
+	// SDKName is the top-level app's DTSDKName, such as iphoneos26.4.
+	SDKName   string
+	Platforms []string
 	// DeviceFamilies lists the top-level app's UIDeviceFamily values (1 is
 	// iPhone, 2 is iPad). It is nil when the key is absent or unreadable.
 	DeviceFamilies   []int
@@ -124,6 +126,7 @@ type bundlePlist struct {
 	MinimumSystem    string   `plist:"LSMinimumSystemVersion"`
 	Platforms        []string `plist:"CFBundleSupportedPlatforms"`
 	Platform         string   `plist:"DTPlatformName"`
+	SDKName          string   `plist:"DTSDKName"`
 	// DeviceFamily is decoded loosely so an unusual UIDeviceFamily value never
 	// makes the rest of the Info.plist unreadable.
 	DeviceFamily any `plist:"UIDeviceFamily"`
@@ -135,13 +138,6 @@ type IPAOptions struct {
 	IncludeProfile      bool
 	// VerifySignature verifies the main executable's code signature offline.
 	VerifySignature bool
-}
-
-// InspectIPA reads a bounded IPA zip and returns a metadata manifest. A missing
-// embedded profile is reported as unsigned. The main executable's signer
-// identity is read from its code signature, which is not verified.
-func InspectIPA(source io.ReaderAt, size int64, includeEntitlements, includeProfile bool) (IPAManifest, error) {
-	return InspectIPAWithOptions(source, size, IPAOptions{IncludeEntitlements: includeEntitlements, IncludeProfile: includeProfile})
 }
 
 // InspectIPAWithOptions is InspectIPA with optional signature verification
@@ -434,6 +430,7 @@ func manifestFromPlist(parsed bundlePlist) IPAManifest {
 		Version:          parsed.Version,
 		BuildNumber:      parsed.BuildNumber,
 		MinimumOSVersion: firstNonEmpty(parsed.MinimumOSVersion, parsed.MinimumSystem),
+		SDKName:          parsed.SDKName,
 		Platforms:        platforms,
 		DeviceFamilies:   families,
 	}
@@ -643,14 +640,6 @@ func stringValue(value any) string {
 type PKGOptions struct {
 	// VerifySignature verifies the package signature offline.
 	VerifySignature bool
-}
-
-// InspectPKG reads PackageInfo from a flat xar component package, or the
-// Distribution and embedded component packages of a product archive. The
-// signer identity is read from the package signature certificates, which are
-// not verified.
-func InspectPKG(source io.ReaderAt, size int64) (PKGManifest, error) {
-	return inspectPKG(source, size, nil)
 }
 
 // InspectPKGWithOptions is InspectPKG with optional signature verification

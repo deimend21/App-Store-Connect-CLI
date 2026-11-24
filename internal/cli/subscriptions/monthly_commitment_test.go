@@ -71,11 +71,11 @@ func TestNormalizeSubscriptionPlanTypeRejectsUnknown(t *testing.T) {
 
 func TestFilterMonthlyCommitmentTerritories(t *testing.T) {
 	eligible, excluded := filterMonthlyCommitmentTerritories([]string{"USA", "NOR", "SGP", "DEU", "USA"})
-	if got := strings.Join(eligible, ","); got != "NOR,DEU" {
-		t.Fatalf("eligible = %q, want NOR,DEU", got)
+	if got := strings.Join(eligible, ","); got != "NOR,SGP,DEU" {
+		t.Fatalf("eligible = %q, want NOR,SGP,DEU", got)
 	}
-	if got := strings.Join(excluded, ","); got != "USA,SGP" {
-		t.Fatalf("excluded = %q, want USA,SGP", got)
+	if got := strings.Join(excluded, ","); got != "USA" {
+		t.Fatalf("excluded = %q, want USA", got)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestValidateMonthlyCommitmentPriceRange(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateMonthlyCommitmentPriceRange(test.monthly, test.upfront)
+			err := validateMonthlyCommitmentPriceRange("sub-1", "NOR", test.monthly, test.upfront)
 			if test.wantErrPart == "" {
 				if err != nil {
 					t.Fatalf("validateMonthlyCommitmentPriceRange() error = %v", err)

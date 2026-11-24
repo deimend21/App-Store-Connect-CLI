@@ -1,6 +1,7 @@
 package asc
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -63,6 +64,9 @@ type AssetUploadFailureItem struct {
 	FileName string `json:"fileName,omitempty"`
 	FilePath string `json:"filePath,omitempty"`
 	Error    string `json:"error"`
+	// FailedPhase names the upload step the file stopped in (reserve,
+	// transfer, commit or processing) when the failure came from one.
+	FailedPhase string `json:"failedPhase,omitempty"`
 }
 
 // AppScreenshotUploadResult represents screenshot upload output.
@@ -115,6 +119,7 @@ type AppPreviewUploadResult struct {
 	VersionLocalizationID string                   `json:"versionLocalizationId"`
 	SetID                 string                   `json:"setId"`
 	PreviewType           string                   `json:"previewType"`
+	PreviewFrameTimeCode  string                   `json:"previewFrameTimeCode,omitempty"`
 	DryRun                bool                     `json:"dryRun,omitempty"`
 	Results               []AssetUploadResultItem  `json:"results"`
 	Failures              []AssetUploadFailureItem `json:"failures,omitempty"`
@@ -145,10 +150,37 @@ type CustomProductPagePreviewUploadResult struct {
 	Failures                        []AssetUploadFailureItem `json:"failures,omitempty"`
 }
 
+// ExperimentTreatmentLocalizationPreviewUploadResult represents PPO treatment localization preview upload output.
+type ExperimentTreatmentLocalizationPreviewUploadResult struct {
+	ExperimentTreatmentLocalizationID string                   `json:"experimentTreatmentLocalizationId"`
+	SetID                             string                   `json:"setId"`
+	PreviewType                       string                   `json:"previewType"`
+	Results                           []AssetUploadResultItem  `json:"results"`
+	Failures                          []AssetUploadFailureItem `json:"failures,omitempty"`
+}
+
 // AssetDeleteResult represents deletion output for assets.
 type AssetDeleteResult struct {
 	ID      string `json:"id"`
 	Deleted bool   `json:"deleted"`
+}
+
+// ScreenshotDeleteResult is the screenshots delete --prune-library receipt.
+type ScreenshotDeleteResult struct {
+	ID           string                        `json:"id"`
+	Deleted      bool                          `json:"deleted"`
+	LibraryImage *ScreenshotLibraryImageResult `json:"libraryImage,omitempty"`
+}
+
+// ScreenshotLibraryImageResult reports what happened to the Asset Library
+// image that shares a deleted screenshot's ID: deleted, kept (another
+// placement uses it), absent (no such image), checkFailed (kept because the
+// placement check gave no clear answer), or deleteFailed (the image DELETE
+// failed). Error carries the failure for the last two.
+type ScreenshotLibraryImageResult struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
 }
 
 func appScreenshotSetsRows(resp *AppScreenshotSetsResponse) ([]string, [][]string) {
@@ -419,6 +451,16 @@ func customProductPagePreviewUploadResultMainRows(result *CustomProductPagePrevi
 	return headers, rows
 }
 
+func experimentTreatmentLocalizationPreviewUploadResultMainRows(result *ExperimentTreatmentLocalizationPreviewUploadResult) ([]string, [][]string) {
+	headers := []string{"Localization ID", "Set ID", "Preview Type"}
+	rows := [][]string{{
+		SanitizeTerminalText(result.ExperimentTreatmentLocalizationID),
+		SanitizeTerminalText(result.SetID),
+		SanitizeTerminalText(result.PreviewType),
+	}}
+	return headers, rows
+}
+
 func assetUploadResultItemRows(results []AssetUploadResultItem) ([]string, [][]string) {
 	headers := []string{"File Name", "Asset ID", "State"}
 	rows := make([][]string, 0, len(results))
@@ -503,4 +545,24 @@ func assetDeleteResultRows(result *AssetDeleteResult) ([]string, [][]string) {
 	headers := []string{"ID", "Deleted"}
 	rows := [][]string{{SanitizeTerminalText(result.ID), fmt.Sprintf("%t", result.Deleted)}}
 	return headers, rows
+}
+
+func screenshotDeleteResultRows(result *ScreenshotDeleteResult) ([]string, [][]string) {
+	headers := []string{"ID", "Deleted", "Library Image"}
+	libraryImage := ""
+	if result.LibraryImage != nil {
+		libraryImage = result.LibraryImage.State
+	}
+	rows := [][]string{{SanitizeTerminalText(result.ID), fmt.Sprintf("%t", result.Deleted), SanitizeTerminalText(libraryImage)}}
+	return headers, rows
+}
+
+// AppScreenshotRows renders table rows for a raw appScreenshots collection.
+func AppScreenshotRows(payload []byte) ([]string, [][]string, error) {
+	var resp AppScreenshotsResponse
+	if err := json.Unmarshal(payload, &resp); err != nil {
+		return nil, nil, fmt.Errorf("invalid appScreenshots response: %w", err)
+	}
+	headers, rows := appScreenshotsRows(&resp)
+	return headers, rows, nil
 }

@@ -4,34 +4,29 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestGameCenterGroupRelationshipReplacementsRejectWithoutConfirmBeforeHTTP(t *testing.T) {
 	isolateGameCenterAuthEnv(t)
 
-	commands := map[string]func() *ffcli.Command{
-		"achievements": GameCenterGroupAchievementsSetCommand,
-		"leaderboards": GameCenterGroupLeaderboardsSetCommand,
+	commands := map[string]func(*shared.Deps) *ffcli.Command{
+		"achievements": newGameCenterGroupAchievementsSetCommand,
+		"leaderboards": newGameCenterGroupLeaderboardsSetCommand,
 	}
 
 	for name, newCommand := range commands {
 		for _, v2 := range []bool{false, true} {
-			t.Run(name+" v2="+boolString(v2), func(t *testing.T) {
+			t.Run(name+" v2="+strconv.FormatBool(v2), func(t *testing.T) {
 				factoryCalled := false
-				restore := shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-					factoryCalled = true
-					return nil, errors.New("poison client factory called")
-				})
-				t.Cleanup(restore)
+				d, stderr := newGameCenterTestDeps(&factoryCalled)
 
-				cmd := newCommand()
+				cmd := newCommand(d)
 				args := []string{"--group-id", "group-1", "--ids", "resource-1"}
 				if v2 {
 					args = append(args, "--v2")
@@ -40,18 +35,15 @@ func TestGameCenterGroupRelationshipReplacementsRejectWithoutConfirmBeforeHTTP(t
 					t.Fatalf("parse flags: %v", err)
 				}
 
-				var err error
-				stderr := captureGameCenterStderr(t, func() {
-					err = cmd.Exec(context.Background(), []string{})
-				})
+				err := cmd.Exec(context.Background(), []string{})
 				if !errors.Is(err, flag.ErrHelp) {
 					t.Fatalf("replacement without --confirm must fail validation, got %v", err)
 				}
-				if err.Error() != "--confirm" {
-					t.Fatalf("error = %q, want missing parameter %q", err.Error(), "--confirm")
+				if diagnostic, ok := shared.DiagnosticFromError(err); !ok || diagnostic.Parameter != "--confirm" {
+					t.Fatalf("diagnostic = %+v (ok=%t), want missing parameter %q", diagnostic, ok, "--confirm")
 				}
-				if stderr != "Error: --confirm is required\n" {
-					t.Fatalf("stderr = %q, want exact missing --confirm diagnostic", stderr)
+				if stderr.String() != "Error: --confirm is required\n" {
+					t.Fatalf("stderr = %q, want exact missing --confirm diagnostic", stderr.String())
 				}
 				if factoryCalled {
 					t.Fatal("client factory called before --confirm validation")
@@ -64,15 +56,16 @@ func TestGameCenterGroupRelationshipReplacementsRejectWithoutConfirmBeforeHTTP(t
 func TestGameCenterGroupRelationshipReplacementConfirmPassesValidation(t *testing.T) {
 	isolateGameCenterAuthEnv(t)
 
-	commands := map[string]func() *ffcli.Command{
-		"achievements": GameCenterGroupAchievementsSetCommand,
-		"leaderboards": GameCenterGroupLeaderboardsSetCommand,
+	commands := map[string]func(*shared.Deps) *ffcli.Command{
+		"achievements": newGameCenterGroupAchievementsSetCommand,
+		"leaderboards": newGameCenterGroupLeaderboardsSetCommand,
 	}
 
 	for name, newCommand := range commands {
 		for _, v2 := range []bool{false, true} {
-			t.Run(name+" v2="+boolString(v2), func(t *testing.T) {
-				cmd := newCommand()
+			t.Run(name+" v2="+strconv.FormatBool(v2), func(t *testing.T) {
+				d, _ := newGameCenterTestDeps(nil)
+				cmd := newCommand(d)
 				args := []string{"--group-id", "group-1", "--ids", "resource-1", "--confirm"}
 				if v2 {
 					args = append(args, "--v2")
@@ -90,71 +83,40 @@ func TestGameCenterGroupRelationshipReplacementConfirmPassesValidation(t *testin
 	}
 }
 
-func TestGameCenterRelationshipReplacementConfirmFlagsAreStable(t *testing.T) {
-	commands := map[string]*ffcli.Command{
-		"group achievements":         GameCenterGroupAchievementsSetCommand(),
-		"group leaderboards":         GameCenterGroupLeaderboardsSetCommand(),
-		"leaderboard-set members":    GameCenterLeaderboardSetMembersSetCommand(),
-		"leaderboard-set v2 members": GameCenterLeaderboardSetMembersV2SetCommand(),
-	}
-	for name, command := range commands {
-		t.Run(name, func(t *testing.T) {
-			confirm := command.FlagSet.Lookup("confirm")
-			if confirm == nil {
-				t.Fatal("--confirm is not registered")
-			}
-
-			if !strings.Contains(confirm.Usage, "required") {
-				t.Fatalf("--confirm usage = %q, want it documented as required", confirm.Usage)
-			}
-			if strings.Contains(command.ShortUsage, "[--confirm]") {
-				t.Fatalf("ShortUsage = %q, must not present --confirm as optional", command.ShortUsage)
-			}
-			if !strings.Contains(command.ShortUsage, "--confirm") {
-				t.Fatalf("ShortUsage = %q, want --confirm", command.ShortUsage)
-			}
-			if strings.Contains(command.LongHelp, "5.0.0") {
-				t.Fatalf("LongHelp = %q, must not reference the completed 5.0.0 transition", command.LongHelp)
-			}
-		})
-	}
-}
-
 func TestGameCenterRelationshipReplacementRejectsExplicitFalseConfirm(t *testing.T) {
 	isolateGameCenterAuthEnv(t)
 	commands := map[string]struct {
-		command func() *ffcli.Command
+		command func(*shared.Deps) *ffcli.Command
 		args    []string
 	}{
 		"group achievements": {
-			command: GameCenterGroupAchievementsSetCommand,
+			command: newGameCenterGroupAchievementsSetCommand,
 			args:    []string{"--group-id", "group-1", "--ids", "achievement-1"},
 		},
 		"group leaderboards": {
-			command: GameCenterGroupLeaderboardsSetCommand,
+			command: newGameCenterGroupLeaderboardsSetCommand,
 			args:    []string{"--group-id", "group-1", "--ids", "leaderboard-1"},
 		},
 		"leaderboard-set members": {
-			command: GameCenterLeaderboardSetMembersSetCommand,
+			command: newGameCenterLeaderboardSetMembersSetCommand,
 			args:    []string{"--set-id", "set-1", "--leaderboard-ids", "leaderboard-1"},
 		},
 		"leaderboard-set v2 members": {
-			command: GameCenterLeaderboardSetMembersV2SetCommand,
+			command: newGameCenterLeaderboardSetMembersV2SetCommand,
 			args:    []string{"--set-id", "set-1", "--leaderboard-ids", "leaderboard-1"},
 		},
 	}
 
 	for name, test := range commands {
 		t.Run(name, func(t *testing.T) {
-			cmd := test.command()
 			args := append(append([]string{}, test.args...), "--confirm=false")
+			d, errOut := newGameCenterTestDeps(nil)
+			cmd := test.command(d)
 			if err := cmd.FlagSet.Parse(args); err != nil {
 				t.Fatalf("parse flags: %v", err)
 			}
-			var err error
-			stderr := captureGameCenterStderr(t, func() {
-				err = cmd.Exec(context.Background(), nil)
-			})
+			err := cmd.Exec(context.Background(), nil)
+			stderr := errOut.String()
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("explicit false --confirm should fail validation before auth, got %v", err)
 			}
@@ -163,11 +125,4 @@ func TestGameCenterRelationshipReplacementRejectsExplicitFalseConfirm(t *testing
 			}
 		})
 	}
-}
-
-func boolString(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
 }

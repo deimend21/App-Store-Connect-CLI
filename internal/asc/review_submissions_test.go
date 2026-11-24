@@ -726,27 +726,6 @@ func TestReviewSubmissionItemMutationsDecode441VersionRelationships(t *testing.T
 	}
 }
 
-func TestDeleteReviewSubmissionItem(t *testing.T) {
-	response := &http.Response{
-		StatusCode: http.StatusNoContent,
-		Header:     http.Header{"Content-Type": []string{"application/json"}},
-		Body:       io.NopCloser(strings.NewReader("")),
-	}
-
-	client := newTestClient(t, func(req *http.Request) {
-		if req.Method != http.MethodDelete {
-			t.Fatalf("expected DELETE, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/reviewSubmissionItems/item-123" {
-			t.Fatalf("expected path /v1/reviewSubmissionItems/item-123, got %s", req.URL.Path)
-		}
-	}, response)
-
-	if err := client.DeleteReviewSubmissionItem(context.Background(), "item-123"); err != nil {
-		t.Fatalf("DeleteReviewSubmissionItem() error: %v", err)
-	}
-}
-
 func TestGetReviewSubmissionItemsRelationships(t *testing.T) {
 	response := reviewSubmissionsJSONResponse(http.StatusOK, `{
 		"data": [
@@ -824,6 +803,18 @@ func TestGetReviewSubmissionItems(t *testing.T) {
 	}
 	if resp.Data[0].ID != "item-456" {
 		t.Fatalf("expected item ID item-456, got %s", resp.Data[0].ID)
+	}
+}
+
+func TestGetReviewSubmissionItemsStrictRejectsCursorForDifferentSubmission(t *testing.T) {
+	client := newTestClient(t, func(req *http.Request) {
+		t.Fatalf("unexpected request to %s", req.URL.Path)
+	}, reviewSubmissionsJSONResponse(http.StatusOK, `{"data":[],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-2/items"}}`))
+
+	_, err := client.GetReviewSubmissionItemsStrict(context.Background(), "submission-1",
+		NextURL[ReviewSubmissionItemsOption]("https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-2/items?cursor=next"))
+	if err == nil || !strings.Contains(err.Error(), "pagination URL points to another review submission") {
+		t.Fatalf("error = %v, want submission mismatch", err)
 	}
 }
 

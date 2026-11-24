@@ -3,9 +3,12 @@ package submit
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestSubmitResolvedVersionRejectsMalformedReviewSubmissionCollectionBeforeMutation(t *testing.T) {
@@ -35,7 +38,7 @@ func TestSubmitResolvedVersionRejectsMalformedReviewSubmissionCollectionBeforeMu
 				return submitJSONResponse(http.StatusOK, tt.body)
 			}))
 
-			_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+			_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 				AppID:     "app-1",
 				VersionID: "version-1",
 				Platform:  "IOS",
@@ -87,7 +90,7 @@ func TestSubmitResolvedVersionRejectsMalformedReviewSubmissionItemsCollectionBef
 				}
 			}))
 
-			_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+			_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 				AppID:     "app-1",
 				VersionID: "version-1",
 				Platform:  "IOS",
@@ -162,7 +165,7 @@ func TestSubmitResolvedVersionRejectsMalformedSubmissionResourceBeforeMutation(t
 				}
 			}))
 
-			_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+			_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 				AppID:     "app-1",
 				VersionID: "version-1",
 				Platform:  "IOS",
@@ -219,7 +222,7 @@ func TestSubmitResolvedVersionRejectsMalformedSubmissionItemBeforeMutation(t *te
 				}
 			}))
 
-			_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+			_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 				AppID:     "app-1",
 				VersionID: "version-1",
 				Platform:  "IOS",
@@ -324,7 +327,7 @@ func TestVerifyReviewSubmissionForSubmitRejectsMalformedDetailBeforeItemInspecti
 				}
 			}))
 
-			err := verifyReviewSubmissionForSubmit(context.Background(), client, "submission-1", "app-1", "IOS", "version-1")
+			_, err := verifyReviewSubmissionForSubmit(context.Background(), client, "submission-1", "app-1", "IOS", "version-1")
 			if err == nil || !strings.Contains(err.Error(), tt.wantSubstring) {
 				t.Fatalf("expected detail validation error containing %q, got %v", tt.wantSubstring, err)
 			}
@@ -355,7 +358,7 @@ func TestSubmitResolvedVersionValidatesExistingSubmissionBeforeAddingItem(t *tes
 		}
 	}))
 
-	_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+	_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 		AppID:     "app-1",
 		VersionID: "version-1",
 		Platform:  "IOS",
@@ -427,7 +430,7 @@ func TestSubmitResolvedVersionValidatesCreateReceiptBeforeAddingItem(t *testing.
 				}
 			}))
 
-			_, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+			_, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 				AppID:     "app-1",
 				VersionID: "version-1",
 				Platform:  "IOS",
@@ -469,7 +472,7 @@ func TestSubmitResolvedVersionRejectsTopLevelErrorsInDetailBeforeItemInspection(
 		}
 	}))
 
-	err := verifyReviewSubmissionForSubmit(context.Background(), client, "existing-submission", "app-1", "IOS", "version-1")
+	_, err := verifyReviewSubmissionForSubmit(context.Background(), client, "existing-submission", "app-1", "IOS", "version-1")
 	if err == nil || !strings.Contains(err.Error(), "top-level errors") {
 		t.Fatalf("expected top-level errors rejection, got %v", err)
 	}
@@ -489,7 +492,7 @@ func TestPrepareReviewSubmissionForCreateBoundsDiscoveryPagination(t *testing.T)
 		return submitJSONResponse(http.StatusOK, `{"data":[],"links":{"self":"/v1/apps/app-1/reviewSubmissions","next":"`+next+`"}}`)
 	}))
 
-	_, err := prepareReviewSubmissionForCreateWithPageLimit(context.Background(), client, "app-1", "IOS", "version-1", nil, 2)
+	_, err := prepareReviewSubmissionForCreateWithPageLimit(context.Background(), io.Discard, client, "app-1", "IOS", "version-1", nil, 2)
 	if err == nil || !strings.Contains(err.Error(), "must not exceed 2 pages") {
 		t.Fatalf("expected bounded discovery error, got %v", err)
 	}

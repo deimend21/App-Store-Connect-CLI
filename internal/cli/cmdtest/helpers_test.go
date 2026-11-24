@@ -3,7 +3,9 @@ package cmdtest
 import (
 	"errors"
 	"flag"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -25,7 +27,7 @@ func resetCmdtestState() {
 	asc.ResetConfigCacheForTest()
 	auth.ResetInvalidBypassKeychainWarningsForTest()
 	shared.ResetDefaultOutputFormat()
-	shared.ResetTierCacheForTest()
+	shared.ResetTierCacheForTest(filepath.Join(testTempDir, "tier-cache"))
 }
 
 func setCmdtestHome(t *testing.T) string {
@@ -36,8 +38,25 @@ func setCmdtestHome(t *testing.T) string {
 	return home
 }
 
+// rootNow is the clock of the roots RootCommand builds while a test has set
+// one with setRootNow; nil means the process dependencies' clock.
+var rootNow func() time.Time
+
+// setRootNow makes RootCommand build roots whose clock is now and returns a
+// function that restores the previous clock.
+func setRootNow(now func() time.Time) func() {
+	previous := rootNow
+	rootNow = now
+	return func() { rootNow = previous }
+}
+
 func RootCommand(version string) *ffcli.Command {
 	resetCmdtestState()
+	if rootNow != nil {
+		d := shared.DefaultDeps()
+		d.Now = rootNow
+		return cmd.RootCommandWithDeps(version, d)
+	}
 	return cmd.RootCommand(version)
 }
 

@@ -3,11 +3,17 @@ package asc
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func renderByRegistry(data any, render func([]string, [][]string)) error {
+	return renderByRegistryTo(os.Stdout, data, render)
+}
 
 func TestOutputRegistry(t *testing.T) {
 	t.Run("render by registry scenarios", runOutputRegistryRenderByRegistryScenarios)
@@ -99,13 +105,20 @@ func TestCommandOutputTypesHaveTableRenderers(t *testing.T) {
 		typeKey[CertificatePassTypeIDLinkageResponse](),
 		typeKey[ProfileBundleIDLinkageResponse](),
 		typeKey[AppStoreVersionDeleteResult](),
+		typeKey[AppPriceScheduleNotConfiguredResult](),
 		typeKey[GameCenterAchievementImageResponse](),
 		typeKey[GameCenterLeaderboardImageResponse](),
 		typeKey[GameCenterLeaderboardSetImageResponse](),
 		typeKey[GameCenterLeaderboardSetMemberLocalizationsResponse](),
 		typeKey[GameCenterLeaderboardSetMemberLocalizationResponse](),
-		typeKey[GameCenterLeaderboardSetMemberLocalizationDeleteResult](),
+		typeKey[DeleteResult](),
 		typeKey[GameCenterLeaderboardSetMembersUpdateResult](),
+		typeKey[RetentionMessagesResponse](),
+		typeKey[RetentionMessageVersionResponse](),
+		typeKey[RetentionMessageLocalizationsResponse](),
+		typeKey[RetentionMessageLinkageResponse](),
+		typeKey[RetentionMessageAssignResult](),
+		typeKey[RetentionMessagePlacementCreateResult](),
 	} {
 		if !isRegistryTypeRegistered(typ) {
 			t.Errorf("no table renderer registered for %s", typ)
@@ -311,7 +324,7 @@ func runOutputRegistryRenderByRegistryScenarios(t *testing.T) {
 		cleanupRegistryTypes(t, key)
 
 		wantErr := errors.New("direct failed")
-		rowsHandlerCalled := seedRowsAndDirectHandlersForTest(key, func(any, func([]string, [][]string)) error {
+		rowsHandlerCalled := seedRowsAndDirectHandlersForTest(key, func(io.Writer, any, func([]string, [][]string)) error {
 			return wantErr
 		})
 
@@ -370,12 +383,12 @@ func runOutputRegistryHelperRegistrations(t *testing.T) {
 
 	t.Run("built-in helper registrations", func(t *testing.T) {
 		t.Run("single linkage", func(t *testing.T) {
-			handler := requireOutputHandlerFor[AppStoreVersionSubmissionLinkageResponse](
+			handler := requireOutputHandlerFor[AppStoreVersionAppStoreVersionSubmissionLinkageResponse](
 				t,
 				"AppStoreVersionSubmissionLinkageResponse",
 			)
 
-			headers, rows, err := handler(&AppStoreVersionSubmissionLinkageResponse{
+			headers, rows, err := handler(&AppStoreVersionAppStoreVersionSubmissionLinkageResponse{
 				Data: ResourceData{
 					Type: ResourceType("appStoreVersionSubmissions"),
 					ID:   "submission-123",
@@ -403,63 +416,6 @@ func runOutputRegistryHelperRegistrations(t *testing.T) {
 				t.Fatalf("handler returned error: %v", err)
 			}
 			assertRowContains(t, headers, rows, "release-1", "READY_FOR_SALE")
-		})
-
-		t.Run("id/bool", func(t *testing.T) {
-			handler := requireOutputHandlerFor[AlternativeDistributionDomainDeleteResult](
-				t,
-				"AlternativeDistributionDomainDeleteResult",
-			)
-
-			headers, rows, err := handler(&AlternativeDistributionDomainDeleteResult{
-				ID:      "domain-1",
-				Deleted: true,
-			})
-			if err != nil {
-				t.Fatalf("handler returned error: %v", err)
-			}
-			assertRowContains(t, headers, rows, "domain-1", "true")
-		})
-	})
-
-	t.Run("response-data helper", func(t *testing.T) {
-		t.Run("existing registration renders expected rows", func(t *testing.T) {
-			handler := requireOutputHandlerFor[Response[BetaGroupMetricAttributes]](
-				t,
-				"Response[BetaGroupMetricAttributes]",
-			)
-
-			headers, rows, err := handler(&Response[BetaGroupMetricAttributes]{
-				Data: []Resource[BetaGroupMetricAttributes]{
-					{
-						ID:         "metric-1",
-						Attributes: BetaGroupMetricAttributes{"installs": 12},
-					},
-				},
-			})
-			if err != nil {
-				t.Fatalf("handler returned error: %v", err)
-			}
-			assertRowContains(t, headers, rows, "metric-1", "installs=12")
-		})
-
-		t.Run("typed nil pointer maps to zero-value data slice", func(t *testing.T) {
-			type attrs struct{}
-
-			registerResponseDataRows(func(data []Resource[attrs]) ([]string, [][]string) {
-				return []string{"count"}, [][]string{{fmt.Sprintf("%d", len(data))}}
-			})
-
-			key := typeKey[Response[attrs]]()
-			cleanupRegistryTypes(t, key)
-
-			handler := requireOutputHandler(t, key, "response-data typed nil helper")
-
-			headers, rows, err := handler((*Response[attrs])(nil))
-			if err != nil {
-				t.Fatalf("handler returned error: %v", err)
-			}
-			assertSingleRowEquals(t, headers, rows, []string{"count"}, []string{"0"})
 		})
 	})
 
@@ -751,43 +707,6 @@ func runOutputRegistryPanicScenarios(t *testing.T) {
 			assertRegistryTypeAbsent(t, key)
 		})
 
-		t.Run("id/bool nil rows", func(t *testing.T) {
-			type idBool struct{}
-			key := typeKey[idBool]()
-			cleanupRegistryTypes(t, key)
-
-			expectNilRegistryPanic(t, "id/bool rows function", func() {
-				registerIDBoolRows[idBool](func(*idBool) (string, bool) {
-					return "id", true
-				}, nil)
-			})
-			assertRegistryTypeAbsent(t, key)
-		})
-
-		t.Run("id/bool nil extractor", func(t *testing.T) {
-			type idBool struct{}
-			key := typeKey[idBool]()
-			cleanupRegistryTypes(t, key)
-
-			expectNilRegistryPanic(t, "id/bool extractor", func() {
-				registerIDBoolRows[idBool](nil, func(id string, deleted bool) ([]string, [][]string) {
-					return []string{"id", "deleted"}, [][]string{{id, fmt.Sprintf("%t", deleted)}}
-				})
-			})
-			assertRegistryTypeAbsent(t, key)
-		})
-
-		t.Run("response-data nil rows", func(t *testing.T) {
-			type attrs struct{}
-			key := typeKey[Response[attrs]]()
-			cleanupRegistryTypes(t, key)
-
-			expectNilRegistryPanic(t, "response-data rows function", func() {
-				registerResponseDataRows[attrs](nil)
-			})
-			assertRegistryTypeAbsent(t, key)
-		})
-
 		t.Run("single-resource nil rows", func(t *testing.T) {
 			type helperAttrs struct {
 				Name string `json:"name"`
@@ -1053,7 +972,7 @@ func expectNilDirectRenderFunctionPanic(t *testing.T, fn func()) {
 }
 
 func renderWithRows(headers []string, rows [][]string) directRenderFunc {
-	return func(_ any, render func([]string, [][]string)) error {
+	return func(_ io.Writer, _ any, render func([]string, [][]string)) error {
 		render(headers, rows)
 		return nil
 	}

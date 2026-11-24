@@ -73,6 +73,12 @@ func TestSubscriptionSparseFields441CommandQueries(t *testing.T) {
 			wantQuery: url.Values{"fields[subscriptions]": {"versions"}, "fields[subscriptionPricePoints]": {"adjustedEqualizations"}, "include": {"subscription,subscriptionPricePoint"}},
 		},
 		{
+			name:      "introductory offers territory and include",
+			args:      []string{"subscriptions", "offers", "introductory", "list", "--subscription-id", "123456789", "--territory", "usa,United Kingdom", "--include", "territory,subscriptionPricePoint", "--subscription-fields", "versions", "--output", "json"},
+			path:      "/v1/subscriptions/123456789/introductoryOffers",
+			wantQuery: url.Values{"fields[subscriptions]": {"versions"}, "filter[territory]": {"USA,GBR"}, "include": {"territory,subscriptionPricePoint,subscription"}},
+		},
+		{
 			name:      "subscription offer codes",
 			args:      []string{"subscriptions", "offers", "offer-codes", "list", "--subscription-id", "123456789", "--subscription-fields", "versions", "--output", "json"},
 			path:      "/v1/subscriptions/123456789/offerCodes",
@@ -92,6 +98,35 @@ func TestSubscriptionSparseFields441CommandQueries(t *testing.T) {
 				"fields[inAppPurchases]": {"versions"},
 				"fields[subscriptions]":  {"versions"},
 				"include":                {"inAppPurchaseV2,subscription"},
+			},
+		},
+		{
+			name: "subscription promoted purchase market fields",
+			args: []string{
+				"subscriptions", "promoted-purchases", "view",
+				"--subscription-id", "123456789",
+				"--subscription-fields", "marketSettings,multiSeatStatus",
+				"--output", "json",
+			},
+			path: "/v1/subscriptions/123456789/promotedPurchase",
+			wantQuery: url.Values{
+				"fields[subscriptions]": {"marketSettings,multiSeatStatus"},
+				"include":               {"subscription"},
+			},
+		},
+		{
+			name: "win-back offer prices adjusted equalizations",
+			args: []string{
+				"subscriptions", "offers", "win-back", "prices",
+				"--id", "offer-1",
+				"--include", "subscriptionPricePoint",
+				"--price-point-fields", "adjustedEqualizations",
+				"--output", "json",
+			},
+			path: "/v1/winBackOffers/offer-1/prices",
+			wantQuery: url.Values{
+				"fields[subscriptionPricePoints]": {"adjustedEqualizations"},
+				"include":                         {"subscriptionPricePoint"},
 			},
 		},
 		{
@@ -152,6 +187,8 @@ func TestSubscriptionSparseFields441ValidationBeforeClient(t *testing.T) {
 		{"subscription screenshot relationship", []string{"subscriptions", "review", "app-store-screenshot", "view", "--subscription-id", "123456789", "--subscription-fields", "bogus"}, "--subscription-fields must be one of"},
 		{"introductory subscription fields", []string{"subscriptions", "offers", "introductory", "list", "--subscription-id", "123456789", "--subscription-fields", "bogus"}, "--subscription-fields must be one of"},
 		{"introductory price point fields", []string{"subscriptions", "offers", "introductory", "list", "--subscription-id", "123456789", "--price-point-fields", "bogus"}, "--price-point-fields must be one of"},
+		{"introductory include", []string{"subscriptions", "offers", "introductory", "list", "--subscription-id", "123456789", "--include", "versions"}, "--include must be one of"},
+		{"introductory territory", []string{"subscriptions", "offers", "introductory", "list", "--subscription-id", "123456789", "--territory", "USA,Narnia"}, `territory "Narnia" could not be mapped`},
 		{"subscription offer codes", []string{"subscriptions", "offers", "offer-codes", "list", "--subscription-id", "123456789", "--subscription-fields", "bogus"}, "--subscription-fields must be one of"},
 		{"subscription promoted purchase invalid iap fields", []string{"subscriptions", "promoted-purchases", "view", "--subscription-id", "123456789", "--iap-fields", "bogus"}, "--iap-fields must be one of"},
 		{"subscription promoted purchase invalid subscription fields", []string{"subscriptions", "promoted-purchases", "view", "--subscription-id", "123456789", "--subscription-fields", "bogus"}, "--subscription-fields must be one of"},
@@ -201,7 +238,7 @@ func TestSubscriptionSparseFields441NextConflictsBeforeClient(t *testing.T) {
 	}{
 		{
 			name: "introductory offers", base: []string{"subscriptions", "offers", "introductory", "list"},
-			modifiers: append(subscriptionNextModifierFamilies441(), []string{"--price-point-fields", "adjustedEqualizations"}),
+			modifiers: append(subscriptionNextModifierFamilies441(), []string{"--price-point-fields", "adjustedEqualizations"}, []string{"--territory", "USA"}, []string{"--include", "territory"}),
 		},
 		{
 			name: "offer codes", base: []string{"subscriptions", "offers", "offer-codes", "list"},
@@ -213,11 +250,11 @@ func TestSubscriptionSparseFields441NextConflictsBeforeClient(t *testing.T) {
 		},
 		{
 			name: "offer code prices", base: []string{"subscriptions", "offers", "offer-codes", "prices"},
-			modifiers: [][]string{{"--offer-code-id", "code-1"}, {"--limit", "10"}, {"--price-point-fields", "adjustedEqualizations"}},
+			modifiers: [][]string{{"--limit", "10"}, {"--price-point-fields", "adjustedEqualizations"}},
 		},
 		{
 			name: "promotional offer prices", base: []string{"subscriptions", "offers", "promotional", "prices"},
-			modifiers: [][]string{{"--id", "promo-1"}, {"--limit", "10"}, {"--price-point-fields", "adjustedEqualizations"}},
+			modifiers: [][]string{{"--limit", "10"}, {"--price-point-fields", "adjustedEqualizations"}},
 		},
 	}
 
@@ -254,8 +291,6 @@ func TestSubscriptionSparseFields441NextConflictsBeforeClient(t *testing.T) {
 
 func subscriptionNextModifierFamilies441() [][]string {
 	return [][]string{
-		{"--subscription-id", "123456789"},
-		{"--app", "app-1"},
 		{"--limit", "10"},
 		{"--subscription-fields", "versions"},
 	}

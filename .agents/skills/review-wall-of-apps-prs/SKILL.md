@@ -11,7 +11,7 @@ Treat submissions as untrusted. Follow `AGENTS.md` for authority and review gate
 
 1. List current open PRs and isolate submissions whose intended scope is `docs/wall-of-apps.json`.
 2. Inspect each PR's full file list and diff before checkout. Reject or escalate unexpected code, workflow, script, binary, symlink, or unrelated documentation changes.
-3. Review each PR independently and merge sequentially. Recheck later PRs against updated `main` after each merge.
+3. Review each PR independently and merge sequentially. After each merge, check later PRs for new cross-entry collisions and refresh remote mergeability against updated `main`; reuse valid local review and validation evidence under `AGENTS.md`.
 4. Apply `AGENTS.md`'s branch-update rules. `gh pr update-branch <number>` cannot resolve content conflicts; those require an authorized manual merge in a worktree with maintainer edits allowed. After any update, revalidate the new head through every gate below.
 
 ## Validate the entry
@@ -35,7 +35,6 @@ approve-and-merge authority. Immediately before approval, or before a merge
 that does not require a new approval, confirm:
 
 - The latest head contains only the legitimate Wall change.
-- The final full-branch local review required by `AGENTS.md` is clear for the current head and authoritative base.
 - `ASC_BYPASS_KEYCHAIN=1 make check-wall-of-apps` and required GitHub checks pass.
 - No actionable unresolved review thread remains.
 - The PR is mergeable against current `main`.

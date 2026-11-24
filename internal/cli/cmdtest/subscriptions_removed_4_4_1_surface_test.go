@@ -26,18 +26,13 @@ func TestSubscriptionsRemoved441CommandsAreUnknown(t *testing.T) {
 		args     []string
 		wantErr  string
 		wantHelp string
+		wantTry  string
 	}{
-		{
-			name:     "localizations list",
-			args:     []string{"subscriptions", "localizations", "list", "--subscription-id", "SUB_ID"},
-			wantErr:  "Error: unknown command `asc subscriptions localizations`",
-			wantHelp: "asc subscriptions --help",
-		},
 		{
 			name:     "localizations sync",
 			args:     []string{"subscriptions", "localizations", "sync", "--subscription-id", "SUB_ID", "--file", "./localizations.json"},
-			wantErr:  "Error: unknown command `asc subscriptions localizations`",
-			wantHelp: "asc subscriptions --help",
+			wantErr:  "Error: unknown command `asc subscriptions versions localizations sync`",
+			wantHelp: "asc subscriptions versions localizations --help",
 		},
 		{
 			name:     "images list",
@@ -62,12 +57,21 @@ func TestSubscriptionsRemoved441CommandsAreUnknown(t *testing.T) {
 			args:     []string{"subscriptions", "review", "submit", "--subscription-id", "SUB_ID", "--confirm"},
 			wantErr:  "Error: unknown command `asc subscriptions review submit`",
 			wantHelp: "asc subscriptions review --help",
+			wantTry:  "Try:\n  asc review submissions-create --app APP_ID --platform IOS\n  asc review items add --submission SUBMISSION_ID --item-type subscriptionVersions --item-id SUBSCRIPTION_VERSION_ID\n",
 		},
 		{
 			name:     "review submit-group",
 			args:     []string{"subscriptions", "review", "submit-group", "--group-id", "GROUP_ID", "--confirm"},
 			wantErr:  "Error: unknown command `asc subscriptions review submit-group`",
 			wantHelp: "asc subscriptions review --help",
+			wantTry:  "Try:\n  asc review submissions-create --app APP_ID --platform IOS\n  asc review items add --submission SUBMISSION_ID --item-type subscriptionGroupVersions --item-id GROUP_VERSION_ID\n",
+		},
+		{
+			name:     "iap submit",
+			args:     []string{"iap", "submit", "--iap-id", "IAP_ID", "--confirm"},
+			wantErr:  "Error: unknown command `asc iap submit`",
+			wantHelp: "asc iap --help",
+			wantTry:  "Try:\n  asc review submissions-create --app APP_ID --platform IOS\n  asc iap versions submit --version-id IAP_VERSION_ID --submission SUBMISSION_ID --confirm\n",
 		},
 	}
 
@@ -87,47 +91,12 @@ func TestSubscriptionsRemoved441CommandsAreUnknown(t *testing.T) {
 			if !strings.Contains(stderr, test.wantHelp) {
 				t.Fatalf("stderr = %q, want help pointer %q", stderr, test.wantHelp)
 			}
+			if !strings.Contains(stderr, test.wantTry) {
+				t.Fatalf("stderr = %q, want replacement hint %q", stderr, test.wantTry)
+			}
 			if strings.Contains(stderr, "deprecated") {
 				t.Fatalf("stderr = %q, want no deprecation guidance for a removed command", stderr)
 			}
 		})
-	}
-}
-
-// The removed leaves are gone from the registered tree, so parent help cannot
-// advertise them and version-scoped replacements remain registered.
-func TestSubscriptionsRemoved441CommandsAreNotRegistered(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	root := RootCommand("5.0.0")
-	for _, test := range []struct {
-		parent  []string
-		removed []string
-		kept    []string
-	}{
-		{parent: []string{"subscriptions"}, removed: []string{"localizations", "images"}, kept: []string{"versions", "review"}},
-		{parent: []string{"subscriptions", "groups"}, removed: []string{"localizations"}, kept: []string{"versions"}},
-		{parent: []string{"subscriptions", "review"}, removed: []string{"submit", "submit-group"}, kept: []string{"screenshots", "app-store-screenshot"}},
-	} {
-		parent := findSubcommand(root, test.parent...)
-		if parent == nil {
-			t.Fatalf("expected registered asc %s command", strings.Join(test.parent, " "))
-		}
-		names := map[string]bool{}
-		for _, sub := range parent.Subcommands {
-			if sub != nil {
-				names[sub.Name] = true
-			}
-		}
-		for _, removed := range test.removed {
-			if names[removed] {
-				t.Fatalf("asc %s still registers removed %q", strings.Join(test.parent, " "), removed)
-			}
-		}
-		for _, kept := range test.kept {
-			if !names[kept] {
-				t.Fatalf("asc %s no longer registers canonical %q", strings.Join(test.parent, " "), kept)
-			}
-		}
 	}
 }

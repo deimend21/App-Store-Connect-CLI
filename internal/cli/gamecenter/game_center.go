@@ -2,8 +2,11 @@ package gamecenter
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
@@ -13,9 +16,9 @@ import (
 
 const noGameCenterDetailWarning = `Warning: no Game Center detail exists for this app. Run "asc game-center details create --app <APP_ID>" to create one.`
 
-// GameCenterCommand returns the game-center command group.
-func GameCenterCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("game-center", flag.ExitOnError)
+// NewGameCenterCommand returns the game-center command group.
+func NewGameCenterCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("game-center", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "game-center",
@@ -40,18 +43,18 @@ Examples:
   asc game-center details achievements-v2 list --id "DETAILS_ID"
   asc game-center matchmaking queues list`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			GameCenterAchievementsCommand(),
-			GameCenterLeaderboardsCommand(),
-			GameCenterLeaderboardSetsCommand(),
-			GameCenterChallengesCommand(),
-			GameCenterActivitiesCommand(),
-			GameCenterGroupsCommand(),
-			GameCenterAppVersionsCommand(),
-			GameCenterEnabledVersionsCommand(),
-			GameCenterDetailsCommand(),
-			GameCenterMatchmakingCommand(),
+			newGameCenterAchievementsCommand(d),
+			newGameCenterLeaderboardsCommand(d),
+			newGameCenterLeaderboardSetsCommand(d),
+			newGameCenterChallengesCommand(d),
+			newGameCenterActivitiesCommand(d),
+			newGameCenterGroupsCommand(d),
+			newGameCenterAppVersionsCommand(d),
+			newGameCenterEnabledVersionsCommand(d),
+			newGameCenterDetailsCommand(d),
+			newGameCenterMatchmakingCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -72,4 +75,62 @@ func isValidScoreSortType(value string) bool {
 // isValidSubmissionType checks if the value is a valid submission type.
 func isValidSubmissionType(value string) bool {
 	return slices.Contains(asc.ValidSubmissionTypes, value)
+}
+
+func flagPassed(fs *flag.FlagSet, name string) bool {
+	passed := false
+	fs.Visit(func(item *flag.Flag) {
+		passed = passed || item.Name == name
+	})
+	return passed
+}
+
+// parseStringMapFlag decodes a flag holding a JSON object of string values. It
+// returns nil when the flag was not passed and a non-nil map otherwise, so an
+// empty object still reaches Apple.
+func parseStringMapFlag(d *shared.Deps, fs *flag.FlagSet, name string) (map[string]string, error) {
+	if !flagPassed(fs, name) {
+		return nil, nil
+	}
+	shapeError := func() error {
+		return d.UsageErrorf("--%s must be a JSON object of string values", name)
+	}
+	// Pointer values keep a JSON null from decoding to an empty string.
+	var decoded map[string]*string
+	if err := json.Unmarshal([]byte(fs.Lookup(name).Value.String()), &decoded); err != nil || decoded == nil {
+		return nil, shapeError()
+	}
+	values := make(map[string]string, len(decoded))
+	for key, value := range decoded {
+		if value == nil {
+			return nil, shapeError()
+		}
+		values[key] = *value
+	}
+	return values, nil
+}
+
+// parseLeaderboardVisibilityFlag returns the normalized --visibility value, or
+// an empty string when the flag was not passed.
+func parseLeaderboardVisibilityFlag(d *shared.Deps, fs *flag.FlagSet) (string, error) {
+	if !flagPassed(fs, "visibility") {
+		return "", nil
+	}
+	value := strings.TrimSpace(strings.ToUpper(fs.Lookup("visibility").Value.String()))
+	if !slices.Contains(asc.ValidLeaderboardVisibilities, value) {
+		return "", d.UsageErrorf("--visibility must be one of: %s", strings.Join(asc.ValidLeaderboardVisibilities, ", "))
+	}
+	return value, nil
+}
+
+// gameCenterDetailParent looks up the app's Game Center detail ID for a list
+// built on the app.
+func gameCenterDetailParent(errorPrefix string) func(context.Context, *asc.Client, string) (string, error) {
+	return func(ctx context.Context, client *asc.Client, appID string) (string, error) {
+		detailID, err := client.GetGameCenterDetailID(ctx, appID)
+		if err != nil {
+			return "", fmt.Errorf("%s: failed to get Game Center detail: %w", errorPrefix, err)
+		}
+		return detailID, nil
+	}
 }

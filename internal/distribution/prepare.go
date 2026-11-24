@@ -32,7 +32,6 @@ var (
 	duringPublicationCopyForTest     func()
 	syncPreparedDirectory            = syncPreparedRootDirectory
 	renamePreparedBundleNoReplace    = secureopen.RenameNoReplaceInRoot
-	inspectExactBundleForTest        func(string) error
 )
 
 type Descriptor struct {
@@ -67,21 +66,10 @@ type ExpectedIPA struct {
 	SizeBytes int64
 }
 
-// PrepareIPA validates an already-open IPA and publishes an immutable local
-// bundle without replacing an existing destination.
-func PrepareIPA(file *os.File, size int64, options PrepareOptions) (result PrepareResult, resultErr error) {
-	return PrepareIPAContext(context.Background(), file, size, options)
-}
-
+// PrepareIPAContext validates an already-open IPA and publishes an immutable
+// local bundle without replacing an existing destination.
 func PrepareIPAContext(ctx context.Context, file *os.File, size int64, options PrepareOptions) (result PrepareResult, resultErr error) {
 	return prepareIPA(ctx, file, size, options, nil)
-}
-
-// PrepareIPAPath opens a relative IPA path beneath inputRoot without following
-// symlinks and prepares it with cancellation propagated through snapshotting
-// and code-signature verification.
-func PrepareIPAPath(ctx context.Context, inputRoot rootfs.Root, ipaPath string, options PrepareOptions) (PrepareResult, error) {
-	return prepareIPAPath(ctx, inputRoot, ipaPath, options, nil)
 }
 
 // PrepareIPAPathExact is the agent-facing preparation seam. It snapshots a
@@ -630,9 +618,6 @@ func exactBundleExistsContext(ctx context.Context, parent *os.Root, name string,
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return false, true, nil
 	}
-	if err := inspectExactBundle("open existing bundle"); err != nil {
-		return false, true, err
-	}
 	bundle, err := parent.OpenRoot(name)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -648,18 +633,12 @@ func exactBundleExistsContext(ctx context.Context, parent *os.Root, name string,
 	if !os.SameFile(info, bundleInfo) {
 		return false, true, nil
 	}
-	if err := inspectExactBundle("read existing bundle directory"); err != nil {
-		return false, true, err
-	}
 	entries, err := readDirectory(bundle)
 	if err != nil {
 		return false, true, err
 	}
 	if !exactEntries(entries, map[string]bool{"bundle.json": false, "payload": true}) {
 		return false, true, nil
-	}
-	if err := inspectExactBundle("open existing payload"); err != nil {
-		return false, true, err
 	}
 	payload, err := bundle.OpenRoot("payload")
 	if err != nil {
@@ -683,18 +662,12 @@ func exactBundleExistsContext(ctx context.Context, parent *os.Root, name string,
 	if payloadPathInfo.Mode()&os.ModeSymlink != 0 || !payloadPathInfo.IsDir() || !os.SameFile(payloadInfo, payloadPathInfo) {
 		return false, true, nil
 	}
-	if err := inspectExactBundle("read existing payload directory"); err != nil {
-		return false, true, err
-	}
 	payloadEntries, err := readDirectory(payload)
 	if err != nil {
 		return false, true, err
 	}
 	if !exactEntries(payloadEntries, map[string]bool{"app.ipa": false}) {
 		return false, true, nil
-	}
-	if err := inspectExactBundle("read existing descriptor"); err != nil {
-		return false, true, err
 	}
 	descriptor, err := secureopen.OpenExistingNoFollowInRoot(bundle, "bundle.json")
 	if err != nil {
@@ -722,9 +695,6 @@ func exactBundleExistsContext(ctx context.Context, parent *os.Root, name string,
 	}
 	if !stablePreparedFile(descriptorInfo, descriptorAfterRead) || !bytes.Equal(gotDescriptor.Bytes(), wantDescriptor) {
 		return false, true, nil
-	}
-	if err := inspectExactBundle("hash existing IPA"); err != nil {
-		return false, true, err
 	}
 	ipa, err := secureopen.OpenExistingNoFollowInRoot(payload, "app.ipa")
 	if err != nil {
@@ -847,13 +817,6 @@ func exactBundleExistsContext(ctx context.Context, parent *os.Root, name string,
 		return false, true, nil
 	}
 	return true, true, nil
-}
-
-func inspectExactBundle(step string) error {
-	if inspectExactBundleForTest != nil {
-		return inspectExactBundleForTest(step)
-	}
-	return nil
 }
 
 func stablePreparedFile(before, after os.FileInfo) bool {

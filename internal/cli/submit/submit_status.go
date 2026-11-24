@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -17,12 +16,13 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-func SubmitStatusCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("submit status", flag.ExitOnError)
+func newSubmitStatusCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("submit status", flag.ExitOnError)
 
 	submissionID := shared.BindResourceIDFlag(fs, "id", "reviewSubmissions", "Submission ID")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
-	output := shared.BindOutputFlags(fs)
+	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact name: check its most relevant review submission, or require --id/--version-id to be this app's")
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "status",
@@ -30,26 +30,34 @@ func SubmitStatusCommand() *ffcli.Command {
 		ShortHelp:  "Check submission status.",
 		LongHelp: `Check submission status.
 
+--app alone checks the app's most relevant review submission: one in review
+or waiting for review first, then the most recently submitted. An app with no
+review submission reports its editable (else live) App Store version. Next to
+--id or --version-id, --app checks that the submission or version belongs to
+the app.
+
 Examples:
   asc submit status --id "SUBMISSION_ID"
-  asc submit status --version-id "VERSION_ID"`,
+  asc submit status --version-id "VERSION_ID"
+  asc submit status --app "APP_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if strings.TrimSpace(*submissionID) == "" && strings.TrimSpace(*versionID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id or --version-id is required")
+			appValue := strings.TrimSpace(*appID)
+			if strings.TrimSpace(*submissionID) == "" && strings.TrimSpace(*versionID) == "" && appValue == "" {
+				fmt.Fprintln(d.IO.ErrOut, "Error: --id, --version-id, or --app is required")
 				return shared.MissingRequiredUsageError("")
 			}
 			if strings.TrimSpace(*submissionID) != "" && strings.TrimSpace(*versionID) != "" {
-				return shared.UsageError("--id and --version-id are mutually exclusive")
+				return d.UsageError("--id and --version-id are mutually exclusive")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("submit status: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer func() {
 				if cancel != nil {
 					cancel()
@@ -57,9 +65,27 @@ Examples:
 			}()
 
 			resolvedVersionID := strings.TrimSpace(*versionID)
+			resolvedSubmissionID := strings.TrimSpace(*submissionID)
+			scopeAppID := ""
+			if appValue != "" {
+				scopeAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, appValue)
+				if err != nil {
+					return fmt.Errorf("submit status: %w", err)
+				}
+				if resolvedSubmissionID == "" && resolvedVersionID == "" {
+					resolvedSubmissionID, resolvedVersionID, err = selectAppSubmissionStatusTarget(requestCtx, d, client, scopeAppID)
+					if err != nil {
+						return fmt.Errorf("submit status: %w", err)
+					}
+				}
+			}
 			result := &asc.AppStoreVersionSubmissionStatusResult{}
-			if resolvedSubmissionID := strings.TrimSpace(*submissionID); resolvedSubmissionID != "" {
-				reviewSubmission, reviewErr := client.GetReviewSubmission(requestCtx, resolvedSubmissionID)
+			if resolvedSubmissionID != "" {
+				var submissionOpts []asc.ReviewSubmissionOption
+				if scopeAppID != "" {
+					submissionOpts = append(submissionOpts, asc.WithReviewSubmissionInclude([]string{"app"}))
+				}
+				reviewSubmission, reviewErr := client.GetReviewSubmission(requestCtx, resolvedSubmissionID, submissionOpts...)
 				if reviewErr != nil {
 					if asc.IsNotFound(reviewErr) {
 						return fmt.Errorf(
@@ -68,6 +94,11 @@ Examples:
 						)
 					}
 					return fmt.Errorf("submit status: failed to fetch review submission %q: %w", resolvedSubmissionID, reviewErr)
+				}
+				if scopeAppID != "" {
+					if err := requireSubmissionApp(&reviewSubmission.Data, scopeAppID); err != nil {
+						return fmt.Errorf("submit status: %w", err)
+					}
 				}
 
 				applyReviewSubmissionStatus(result, &reviewSubmission.Data)
@@ -86,6 +117,16 @@ Examples:
 					}
 					return fmt.Errorf("submit status: %w", versionErr)
 				}
+				if scopeAppID != "" {
+					owner, ownerErr := resolveAppIDFromVersionResponse(versionResp)
+					if ownerErr != nil {
+						return fmt.Errorf("submit status: %w", ownerErr)
+					}
+					if owner != scopeAppID {
+						mismatch := fmt.Errorf("version %q belongs to app %q, not %q", resolvedVersionID, owner, scopeAppID)
+						return fmt.Errorf("submit status: %w", shared.WithDiagnostic(shared.NewValidationError(mismatch), shared.DiagnosticInvalidInput, "--version-id"))
+					}
+				}
 				applyVersionStatus(result, versionResp)
 
 				if appID, appErr := resolveAppIDFromVersionResponse(versionResp); appErr == nil {
@@ -96,7 +137,7 @@ Examples:
 						}
 					} else if reviewSubmission != nil {
 						applyReviewSubmissionStatus(result, reviewSubmission)
-						return shared.PrintOutput(result, *output.Output, *output.Pretty)
+						return d.PrintOutput(result, *output.Output, *output.Pretty)
 					}
 				}
 
@@ -107,7 +148,7 @@ Examples:
 					return fmt.Errorf("submit status: %w", legacyErr)
 				}
 
-				return shared.PrintOutput(result, *output.Output, *output.Pretty)
+				return d.PrintOutput(result, *output.Output, *output.Pretty)
 			}
 
 			if resolvedVersionID != "" {
@@ -118,9 +159,57 @@ Examples:
 				applyVersionStatus(result, versionResp)
 			}
 
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return d.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
+}
+
+// selectAppSubmissionStatusTarget picks what submit status --app reports: the
+// app's most relevant review submission, or, when it has none, its default App
+// Store version, announced on stderr.
+func selectAppSubmissionStatusTarget(ctx context.Context, d *shared.Deps, client *asc.Client, appID string) (string, string, error) {
+	resp, err := client.GetReviewSubmissions(ctx, appID, asc.Limit[asc.ReviewSubmissionsOption](200))
+	if err != nil {
+		return "", "", err
+	}
+	var candidates []asc.ReviewSubmissionResource
+	for {
+		candidates = append(candidates, resp.Data...)
+		nextURL := strings.TrimSpace(resp.Links.Next)
+		if nextURL == "" {
+			break
+		}
+		resp, err = client.GetReviewSubmissions(ctx, appID, asc.NextURL[asc.ReviewSubmissionsOption](nextURL))
+		if err != nil {
+			return "", "", err
+		}
+	}
+	if len(candidates) > 0 {
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return appSubmissionStatusSortKey(candidates[i]).less(appSubmissionStatusSortKey(candidates[j]))
+		})
+		return strings.TrimSpace(candidates[0].ID), "", nil
+	}
+
+	version, err := shared.ResolveDefaultAppStoreVersion(ctx, client, appID, "")
+	if err != nil {
+		return "", "", fmt.Errorf("app %q has no review submissions: %w", appID, err)
+	}
+	fmt.Fprintf(d.IO.ErrOut, "App %s has no review submissions. %s\n", asc.SanitizeTerminalText(appID), version.Note("--version-id"))
+	return "", version.ID, nil
+}
+
+// requireSubmissionApp reports an error unless submission, read with its app
+// included, belongs to appID.
+func requireSubmissionApp(submission *asc.ReviewSubmissionResource, appID string) error {
+	if submission.Relationships == nil || submission.Relationships.App == nil || strings.TrimSpace(submission.Relationships.App.Data.ID) == "" {
+		return fmt.Errorf("review submission %s did not prove its app relationship", strings.TrimSpace(submission.ID))
+	}
+	if owner := strings.TrimSpace(submission.Relationships.App.Data.ID); owner != appID {
+		mismatch := fmt.Errorf("review submission %q belongs to app %q, not %q", strings.TrimSpace(submission.ID), owner, appID)
+		return shared.WithDiagnostic(shared.NewValidationError(mismatch), shared.DiagnosticInvalidInput, "--id")
+	}
+	return nil
 }
 
 type submitStatusVersionRelationships struct {
@@ -208,7 +297,7 @@ func resolveReviewSubmissionVersionIDFromItems(ctx context.Context, client *asc.
 	opts := []asc.ReviewSubmissionItemsOption{
 		asc.WithReviewSubmissionItemsInclude([]string{"appStoreVersion"}),
 		asc.WithReviewSubmissionItemsFields([]string{"appStoreVersion"}),
-		asc.WithReviewSubmissionItemsLimit(200),
+		asc.Limit[asc.ReviewSubmissionItemsOption](200),
 	}
 	resp, err := client.GetReviewSubmissionItems(ctx, submissionID, opts...)
 	if err != nil {
@@ -223,7 +312,7 @@ func resolveReviewSubmissionVersionIDFromItems(ctx context.Context, client *asc.
 		if nextURL == "" {
 			return "", nil
 		}
-		resp, err = client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(nextURL))
+		resp, err = client.GetReviewSubmissionItems(ctx, submissionID, asc.NextURL[asc.ReviewSubmissionItemsOption](nextURL))
 		if err != nil {
 			return "", err
 		}
@@ -253,7 +342,7 @@ func findReviewSubmissionForVersion(ctx context.Context, client *asc.Client, app
 		ctx,
 		appID,
 		asc.WithReviewSubmissionsInclude([]string{"appStoreVersionForReview"}),
-		asc.WithReviewSubmissionsLimit(200),
+		asc.Limit[asc.ReviewSubmissionsOption](200),
 	)
 	if err != nil {
 		return nil, err
@@ -279,7 +368,7 @@ func findReviewSubmissionForVersion(ctx context.Context, client *asc.Client, app
 		if nextURL == "" {
 			break
 		}
-		resp, err = client.GetReviewSubmissions(ctx, appID, asc.WithReviewSubmissionsNextURL(nextURL))
+		resp, err = client.GetReviewSubmissions(ctx, appID, asc.NextURL[asc.ReviewSubmissionsOption](nextURL))
 		if err != nil {
 			return nil, err
 		}
@@ -315,6 +404,21 @@ func reviewSubmissionSortKey(submission asc.ReviewSubmissionResource) reviewSubm
 		hasSubmitted:  hasSubmitted,
 		id:            strings.TrimSpace(submission.ID),
 	}
+}
+
+// appSubmissionStatusSortKey orders an app's review submissions the way the
+// submit status --app help promises: one in review or waiting for review
+// first, then the most recently submitted. Every other state ranks by its
+// submitted date alone, so an undated draft left by a failed submit does not
+// hide a submission App Review completed.
+func appSubmissionStatusSortKey(submission asc.ReviewSubmissionResource) reviewSubmissionCandidateKey {
+	key := reviewSubmissionSortKey(submission)
+	switch submission.Attributes.SubmissionState {
+	case asc.ReviewSubmissionStateInReview, asc.ReviewSubmissionStateWaitingForReview:
+	default:
+		key.statePriority = 0
+	}
+	return key
 }
 
 func (k reviewSubmissionCandidateKey) less(other reviewSubmissionCandidateKey) bool {

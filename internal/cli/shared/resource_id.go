@@ -3,13 +3,16 @@ package shared
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-// selfLinkHost is the only host whose URLs are treated as resource self-links.
+// selfLinkHost names the API host in errors; asc.IsAPIHost decides which URLs
+// are treated as resource self-links.
 const selfLinkHost = "api.appstoreconnect.apple.com"
 
 var selfLinkVersionSegment = regexp.MustCompile(`^v[0-9]+$`)
@@ -18,7 +21,7 @@ var selfLinkVersionSegment = regexp.MustCompile(`^v[0-9]+$`)
 // resource's API self-link (for example the links.self value from JSON output
 // or a webhook delivery) and returns the bare ID.
 //
-// Only URLs on api.appstoreconnect.apple.com whose path is exactly
+// Only URLs on an API host whose path is exactly
 // /v<n>/<type>/<id> are accepted. When resourceType is non-empty the <type>
 // segment must match it. Values that are not http(s) URLs are returned
 // trimmed and otherwise unchanged so bundle identifiers, product IDs, names,
@@ -33,7 +36,7 @@ func ResourceIDFromValue(value, resourceType string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid resource URL: %w", err)
 	}
-	if !strings.EqualFold(parsed.Hostname(), selfLinkHost) {
+	if !asc.IsAPIHost(strings.ToLower(parsed.Hostname())) {
 		return "", fmt.Errorf("only App Store Connect API self-links on %s are accepted as resource IDs", selfLinkHost)
 	}
 
@@ -74,6 +77,10 @@ func BindResourceIDFlag(fs *flag.FlagSet, name, resourceType, usage string) *str
 	return target
 }
 
+func (v *resourceIDValue) storage() any {
+	return v.target
+}
+
 func (v *resourceIDValue) String() string {
 	if v == nil || v.target == nil {
 		return ""
@@ -100,12 +107,16 @@ func (v *resourceIDValue) Get() any {
 // string default (for example one seeded from ASC_APP_ID) and so cannot be
 // bound with BindResourceIDFlag without changing its help text. It accepts an
 // apps self-link and reports a link of another type as a concise usage error
-// with the same message as a flag-parse failure.
-func AppIDFlagValue(value string) (string, error) {
+// with the same message as a flag-parse failure, written to d's stderr.
+func (d *Deps) AppIDFlagValue(value string) (string, error) {
+	return appIDFlagValueTo(d.IO.ErrOut, value)
+}
+
+func appIDFlagValueTo(stderr io.Writer, value string) (string, error) {
 	id, err := ResourceIDFromValue(value, "apps")
 	if err != nil {
-		message := SanitizeTerminal(fmt.Sprintf("invalid value %q for flag -app: %v", strings.TrimSpace(value), err))
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		message := SanitizeTerminal(fmt.Sprintf("invalid value %q for flag --app: %v", strings.TrimSpace(value), err))
+		fmt.Fprintf(stderr, "Error: %s\n", message)
 		return "", NewReportedUsageError(UsageErrorInvalidValue, message)
 	}
 	return id, nil

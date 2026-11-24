@@ -1,7 +1,6 @@
 package cmdtest
 
 import (
-	"context"
 	"errors"
 	"flag"
 	"io"
@@ -9,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func setupBetaTesterRemoveWaitEnv(t *testing.T) {
@@ -23,16 +25,11 @@ func setupBetaTesterRemoveWaitEnv(t *testing.T) {
 	t.Setenv("ASC_PRIVATE_KEY_PATH", keyPath)
 }
 
-func betaTesterRemoveWaitTransport(t *testing.T, pollResponses func(pollCount int) (int, string)) {
+func betaTesterRemoveWaitTransport(t *testing.T, pollResponses func(pollCount int) (int, string)) http.RoundTripper {
 	t.Helper()
 
 	pollCount := 0
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+	return roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/betaTesters":
 			body := `{"data":[{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com","state":"INSTALLED"}}],"links":{}}`
@@ -66,79 +63,57 @@ func betaTesterRemoveWaitTransport(t *testing.T, pollResponses func(pollCount in
 	})
 }
 
-func TestBetaTestersRemoveWaitCompletesOnNotFound(t *testing.T) {
-	setupBetaTesterRemoveWaitEnv(t)
-	betaTesterRemoveWaitTransport(t, func(int) (int, string) {
-		return http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"The specified resource does not exist"}]}`
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"testflight", "testers", "remove",
-			"--app", "app-1", "--email", "tester@example.com", "--confirm",
-			"--wait", "--poll-interval", "10ms", "--timeout", "5s",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if !strings.Contains(stdout, `"deleted":true`) {
-		t.Fatalf("expected delete receipt, got %q", stdout)
+func TestBetaTestersRemoveWaitCompletesWhenTesterIsGone(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "not found", status: http.StatusNotFound, body: `{"errors":[{"status":"404","code":"NOT_FOUND","title":"The specified resource does not exist"}]}`},
+		{name: "revoked", status: http.StatusOK, body: `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"state":"REVOKED"}}}`},
 	}
-}
 
-func TestBetaTestersRemoveWaitCompletesOnRevoked(t *testing.T) {
-	setupBetaTesterRemoveWaitEnv(t)
-	betaTesterRemoveWaitTransport(t, func(int) (int, string) {
-		return http.StatusOK, `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"state":"REVOKED"}}}`
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupBetaTesterRemoveWaitEnv(t)
+			transport := betaTesterRemoveWaitTransport(t, func(int) (int, string) {
+				return tt.status, tt.body
+			})
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
+			var stdout string
+			var err error
+			synctest.Test(t, func(t *testing.T) {
+				stdout, _, err = runRootWithDeps(t, stubClient(t, transport),
+					"testflight", "testers", "remove",
+					"--app", "app-1", "--email", "tester@example.com", "--confirm",
+					"--wait", "--poll-interval", "10ms", "--timeout", "5s",
+				)
+			})
+			if err != nil {
+				t.Fatalf("run error: %v", err)
+			}
 
-	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"testflight", "testers", "remove",
-			"--app", "app-1", "--email", "tester@example.com", "--confirm",
-			"--wait", "--poll-interval", "10ms", "--timeout", "5s",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if !strings.Contains(stdout, `"deleted":true`) {
-		t.Fatalf("expected delete receipt, got %q", stdout)
+			if !strings.Contains(stdout, `"deleted":true`) {
+				t.Fatalf("expected delete receipt, got %q", stdout)
+			}
+		})
 	}
 }
 
 func TestBetaTestersRemoveWaitTimesOutButPrintsReceipt(t *testing.T) {
 	setupBetaTesterRemoveWaitEnv(t)
-	betaTesterRemoveWaitTransport(t, func(int) (int, string) {
+	transport := betaTesterRemoveWaitTransport(t, func(int) (int, string) {
 		return http.StatusOK, `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"state":"INSTALLED"}}}`
 	})
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
+	var stdout string
 	var runErr error
-	stdout, _ := captureOutput(t, func() {
-		if err := root.Parse([]string{
+	synctest.Test(t, func(t *testing.T) {
+		stdout, _, runErr = runRootWithDeps(t, stubClient(t, transport),
 			"testflight", "testers", "remove",
 			"--app", "app-1", "--email", "tester@example.com", "--confirm",
 			"--wait", "--poll-interval", "20ms", "--timeout", "150ms",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
+		)
 	})
 
 	if runErr == nil || !strings.Contains(runErr.Error(), "not yet visible") {
@@ -186,20 +161,11 @@ func TestBetaTestersRemoveWaitValidatesDurations(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setupBetaTesterRemoveWaitEnv(t)
 
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-
 			args := append([]string{
 				"testflight", "testers", "remove",
 				"--app", "app-1", "--email", "tester@example.com", "--confirm",
 			}, tc.args...)
-			if err := root.Parse(args); err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				runErr = root.Run(context.Background())
-			})
+			stdout, stderr, runErr := runRootWithDeps(t, nil, args...)
 			if runErr == nil {
 				t.Fatal("expected usage error")
 			}
@@ -223,37 +189,21 @@ func TestBetaTestersRemoveWaitValidatesDurations(t *testing.T) {
 func TestBetaTestersExportForwardsNameFilters(t *testing.T) {
 	setupBetaTesterRemoveWaitEnv(t)
 
-	var gotQuery string
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		gotQuery = req.URL.RawQuery
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"data":[],"links":{}}`)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/betaTesters", "filter[apps]=app-1", "filter[firstName]=Ada", "filter[lastName]=Lovelace", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[],"links":{}}`))
 
 	csvPath := filepath.Join(t.TempDir(), "testers.csv")
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
+	if _, _, err := runRootWithDeps(t, stubClient(t, reg),
+		"testflight", "testers", "export",
+		"--app", "app-1", "--first-name", "Ada", "--last-name", "Lovelace",
+		"--output", csvPath,
+	); err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
-	captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"testflight", "testers", "export",
-			"--app", "app-1", "--first-name", "Ada", "--last-name", "Lovelace",
-			"--output", csvPath,
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
+	requests := reg.Requests()
+	gotQuery := requests[len(requests)-1].URL.RawQuery
 	for _, want := range []string{"filter%5BfirstName%5D=Ada", "filter%5BlastName%5D=Lovelace"} {
 		if !strings.Contains(gotQuery, want) {
 			t.Fatalf("expected %s in query, got %q", want, gotQuery)

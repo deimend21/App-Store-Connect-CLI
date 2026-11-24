@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
-	cryptorand "crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -28,7 +27,6 @@ import (
 	signingpkg "github.com/rudrankriyam/App-Store-Connect-CLI/internal/signing"
 	"go.mozilla.org/pkcs7"
 	"howett.net/plist"
-	modernpkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 type signingIdentity struct {
@@ -193,7 +191,7 @@ func normalizeSigningIdentity(identity *signingIdentity, password string) ([]byt
 	if !publicKeysEqual(identity.PrivateKey, identity.Certificate.PublicKey) {
 		return nil, fmt.Errorf("private key does not match signing certificate")
 	}
-	encoded, err := modernpkcs12.Modern2023.WithRand(cryptorand.Reader).Encode(identity.PrivateKey, identity.Certificate, nil, password)
+	encoded, err := shared.EncodePKCS12Identity(shared.PKCS12EncodingModern, identity.PrivateKey, identity.Certificate, password)
 	if err != nil {
 		return nil, fmt.Errorf("normalize signing identity: %w", err)
 	}
@@ -286,12 +284,12 @@ func validateIdentityCertificate(identity *signingIdentity, certificateDER []byt
 	return nil
 }
 
-func identityCertificateFilter(identity *signingIdentity) func(asc.Resource[asc.CertificateAttributes]) bool {
+func identityCertificateFilter(identity *signingIdentity, now func() time.Time) func(asc.Resource[asc.CertificateAttributes]) bool {
 	if identity == nil {
 		return nil
 	}
 	return func(certificate asc.Resource[asc.CertificateAttributes]) bool {
-		if !usableIdentityCertificateResource(certificate, time.Now()) {
+		if !usableIdentityCertificateResource(certificate, now()) {
 			return false
 		}
 		der, err := base64.StdEncoding.DecodeString(strings.TrimSpace(certificate.Attributes.CertificateContent))
@@ -310,6 +308,7 @@ func identityCertificateFilter(identity *signingIdentity) func(asc.Resource[asc.
 }
 
 type identityMobileProvision struct {
+	Name                        string         `plist:"Name"`
 	TeamIdentifier              []string       `plist:"TeamIdentifier"`
 	ApplicationIdentifierPrefix []string       `plist:"ApplicationIdentifierPrefix"`
 	Platform                    []string       `plist:"Platform"`
@@ -535,16 +534,6 @@ func prepareSigningIdentityArtifacts(identity *signingIdentity, password, bundle
 			ProfileType:       profileType,
 		},
 	}, nil
-}
-
-func preflightSigningIdentityArtifacts(store *signingpkg.GitStore, artifacts *signingIdentityArtifacts, password string) error {
-	if _, err := preflightSigningArtifact(store, artifacts.IdentityPath, artifacts.IdentityData, password, artifacts.IdentityMetadata, func(existing, wanted []byte) bool {
-		return samePKCS12Identity(existing, wanted, password)
-	}); err != nil {
-		return err
-	}
-	_, err := preflightSigningArtifact(store, artifacts.BindingPath, artifacts.BindingData, password, artifacts.BindingMetadata, bytes.Equal)
-	return err
 }
 
 func preflightSigningIdentityArtifactsForContextUpdate(store *signingpkg.GitStore, artifacts *signingIdentityArtifacts, password string) error {

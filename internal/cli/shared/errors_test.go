@@ -1,8 +1,10 @@
 package shared
 
 import (
+	"bytes"
 	"errors"
 	"flag"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -63,6 +65,35 @@ func TestNewReportedUsageErrorPreservesUsageClassificationWithoutHelp(t *testing
 	}
 	if got := ClassifyUsageError(err); got != UsageErrorInvalidValue {
 		t.Fatalf("ClassifyUsageError() = %q, want %q", got, UsageErrorInvalidValue)
+	}
+}
+
+func TestDepsInvalidInputErrorReportsWithoutUsagePage(t *testing.T) {
+	var stderr bytes.Buffer
+	d := &Deps{IO: &IO{ErrOut: &stderr}}
+
+	err := d.InvalidInputErrorf("auth login: invalid private key: %s", "too\x1b[31m permissive")
+
+	const wantMessage = "auth login: invalid private key: too[31m permissive"
+	if got := err.Error(); got != wantMessage {
+		t.Fatalf("InvalidInputErrorf().Error() = %q, want %q", got, wantMessage)
+	}
+	if got, want := stderr.String(), "Error: "+wantMessage+"\n"; got != want {
+		t.Fatalf("InvalidInputErrorf() stderr = %q, want %q", got, want)
+	}
+	// flag.ErrHelp would make ffcli print the command's usage page after the
+	// message; the error must still count as a reported usage failure (exit 2).
+	if errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("InvalidInputErrorf() must not unwrap to flag.ErrHelp: %v", err)
+	}
+	if !IsReportedUsageError(err) || !IsPrintedToStderr(err) {
+		t.Fatalf("InvalidInputErrorf() = %T, want an already-printed reported usage error", err)
+	}
+	if got := ClassifyUsageError(err); got != UsageErrorInvalidValue {
+		t.Fatalf("ClassifyUsageError() = %q, want %q", got, UsageErrorInvalidValue)
+	}
+	if got := ClassifyUsageError(d.InvalidInputError("auth login: --key-json field \"key_id\" is required")); got != UsageErrorMissingRequired {
+		t.Fatalf("ClassifyUsageError() = %q, want %q, as UsageError classifies it", got, UsageErrorMissingRequired)
 	}
 }
 
@@ -132,6 +163,23 @@ func TestMissingRequiredUsageErrorCarriesStructuredDiagnostic(t *testing.T) {
 				t.Fatalf("DiagnosticFromError() = %+v", diagnostic)
 			}
 		})
+	}
+}
+
+func TestRequiredFlagPrintsErrorLineAndReturnsMissingRequiredUsageError(t *testing.T) {
+	var err error
+	stdout, stderr := captureOutput(t, func() {
+		err = RequiredFlag("--app")
+	})
+
+	if stdout != "" {
+		t.Fatalf("RequiredFlag() stdout = %q, want empty", stdout)
+	}
+	if want := "Error: --app is required\n"; stderr != want {
+		t.Fatalf("RequiredFlag() stderr = %q, want %q", stderr, want)
+	}
+	if want := MissingRequiredUsageError("--app"); !reflect.DeepEqual(err, want) {
+		t.Fatalf("RequiredFlag() = %#v, want %#v", err, want)
 	}
 }
 

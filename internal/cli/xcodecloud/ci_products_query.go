@@ -3,6 +3,7 @@ package xcodecloud
 import (
 	"flag"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
@@ -25,63 +26,9 @@ var ciProductsFieldsValues = []string{
 	"buildRuns",
 }
 
-var ciProductsAppFieldsValues = []string{
-	"accessibilityUrl",
-	"name",
-	"bundleId",
-	"sku",
-	"primaryLocale",
-	"isOrEverWasMadeForKids",
-	"subscriptionStatusUrl",
-	"subscriptionStatusUrlVersion",
-	"subscriptionStatusUrlForSandbox",
-	"subscriptionStatusUrlVersionForSandbox",
-	"contentRightsDeclaration",
-	"streamlinedPurchasingEnabled",
-	"accessibilityDeclarations",
-	"appEncryptionDeclarations",
-	"appStoreIcon",
-	"ciProduct",
-	"betaTesters",
-	"betaGroups",
-	"appStoreVersions",
-	"appTags",
-	"preReleaseVersions",
-	"betaAppLocalizations",
-	"builds",
-	"betaLicenseAgreement",
-	"betaAppReviewDetail",
-	"appInfos",
-	"appClips",
-	"appPricePoints",
-	"endUserLicenseAgreement",
-	"appPriceSchedule",
-	"appAvailabilityV2",
-	"inAppPurchases",
-	"subscriptionGroups",
-	"gameCenterEnabledVersions",
-	"perfPowerMetrics",
-	"appCustomProductPages",
-	"inAppPurchasesV2",
-	"promotedPurchases",
-	"appEvents",
-	"reviewSubmissions",
-	"subscriptionGracePeriod",
-	"customerReviews",
-	"customerReviewSummarizations",
-	"gameCenterDetail",
-	"appStoreVersionExperimentsV2",
-	"alternativeDistributionKey",
-	"analyticsReportRequests",
-	"marketplaceSearchDetail",
-	"buildUploads",
-	"backgroundAssets",
-	"betaFeedbackScreenshotSubmissions",
-	"betaFeedbackCrashSubmissions",
-	"searchKeywords",
-	"webhooks",
-	"androidToIosAppMappingDetails",
-}
+// Apple production returns HTTP 500 for fields[apps]=assetLibrary on
+// GET /v1/ciProducts (Nov 2026), although the spec lists it.
+var ciProductsAppFieldsValues = shared.AppFieldsList("assetLibrary")
 
 var ciProductsBundleIDFieldsValues = []string{
 	"name",
@@ -128,8 +75,8 @@ type ciProductsListFlags struct {
 	pretty                   *bool
 }
 
-func bindCiProductsListFlags(fs *flag.FlagSet) ciProductsListFlags {
-	outputFlags := shared.BindOutputFlags(fs)
+func bindCiProductsListFlags(d *shared.Deps, fs *flag.FlagSet) ciProductsListFlags {
+	outputFlags := d.BindOutputFlags(fs)
 	return ciProductsListFlags{
 		flagSet:                  fs,
 		appID:                    fs.String("app", "", xcodeCloudAppFlagUsage),
@@ -140,9 +87,9 @@ func bindCiProductsListFlags(fs *flag.FlagSet) ciProductsListFlags {
 		scmRepositoryFields:      fs.String("scm-repository-fields", "", "Fields to include for related SCM repositories, comma-separated: "+strings.Join(ciProductsScmRepositoryFieldsValues, ", ")),
 		include:                  fs.String("include", "", "Include related resources: "+strings.Join(ciProductsIncludeValues, ", ")),
 		primaryRepositoriesLimit: fs.Int("primary-repositories-limit", 0, "Maximum included primary repositories (1-50)"),
-		limit:                    fs.Int("limit", 0, "Maximum results per page (1-200)"),
-		next:                     fs.String("next", "", "Fetch next page using a links.next URL"),
-		paginate:                 fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)"),
+		limit:                    fs.Int("limit", 0, shared.LimitFlagUsage(200)),
+		next:                     fs.String("next", "", shared.NextFlagUsage),
+		paginate:                 fs.Bool("paginate", false, shared.PaginateFlagUsage),
 		output:                   outputFlags.Output,
 		pretty:                   outputFlags.Pretty,
 	}
@@ -150,11 +97,11 @@ func bindCiProductsListFlags(fs *flag.FlagSet) ciProductsListFlags {
 
 func normalizeCiProductsProductTypes(fs *flag.FlagSet, value string) ([]string, error) {
 	values := shared.SplitCSVUpper(value)
-	if ciProductsFlagProvided(fs, "product-type") && len(values) == 0 {
+	if flagProvided(fs, "product-type") && len(values) == 0 {
 		return nil, fmt.Errorf("--product-type must not be empty")
 	}
 	for _, item := range values {
-		if !containsCiProductsValue(ciProductsProductTypeValues, item) {
+		if !slices.Contains(ciProductsProductTypeValues, item) {
 			return nil, fmt.Errorf("--product-type must be one of: %s", strings.Join(ciProductsProductTypeValues, ", "))
 		}
 	}
@@ -166,32 +113,15 @@ func normalizeCiProductsSelection(fs *flag.FlagSet, value string, allowed []stri
 	if err != nil {
 		return nil, err
 	}
-	if ciProductsFlagProvided(fs, strings.TrimPrefix(flagName, "--")) && len(values) == 0 {
+	if flagProvided(fs, strings.TrimPrefix(flagName, "--")) && len(values) == 0 {
 		return nil, fmt.Errorf("%s must not be empty", flagName)
 	}
 	return values, nil
 }
 
-func ciProductsFlagProvided(fs *flag.FlagSet, name string) bool {
-	provided := false
-	fs.Visit(func(f *flag.Flag) {
-		provided = provided || f.Name == name
-	})
-	return provided
-}
-
 func addCiProductsValue(values []string, value string) []string {
-	if containsCiProductsValue(values, value) {
+	if slices.Contains(values, value) {
 		return values
 	}
 	return append(values, value)
-}
-
-func containsCiProductsValue(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }

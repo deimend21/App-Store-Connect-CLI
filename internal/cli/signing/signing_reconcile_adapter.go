@@ -218,7 +218,7 @@ type ReconcileCompletionEvidence struct {
 }
 
 // ExecuteReconcilePlan creates a protected plan selected by an exact certificate fingerprint.
-func ExecuteReconcilePlan(ctx context.Context, options ReconcilePlanOptions) (ReconcilePlanView, error) {
+func ExecuteReconcilePlan(ctx context.Context, d *shared.Deps, options ReconcilePlanOptions) (ReconcilePlanView, error) {
 	if err := validateSigningReconcilePlanFlags(options.ArchivePath, options.DevicesFile, options.MinimumValidityDays, options.MaxMutations, options.StateDir); err != nil {
 		return ReconcilePlanView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
 	}
@@ -229,7 +229,7 @@ func ExecuteReconcilePlan(ctx context.Context, options ReconcilePlanOptions) (Re
 	if fingerprint == "" {
 		return ReconcilePlanView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
 	}
-	plan, err := executeSigningReconcilePlan(ctx, signingReconcilePlanOptions{
+	plan, err := executeSigningReconcilePlan(ctx, d, signingReconcilePlanOptions{
 		ArchivePath: options.ArchivePath, DevicesFile: options.DevicesFile,
 		CertificateID: options.CertificateID, CertificateSHA256: fingerprint,
 		MinimumValidityDays: options.MinimumValidityDays, MaxMutations: options.MaxMutations,
@@ -246,7 +246,7 @@ func ExecuteReconcilePlan(ctx context.Context, options ReconcilePlanOptions) (Re
 }
 
 // ExecuteReconcileApply validates and applies one exact plan after explicit confirmation.
-func ExecuteReconcileApply(ctx context.Context, options ReconcileApplyOptions) (ReconcileReceiptView, error) {
+func ExecuteReconcileApply(ctx context.Context, d *shared.Deps, options ReconcileApplyOptions) (ReconcileReceiptView, error) {
 	if !options.Confirm {
 		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
 	}
@@ -254,55 +254,39 @@ func ExecuteReconcileApply(ctx context.Context, options ReconcileApplyOptions) (
 	if err != nil {
 		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
 	}
-	receipt, applyErr := executeSigningReconcileApplyPlanSilent(ctx, plan)
+	receipt, applyErr := executeSigningReconcileApplyPlanSilent(ctx, d, plan)
 	if applyErr != nil {
 		if errors.Is(applyErr, ErrReconcilePlanDrift) {
 			return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanDrift)
 		}
 		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorRetryable)
 	}
-	view, viewErr := newReconcileReceiptView(plan, receipt)
+	view, viewErr := newReconcileReceiptView(plan, receipt, d.Now())
 	if viewErr != nil {
 		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanDrift)
 	}
 	return view, nil
 }
 
-// VerifyReconcileCompletion revalidates an exact completed receipt without mutation.
-func VerifyReconcileCompletion(ctx context.Context, options ReconcileApplyOptions) (ReconcileReceiptView, error) {
-	return verifyReconcileCompletionAdapter(ctx, options, "", nil)
-}
-
-// VerifyReconcileCompletionFromArchive revalidates an exact completed receipt
-// using a caller-owned immutable archive snapshot as the archive authority.
-// The snapshot is still parsed and compared with the protected plan; this only
-// avoids depending on the mutable original archive path after snapshotting.
-func VerifyReconcileCompletionFromArchive(ctx context.Context, options ReconcileApplyOptions, archivePath string) (ReconcileReceiptView, error) {
-	if strings.TrimSpace(archivePath) == "" {
-		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
-	}
-	return verifyReconcileCompletionAdapter(ctx, options, filepath.Clean(archivePath), nil)
-}
-
 // VerifyReconcileCompletionFromEvidence verifies remote completion using an
 // immutable archive snapshot and exact protected run-local receipt/profile
 // copies. It does not depend on the nested generated receipt/profile paths.
-func VerifyReconcileCompletionFromEvidence(ctx context.Context, options ReconcileApplyOptions, archivePath string, evidence ReconcileCompletionEvidence) (ReconcileReceiptView, error) {
+func VerifyReconcileCompletionFromEvidence(ctx context.Context, d *shared.Deps, options ReconcileApplyOptions, archivePath string, evidence ReconcileCompletionEvidence) (ReconcileReceiptView, error) {
 	if !canonicalReconcileEvidencePath(archivePath) || !canonicalReconcileEvidencePath(evidence.ReceiptPath) || !canonicalReconcileDigest(evidence.ReceiptSHA256) || len(evidence.Profiles) == 0 {
 		return ReconcileReceiptView{}, redactedReconcileExecutionError(ReconcileExecutionErrorPlanInvalid)
 	}
-	return verifyReconcileCompletionAdapter(ctx, options, archivePath, &evidence)
+	return verifyReconcileCompletionAdapter(ctx, d, options, archivePath, &evidence)
 }
 
-func verifyReconcileCompletionAdapter(ctx context.Context, options ReconcileApplyOptions, archivePath string, evidence *ReconcileCompletionEvidence) (ReconcileReceiptView, error) {
-	view, kind, err := verifyReconcileCompletion(ctx, options, archivePath, evidence)
+func verifyReconcileCompletionAdapter(ctx context.Context, d *shared.Deps, options ReconcileApplyOptions, archivePath string, evidence *ReconcileCompletionEvidence) (ReconcileReceiptView, error) {
+	view, kind, err := verifyReconcileCompletion(ctx, d, options, archivePath, evidence)
 	if err == nil {
 		return view, nil
 	}
 	return ReconcileReceiptView{}, redactedReconcileExecutionError(kind)
 }
 
-func verifyReconcileCompletion(ctx context.Context, options ReconcileApplyOptions, archivePath string, evidence *ReconcileCompletionEvidence) (ReconcileReceiptView, ReconcileExecutionErrorKind, error) {
+func verifyReconcileCompletion(ctx context.Context, d *shared.Deps, options ReconcileApplyOptions, archivePath string, evidence *ReconcileCompletionEvidence) (ReconcileReceiptView, ReconcileExecutionErrorKind, error) {
 	plan, err := readExpectedReconcilePlan(options)
 	if err != nil {
 		return ReconcileReceiptView{}, ReconcileExecutionErrorPlanInvalid, err
@@ -323,17 +307,17 @@ func verifyReconcileCompletion(ctx context.Context, options ReconcileApplyOption
 	if err != nil {
 		return ReconcileReceiptView{}, ReconcileExecutionErrorPlanDrift, err
 	}
-	view, err := newReconcileReceiptViewForEvidence(plan, receipt, evidence)
+	view, err := newReconcileReceiptViewForEvidence(plan, receipt, evidence, d.Now())
 	if err != nil {
 		return ReconcileReceiptView{}, ReconcileExecutionErrorPlanDrift, err
 	}
-	client, err := shared.GetASCClient()
+	client, err := d.Client()
 	if err != nil {
 		return ReconcileReceiptView{}, ReconcileExecutionErrorRetryable, err
 	}
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	defer cancel()
-	if err := verifyCurrentReconcileCertificate(requestCtx, client, plan); err != nil {
+	if err := verifyCurrentReconcileCertificate(requestCtx, d.Now, client, plan); err != nil {
 		kind := ReconcileExecutionErrorPlanDrift
 		if isRetryableReconcileFailure(err) {
 			kind = ReconcileExecutionErrorRetryable
@@ -348,7 +332,7 @@ func verifyReconcileCompletion(ctx context.Context, options ReconcileApplyOption
 	if err != nil {
 		return ReconcileReceiptView{}, ReconcileExecutionErrorPlanDrift, err
 	}
-	if err := verifyReconcileRemoteCompletion(requestCtx, client, plan, devicesFile, receipt, view); err != nil {
+	if err := verifyReconcileRemoteCompletion(requestCtx, d.Now, client, plan, devicesFile, receipt, view); err != nil {
 		kind := ReconcileExecutionErrorPlanDrift
 		if isRetryableReconcileFailure(err) {
 			kind = ReconcileExecutionErrorRetryable
@@ -382,9 +366,9 @@ func readCompleteSigningReceiptForEvidence(plan signingReconcilePlanArtifact, ev
 	return decodeCompleteSigningReceipt(plan, data)
 }
 
-func newReconcileReceiptViewForEvidence(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt, evidence *ReconcileCompletionEvidence) (ReconcileReceiptView, error) {
+func newReconcileReceiptViewForEvidence(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt, evidence *ReconcileCompletionEvidence, now time.Time) (ReconcileReceiptView, error) {
 	if evidence == nil {
-		return newReconcileReceiptView(plan, receipt)
+		return newReconcileReceiptView(plan, receipt, now)
 	}
 	profiles := make(map[string][]byte, len(evidence.Profiles))
 	for _, profile := range evidence.Profiles {
@@ -404,7 +388,7 @@ func newReconcileReceiptViewForEvidence(plan signingReconcilePlanArtifact, recei
 		}
 		profiles[profile.ResourceID] = data
 	}
-	return newReconcileReceiptViewWithProfileEvidence(plan, receipt, profiles)
+	return newReconcileReceiptViewWithProfileEvidence(plan, receipt, profiles, now)
 }
 
 func readExpectedReconcilePlan(options ReconcileApplyOptions) (signingReconcilePlanArtifact, error) {
@@ -501,11 +485,11 @@ func newReconcilePlanView(plan signingReconcilePlanArtifact) ReconcilePlanView {
 	return view
 }
 
-func newReconcileReceiptView(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt) (ReconcileReceiptView, error) {
-	return newReconcileReceiptViewWithProfileEvidence(plan, receipt, nil)
+func newReconcileReceiptView(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt, now time.Time) (ReconcileReceiptView, error) {
+	return newReconcileReceiptViewWithProfileEvidence(plan, receipt, nil, now)
 }
 
-func newReconcileReceiptViewWithProfileEvidence(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt, profileEvidence map[string][]byte) (ReconcileReceiptView, error) {
+func newReconcileReceiptViewWithProfileEvidence(plan signingReconcilePlanArtifact, receipt signingReconcileReceipt, profileEvidence map[string][]byte, now time.Time) (ReconcileReceiptView, error) {
 	view := ReconcileReceiptView{
 		SchemaVersion: receipt.SchemaVersion, PlanHash: plan.PlanHash,
 		Complete: receipt.Complete, ReceiptPath: receipt.ReceiptPath,
@@ -540,9 +524,9 @@ func newReconcileReceiptViewWithProfileEvidence(plan signingReconcilePlanArtifac
 		var profile ReconcileProfileView
 		var err error
 		if profileEvidence == nil {
-			profile, err = reconcileProfileView(plan, action, item)
+			profile, err = reconcileProfileView(plan, action, item, now)
 		} else if content, ok := profileEvidence[item.ResourceID]; ok {
-			profile, err = reconcileProfileViewFromContent(plan, action, item, content)
+			profile, err = reconcileProfileViewFromContent(plan, action, item, content, now)
 			usedEvidence[item.ResourceID] = struct{}{}
 		} else {
 			err = fmt.Errorf("profile action has no exact evidence copy")
@@ -581,7 +565,7 @@ func newReconcileReceiptViewWithProfileEvidence(plan signingReconcilePlanArtifac
 	return view, nil
 }
 
-func reconcileProfileView(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt) (ReconcileProfileView, error) {
+func reconcileProfileView(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt, now time.Time) (ReconcileProfileView, error) {
 	profilesDir, outputPath, relative, err := reconcileProfileOutputPath(plan, action, item)
 	if err != nil {
 		return ReconcileProfileView{}, err
@@ -610,15 +594,15 @@ func reconcileProfileView(plan signingReconcilePlanArtifact, action signingActio
 	if len(content) > reconcileProfileMaxBytes {
 		return ReconcileProfileView{}, fmt.Errorf("verified profile exceeds %d bytes", reconcileProfileMaxBytes)
 	}
-	return reconcileProfileViewFromValidatedContent(plan, action, item, outputPath, relative, content)
+	return reconcileProfileViewFromValidatedContent(plan, action, item, outputPath, relative, content, now)
 }
 
-func reconcileProfileViewFromContent(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt, content []byte) (ReconcileProfileView, error) {
+func reconcileProfileViewFromContent(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt, content []byte, now time.Time) (ReconcileProfileView, error) {
 	_, outputPath, relative, err := reconcileProfileOutputPath(plan, action, item)
 	if err != nil {
 		return ReconcileProfileView{}, err
 	}
-	return reconcileProfileViewFromValidatedContent(plan, action, item, outputPath, relative, content)
+	return reconcileProfileViewFromValidatedContent(plan, action, item, outputPath, relative, content, now)
 }
 
 func reconcileProfileOutputPath(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt) (string, string, string, error) {
@@ -643,7 +627,7 @@ func reconcileProfileOutputPath(plan signingReconcilePlanArtifact, action signin
 	return profilesDir, outputPath, relative, nil
 }
 
-func reconcileProfileViewFromValidatedContent(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt, outputPath, relative string, content []byte) (ReconcileProfileView, error) {
+func reconcileProfileViewFromValidatedContent(plan signingReconcilePlanArtifact, action signingAction, item signingActionReceipt, outputPath, relative string, content []byte, now time.Time) (ReconcileProfileView, error) {
 	parsed, err := decodeReconcileMobileProvision(content)
 	if err != nil {
 		return ReconcileProfileView{}, fmt.Errorf("decode verified profile: %w", err)
@@ -651,7 +635,7 @@ func reconcileProfileViewFromValidatedContent(plan signingReconcilePlanArtifact,
 	if filepath.Base(relative) != parsed.UUID+".mobileprovision" {
 		return ReconcileProfileView{}, fmt.Errorf("verified profile UUID does not match its output path")
 	}
-	if !safeProfileUUID(parsed.UUID) || !parsed.ExpirationDate.After(time.Now().Add(time.Duration(plan.MinimumValidityDays)*24*time.Hour)) {
+	if !safeProfileUUID(parsed.UUID) || !parsed.ExpirationDate.After(now.Add(time.Duration(plan.MinimumValidityDays)*24*time.Hour)) {
 		return ReconcileProfileView{}, fmt.Errorf("verified profile no longer satisfies the exact plan validity")
 	}
 	target, ok := targetByBundleID(plan.Targets, action.BundleID)

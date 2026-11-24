@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/signing"
 	localxcode "github.com/rudrankriyam/App-Store-Connect-CLI/internal/xcode"
 )
@@ -44,7 +45,7 @@ func TestDistributionApplyCheckpointsClosedReconcileFailureClassification(t *tes
 				checkpoints = append(checkpoints, state)
 				return nil
 			}
-			deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+			deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 				return signing.ReconcileReceiptView{}, test.err(t)
 			}
 			deps.writeExportOptions = func(context.Context, localxcode.ManualReleaseTestingExportOptions) (*localxcode.ManualReleaseTestingExportOptionsResult, error) {
@@ -53,7 +54,7 @@ func TestDistributionApplyCheckpointsClosedReconcileFailureClassification(t *tes
 			}
 			installDistributionOrchestrationDependencies(t, deps)
 
-			state, err := executeDistributionApply(context.Background(), distributionApplyRequest{
+			state, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{
 				PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash,
 			})
 			if err == nil {
@@ -108,16 +109,16 @@ func TestDistributionResumeCheckpointsClosedReconcileVerificationClassification(
 				checkpoints = append(checkpoints, state)
 				return nil
 			}
-			deps.verifyReconcile = func(context.Context, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
+			deps.verifyReconcile = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
 				return signing.ReconcileReceiptView{}, test.err(t)
 			}
-			deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+			deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 				t.Fatal("publication resumed after reconcile verification failure")
 				return publishExecutionResult{}, nil
 			}
 			installDistributionOrchestrationDependencies(t, deps)
 
-			state, err := executeDistributionResume(context.Background(), distributionRunRequest{
+			state, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{
 				RunID: run.RunID, StateDir: plan.Paths.StateDir,
 			})
 			if err == nil {
@@ -139,7 +140,7 @@ func newRetryableReconcileExecutionError(t *testing.T) error {
 
 func newInvalidReconcileExecutionError(t *testing.T) error {
 	t.Helper()
-	_, err := signing.ExecuteReconcileApply(context.Background(), signing.ReconcileApplyOptions{})
+	_, err := signing.ExecuteReconcileApply(context.Background(), newDistributeTestDeps(), signing.ReconcileApplyOptions{})
 	if err == nil || signing.ClassifyReconcileExecutionError(err) != signing.ReconcileExecutionErrorPlanInvalid {
 		t.Fatalf("invalid reconcile error fixture = %v", err)
 	}

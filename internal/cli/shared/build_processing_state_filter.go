@@ -2,6 +2,7 @@ package shared
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -24,7 +25,12 @@ type BuildProcessingStateFilterOptions struct {
 
 // NormalizeBuildProcessingStateFilter parses and validates CSV processing-state
 // filters (including "all"), deduplicates values, and applies optional aliases.
-func NormalizeBuildProcessingStateFilter(raw string, options BuildProcessingStateFilterOptions) ([]string, error) {
+// An invalid value's "Error:" line goes to d's stderr.
+func (d *Deps) NormalizeBuildProcessingStateFilter(raw string, options BuildProcessingStateFilterOptions) ([]string, error) {
+	return normalizeBuildProcessingStateFilterTo(d.IO.ErrOut, raw, options)
+}
+
+func normalizeBuildProcessingStateFilterTo(stderr io.Writer, raw string, options BuildProcessingStateFilterOptions) ([]string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
 	}
@@ -41,7 +47,7 @@ func NormalizeBuildProcessingStateFilter(raw string, options BuildProcessingStat
 
 	values := SplitCSVUpper(raw)
 	if len(values) == 0 {
-		return nil, UsageErrorf("%s must include at least one state", flagName)
+		return nil, usageErrorfTo(stderr, "%s must include at least one state", flagName)
 	}
 
 	if len(values) == 1 && values[0] == "ALL" {
@@ -73,10 +79,10 @@ func NormalizeBuildProcessingStateFilter(raw string, options BuildProcessingStat
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		if value == "ALL" {
-			return nil, UsageErrorf("%s value \"all\" cannot be combined with other states", flagName)
+			return nil, usageErrorfTo(stderr, "%s value \"all\" cannot be combined with other states", flagName)
 		}
 		if _, ok := allowed[value]; !ok {
-			return nil, UsageErrorf("%s must be one of %s", flagName, allowedValuesHelp)
+			return nil, usageErrorfTo(stderr, "%s must be one of %s", flagName, allowedValuesHelp)
 		}
 
 		if target, ok := aliasTargets[value]; ok {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -27,15 +28,21 @@ const (
 	ReviewSubmissionItemTypeInAppPurchaseVersion            ReviewSubmissionItemType = "inAppPurchaseVersions"
 	ReviewSubmissionItemTypeSubscriptionVersion             ReviewSubmissionItemType = "subscriptionVersions"
 	ReviewSubmissionItemTypeSubscriptionGroupVersion        ReviewSubmissionItemType = "subscriptionGroupVersions"
+	ReviewSubmissionItemTypeRetentionMessageVersion         ReviewSubmissionItemType = "retentionMessageVersions"
 )
 
 // ReviewSubmissionItemAttributes describes review submission item attributes.
 type ReviewSubmissionItemAttributes struct {
 	State string `json:"state,omitempty"`
+
+	api apiAttributes
 }
 
 // ReviewSubmissionItemRelationships describes review submission item relationships.
 type ReviewSubmissionItemRelationships struct {
+	contentLinkages                 int           `json:"-"`
+	appVersionLinkageKnown          bool          `json:"-"`
+	iapVersionLinkageKnown          bool          `json:"-"`
 	AppStoreVersion                 *Relationship `json:"appStoreVersion,omitempty"`
 	AppCustomProductPageVersion     *Relationship `json:"appCustomProductPageVersion,omitempty"`
 	AppAssetLibraryImage            *Relationship `json:"appAssetLibraryImage,omitempty"`
@@ -52,6 +59,39 @@ type ReviewSubmissionItemRelationships struct {
 	InAppPurchaseVersion            *Relationship `json:"inAppPurchaseVersion,omitempty"`
 	SubscriptionVersion             *Relationship `json:"subscriptionVersion,omitempty"`
 	SubscriptionGroupVersion        *Relationship `json:"subscriptionGroupVersion,omitempty"`
+	RetentionMessageVersion         *Relationship `json:"retentionMessageVersion,omitempty"`
+}
+
+// VersionLinkagesKnown reports whether both requested version linkages were returned.
+func (r *ReviewSubmissionItemRelationships) VersionLinkagesKnown() bool {
+	return r != nil && r.appVersionLinkageKnown && r.iapVersionLinkageKnown
+}
+
+// HasConflictingContentLinkages reports contradictory item content identities.
+func (r *ReviewSubmissionItemRelationships) HasConflictingContentLinkages() bool {
+	return r != nil && r.contentLinkages > 1
+}
+
+func (r *ReviewSubmissionItemRelationships) UnmarshalJSON(data []byte) error {
+	type plain ReviewSubmissionItemRelationships
+	if err := json.Unmarshal(data, (*plain)(r)); err != nil {
+		return err
+	}
+	var raw map[string]struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	r.contentLinkages = 0
+	for _, relationship := range raw {
+		if len(relationship.Data) > 0 && strings.TrimSpace(string(relationship.Data)) != "null" {
+			r.contentLinkages++
+		}
+	}
+	r.appVersionLinkageKnown = len(raw["appStoreVersion"].Data) > 0
+	r.iapVersionLinkageKnown = len(raw["inAppPurchaseVersion"].Data) > 0
+	return nil
 }
 
 // ReviewSubmissionItemResource represents a review submission item resource.
@@ -107,17 +147,7 @@ type ReviewSubmissionItemCreateRelationships struct {
 	InAppPurchaseVersion            *Relationship `json:"inAppPurchaseVersion,omitempty"`
 	SubscriptionVersion             *Relationship `json:"subscriptionVersion,omitempty"`
 	SubscriptionGroupVersion        *Relationship `json:"subscriptionGroupVersion,omitempty"`
-}
-
-// ReviewSubmissionItemCreateData is the data portion of a review submission item create request.
-type ReviewSubmissionItemCreateData struct {
-	Type          ResourceType                            `json:"type"`
-	Relationships ReviewSubmissionItemCreateRelationships `json:"relationships"`
-}
-
-// ReviewSubmissionItemCreateRequest is a request to create a review submission item.
-type ReviewSubmissionItemCreateRequest struct {
-	Data ReviewSubmissionItemCreateData `json:"data"`
+	RetentionMessageVersion         *Relationship `json:"retentionMessageVersion,omitempty"`
 }
 
 type reviewSubmissionItemTypeSpec struct {
@@ -142,6 +172,12 @@ var reviewSubmissionItemTypeSpecs = []reviewSubmissionItemTypeSpec{
 		canonical: ReviewSubmissionItemTypeSubscriptionGroupVersion,
 		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
 			relationships.SubscriptionGroupVersion = reviewSubmissionItemRelationship(ResourceTypeSubscriptionGroupVersions, itemID)
+		},
+	},
+	{
+		canonical: ReviewSubmissionItemTypeRetentionMessageVersion,
+		applyRelationship: func(relationships *ReviewSubmissionItemCreateRelationships, itemID string) {
+			relationships.RetentionMessageVersion = reviewSubmissionItemRelationship(ResourceTypeRetentionMessageVersions, itemID)
 		},
 	},
 	{
@@ -279,15 +315,18 @@ type ReviewSubmissionItemUpdateData struct {
 	Attributes ReviewSubmissionItemUpdateAttributes `json:"attributes"`
 }
 
-// ReviewSubmissionItemUpdateRequest is a request to update a review submission item.
-type ReviewSubmissionItemUpdateRequest struct {
-	Data ReviewSubmissionItemUpdateData `json:"data"`
-}
-
-// ReviewSubmissionItemDeleteResult represents CLI output for review submission item deletions.
-type ReviewSubmissionItemDeleteResult struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
+// ReviewSubmissionItemsCursorSubmissionID extracts the owner of a review item continuation.
+func ReviewSubmissionItemsCursorSubmissionID(next string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(next))
+	if err != nil {
+		return "", err
+	}
+	path, hasPrefix := strings.CutPrefix(parsed.Path, "/v1/reviewSubmissions/")
+	id, hasSuffix := strings.CutSuffix(path, "/items")
+	if _, err := ValidateResourcePathSegment(id); !hasPrefix || !hasSuffix || err != nil {
+		return "", fmt.Errorf("pagination URL must point to a review submission's items")
+	}
+	return id, nil
 }
 
 // GetReviewSubmissionItems retrieves items for a review submission.
@@ -308,14 +347,21 @@ func (c *Client) getReviewSubmissionItems(ctx context.Context, submissionID stri
 		opt(query)
 	}
 
+	submissionID = strings.TrimSpace(submissionID)
 	var path string
 	if query.nextURL != "" {
 		if err := validateNextURL(query.nextURL); err != nil {
 			return nil, fmt.Errorf("reviewSubmissionItems: %w", err)
 		}
+		cursorSubmissionID, err := ReviewSubmissionItemsCursorSubmissionID(query.nextURL)
+		if err != nil {
+			return nil, fmt.Errorf("reviewSubmissionItems: %w", err)
+		}
+		if submissionID != "" && submissionID != cursorSubmissionID {
+			return nil, fmt.Errorf("reviewSubmissionItems: pagination URL points to another review submission")
+		}
 		path = query.nextURL
 	} else {
-		submissionID = strings.TrimSpace(submissionID)
 		if submissionID == "" {
 			return nil, fmt.Errorf("submissionID is required")
 		}
@@ -434,18 +480,6 @@ func (c *Client) UpdateReviewSubmissionItem(ctx context.Context, itemID string, 
 	}
 
 	return &response, nil
-}
-
-// DeleteReviewSubmissionItem deletes a review submission item by ID.
-func (c *Client) DeleteReviewSubmissionItem(ctx context.Context, itemID string) error {
-	itemID = strings.TrimSpace(itemID)
-	if itemID == "" {
-		return fmt.Errorf("itemID is required")
-	}
-
-	path := fmt.Sprintf("/v1/reviewSubmissionItems/%s", itemID)
-	_, err := c.do(ctx, "DELETE", path, nil)
-	return err
 }
 
 // AddReviewSubmissionItem adds an app store version to a review submission.

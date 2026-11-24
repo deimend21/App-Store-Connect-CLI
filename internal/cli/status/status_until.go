@@ -3,7 +3,6 @@ package status
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -106,7 +105,7 @@ func isApprovedAppStoreState(state string) bool {
 	return shared.IsLiveAppStoreVersionState(state)
 }
 
-func finishUntil(until string, check untilCheck, polls int, output string, pretty bool) error {
+func finishUntil(d *shared.Deps, until string, check untilCheck, polls int, output string, pretty bool) error {
 	result := &asc.StatusUntilResult{
 		Until:   until,
 		Reached: check.outcome != "",
@@ -120,12 +119,12 @@ func finishUntil(until string, check untilCheck, polls int, output string, prett
 
 	format := strings.ToLower(strings.TrimSpace(output))
 	if format == "" {
-		format = shared.DefaultOutputFormat()
+		format = d.DefaultOutputFormat()
 	}
 	if format != "json" {
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(d.IO.Out)
 	}
-	if err := shared.PrintOutput(result, format, pretty); err != nil {
+	if err := d.PrintOutput(result, format, pretty); err != nil {
 		return err
 	}
 	if check.positive {
@@ -138,11 +137,11 @@ func finishUntil(until string, check untilCheck, polls int, output string, prett
 	}
 	if result.Reached {
 		message := fmt.Sprintf("status: --until %s ended with outcome %s%s", until, result.Outcome, state)
-		fmt.Fprintln(os.Stderr, message)
+		fmt.Fprintln(d.IO.ErrOut, message)
 		return shared.NewStderrReportedError(shared.NewValidationError(errors.New(message)))
 	}
 	message := fmt.Sprintf("status: --until %s not reached after %d polls%s", until, polls, state)
-	fmt.Fprintln(os.Stderr, message)
+	fmt.Fprintln(d.IO.ErrOut, message)
 	return shared.NewPendingError(message)
 }
 
@@ -184,7 +183,7 @@ func resolveNextCommands(resp *dashboardResponse, appID string, platform string)
 	switch strings.ToUpper(strings.TrimSpace(version.State)) {
 	case "PREPARE_FOR_SUBMISSION":
 		add("Check App Store submission readiness.", false, "validate", "--app", appID, "--version-id", version.VersionID)
-		if build != nil && strings.EqualFold(build.ProcessingState, "VALID") && build.Version == version.Version && build.Platform == version.Platform {
+		if build != nil && !build.appStoreRestricted && strings.EqualFold(build.ProcessingState, "VALID") && build.Version == version.Version && build.Platform == version.Platform {
 			add("Attach the latest build and submit the version for App Review.", true, "review", "submit", "--app", appID, "--version-id", version.VersionID, "--build-id", build.ID, "--confirm")
 		}
 	case "WAITING_FOR_REVIEW", "IN_REVIEW":

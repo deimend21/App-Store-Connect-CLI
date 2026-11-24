@@ -13,6 +13,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	routingcoveragecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/routingcoverage"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 const validReleaseRoutingCoverageGeoJSON = `{"type":"MultiPolygon","coordinates":[[[[77.5,12.9],[77.7,12.9],[77.7,13.1],[77.5,12.9]]]]}`
@@ -20,7 +21,7 @@ const validReleaseRoutingCoverageGeoJSON = `{"type":"MultiPolygon","coordinates"
 func prepareReleaseRoutingCoverage(t *testing.T, path string) routingcoveragecli.PreparedRoutingCoverageFile {
 	t.Helper()
 	t.Chdir(filepath.Dir(path))
-	prepared, err := routingcoveragecli.PrepareRoutingCoverageFile(path)
+	prepared, err := routingcoveragecli.PrepareRoutingCoverageFile(shared.DefaultDeps(), path)
 	if err != nil {
 		t.Fatalf("PrepareRoutingCoverageFile() error: %v", err)
 	}
@@ -28,6 +29,7 @@ func prepareReleaseRoutingCoverage(t *testing.T, path string) routingcoveragecli
 }
 
 func TestApplyRoutingCoverageStepReusesMatchingCompleteAsset(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -46,7 +48,7 @@ func TestApplyRoutingCoverageStepReusesMatchingCompleteAsset(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
 	if err != nil {
 		t.Fatalf("applyRoutingCoverageStep() error: %v", err)
 	}
@@ -60,6 +62,7 @@ func TestApplyRoutingCoverageStepReusesMatchingCompleteAsset(t *testing.T) {
 }
 
 func TestWaitForRoutingCoverageDeliveryIncludesSchemaErrorDescriptions(t *testing.T) {
+	d := releaseTestDeps()
 	client, _ := newReleaseTestServerClient(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet || req.URL.Path != "/v1/routingAppCoverages/COVERAGE_123" {
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
@@ -69,7 +72,7 @@ func TestWaitForRoutingCoverageDeliveryIncludesSchemaErrorDescriptions(t *testin
 		writeReleaseTestJSON(w, http.StatusOK, `{"data":{"type":"routingAppCoverages","id":"COVERAGE_123","attributes":{"assetDeliveryState":{"state":"FAILED","errors":[{"code":"FILE_INVALID","description":"The GeoJSON is invalid."},{"description":"Try another file."}]}}}}`)
 	}))
 
-	state, err := waitForRoutingCoverageDelivery(context.Background(), client, "COVERAGE_123")
+	state, err := waitForRoutingCoverageDelivery(context.Background(), d, client, "COVERAGE_123")
 	if state != "FAILED" {
 		t.Fatalf("waitForRoutingCoverageDelivery() state = %q, want FAILED", state)
 	}
@@ -80,6 +83,7 @@ func TestWaitForRoutingCoverageDeliveryIncludesSchemaErrorDescriptions(t *testin
 }
 
 func TestApplyRoutingCoverageStepRevalidatesBeforeReusingCompleteAsset(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -98,13 +102,14 @@ func TestApplyRoutingCoverageStepRevalidatesBeforeReusingCompleteAsset(t *testin
 		writeReleaseTestJSON(w, http.StatusOK, fmt.Sprintf(`{"data":{"type":"routingAppCoverages","id":"COVERAGE_123","attributes":{"sourceFileChecksum":%q,"assetDeliveryState":{"state":"COMPLETE"}}}}`, prepared.Checksum))
 	}))
 
-	_, err := applyPreparedRoutingCoverageStep(context.Background(), client, "VERSION_123", prepared, false)
+	_, err := applyPreparedRoutingCoverageStep(context.Background(), d, client, "VERSION_123", prepared, false)
 	if err == nil || !strings.Contains(err.Error(), "file changed after validation") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want changed-file diagnostic", err)
 	}
 }
 
 func TestApplyRoutingCoverageStepRevalidatesAfterWaitingForMatchingAsset(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -128,13 +133,14 @@ func TestApplyRoutingCoverageStepRevalidatesAfterWaitingForMatchingAsset(t *test
 		}
 	}))
 
-	_, err := applyPreparedRoutingCoverageStep(context.Background(), client, "VERSION_123", prepared, false)
+	_, err := applyPreparedRoutingCoverageStep(context.Background(), d, client, "VERSION_123", prepared, false)
 	if err == nil || !strings.Contains(err.Error(), "file changed after validation") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want changed-file diagnostic", err)
 	}
 }
 
 func TestApplyRoutingCoverageStepRefreshesWhenMatchingRelationshipOmitsDeliveryState(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -155,7 +161,7 @@ func TestApplyRoutingCoverageStepRefreshesWhenMatchingRelationshipOmitsDeliveryS
 		}
 	}))
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), client, "VERSION_123", prepared, false)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, client, "VERSION_123", prepared, false)
 	if err != nil {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error: %v", err)
 	}
@@ -173,6 +179,7 @@ func TestApplyRoutingCoverageStepRefreshesWhenMatchingRelationshipOmitsDeliveryS
 }
 
 func TestApplyRoutingCoverageStepReplacesMatchingAwaitingUploadWhenRelationshipOmitsDeliveryState(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -211,7 +218,7 @@ func TestApplyRoutingCoverageStepReplacesMatchingAwaitingUploadWhenRelationshipO
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	outcome, err := applyPreparedRoutingCoverageStep(ctx, client, "VERSION_123", prepared, false)
+	outcome, err := applyPreparedRoutingCoverageStep(ctx, d, client, "VERSION_123", prepared, false)
 	if err != nil {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error: %v", err)
 	}
@@ -226,6 +233,7 @@ func TestApplyRoutingCoverageStepReplacesMatchingAwaitingUploadWhenRelationshipO
 }
 
 func TestApplyRoutingCoverageStepRejectsMatchingCoverageWhenFullResourceOmitsDeliveryState(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -248,7 +256,7 @@ func TestApplyRoutingCoverageStepRejectsMatchingCoverageWhenFullResourceOmitsDel
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := applyPreparedRoutingCoverageStep(ctx, client, "VERSION_123", prepared, false)
+	_, err := applyPreparedRoutingCoverageStep(ctx, d, client, "VERSION_123", prepared, false)
 	if err == nil || !strings.Contains(err.Error(), "response is missing a delivery state") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want missing-state diagnostic", err)
 	}
@@ -259,6 +267,7 @@ func TestApplyRoutingCoverageStepRejectsMatchingCoverageWhenFullResourceOmitsDel
 }
 
 func TestApplyRoutingCoverageStepDryRunPlansReplacementWithoutMutation(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -273,7 +282,7 @@ func TestApplyRoutingCoverageStepDryRunPlansReplacementWithoutMutation(t *testin
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), true)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), true)
 	if err != nil {
 		t.Fatalf("applyRoutingCoverageStep() error: %v", err)
 	}
@@ -287,6 +296,7 @@ func TestApplyRoutingCoverageStepDryRunPlansReplacementWithoutMutation(t *testin
 }
 
 func TestApplyRoutingCoverageStepTreatsNullRelationshipAsMissing(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -301,7 +311,7 @@ func TestApplyRoutingCoverageStepTreatsNullRelationshipAsMissing(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), true)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), true)
 	if err != nil {
 		t.Fatalf("applyRoutingCoverageStep() error: %v", err)
 	}
@@ -312,6 +322,7 @@ func TestApplyRoutingCoverageStepTreatsNullRelationshipAsMissing(t *testing.T) {
 }
 
 func TestApplyRoutingCoverageStepCleansFailedReservation(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -334,7 +345,7 @@ func TestApplyRoutingCoverageStepCleansFailedReservation(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	_, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
+	_, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
 	if err == nil || !strings.Contains(err.Error(), "no upload operations returned") {
 		t.Fatalf("applyRoutingCoverageStep() error = %v, want missing upload operations", err)
 	}
@@ -344,6 +355,7 @@ func TestApplyRoutingCoverageStepCleansFailedReservation(t *testing.T) {
 }
 
 func TestApplyRoutingCoverageStepReportsNewIDWhenReservationCleanupFails(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -366,7 +378,7 @@ func TestApplyRoutingCoverageStepReportsNewIDWhenReservationCleanupFails(t *test
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepareReleaseRoutingCoverage(t, coveragePath), false)
 	if err == nil || !strings.Contains(err.Error(), "also failed to delete routing coverage reservation COVERAGE_NEW") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want retained-reservation diagnostic", err)
 	}
@@ -377,6 +389,7 @@ func TestApplyRoutingCoverageStepReportsNewIDWhenReservationCleanupFails(t *test
 }
 
 func TestApplyRoutingCoverageStepRevalidatesBeforeDeletingExistingCoverage(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -401,7 +414,7 @@ func TestApplyRoutingCoverageStepRevalidatesBeforeDeletingExistingCoverage(t *te
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	_, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepared, false)
+	_, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepared, false)
 	if err == nil || !strings.Contains(err.Error(), "file changed after validation") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want changed-file diagnostic", err)
 	}
@@ -423,13 +436,14 @@ func TestReplaceRoutingCoverageRejectsEmptyVersionBeforeDeletingExistingCoverage
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	_, err := routingcoveragecli.ReplaceRoutingCoverageWithPreparedFile(context.Background(), newReleaseTestClient(t), " \t ", "COVERAGE_OLD", prepared)
+	_, err := routingcoveragecli.ReplaceRoutingCoverageWithPreparedFileWith(context.Background(), shared.DefaultDeps(), newReleaseTestClient(t), " \t ", "COVERAGE_OLD", prepared)
 	if err == nil || !strings.Contains(err.Error(), "version ID is required") {
 		t.Fatalf("ReplaceRoutingCoverageWithPreparedFile() error = %v, want version ID diagnostic", err)
 	}
 }
 
 func TestApplyRoutingCoverageStepUploadsSnapshotAfterDeletingExistingCoverage(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	originalContent := []byte(validReleaseRoutingCoverageGeoJSON)
 	changedContent := []byte(strings.Replace(validReleaseRoutingCoverageGeoJSON, "77.5", "78.5", 1))
@@ -477,7 +491,7 @@ func TestApplyRoutingCoverageStepUploadsSnapshotAfterDeletingExistingCoverage(t 
 		}
 	}))
 
-	_, err := applyPreparedRoutingCoverageStep(context.Background(), client, "VERSION_123", prepared, false)
+	_, err := applyPreparedRoutingCoverageStep(context.Background(), d, client, "VERSION_123", prepared, false)
 	if err != nil {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error: %v", err)
 	}
@@ -512,7 +526,7 @@ func TestUploadPreparedRoutingCoverageFileDoesNotDeleteAfterAmbiguousCommitRespo
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	_, err := routingcoveragecli.UploadPreparedRoutingCoverageFile(context.Background(), newReleaseTestClient(t), "VERSION_123", prepared)
+	_, err := routingcoveragecli.UploadPreparedRoutingCoverageFileWith(context.Background(), shared.DefaultDeps(), newReleaseTestClient(t), "VERSION_123", prepared)
 	if err == nil || !strings.Contains(err.Error(), "committed routing coverage response is missing an ID") {
 		t.Fatalf("UploadPreparedRoutingCoverageFile() error = %v, want missing-ID diagnostic", err)
 	}
@@ -522,6 +536,7 @@ func TestUploadPreparedRoutingCoverageFileDoesNotDeleteAfterAmbiguousCommitRespo
 }
 
 func TestApplyRoutingCoverageStepReportsNewIDAfterAmbiguousReplacementCommit(t *testing.T) {
+	d := releaseTestDeps()
 	coveragePath := filepath.Join(t.TempDir(), "coverage.geojson")
 	if err := os.WriteFile(coveragePath, []byte(validReleaseRoutingCoverageGeoJSON), 0o600); err != nil {
 		t.Fatalf("write routing coverage fixture: %v", err)
@@ -547,7 +562,7 @@ func TestApplyRoutingCoverageStepReportsNewIDAfterAmbiguousReplacementCommit(t *
 	})
 	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 
-	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), newReleaseTestClient(t), "VERSION_123", prepared, false)
+	outcome, err := applyPreparedRoutingCoverageStep(context.Background(), d, newReleaseTestClient(t), "VERSION_123", prepared, false)
 	if err == nil || !strings.Contains(err.Error(), "committed routing coverage response is missing an ID") {
 		t.Fatalf("applyPreparedRoutingCoverageStep() error = %v, want missing-ID diagnostic", err)
 	}
@@ -558,6 +573,7 @@ func TestApplyRoutingCoverageStepReportsNewIDAfterAmbiguousReplacementCommit(t *
 }
 
 func TestVerifyResumedCheckpointRechecksRoutingCoverageInput(t *testing.T) {
+	d := releaseTestDeps()
 	client := newCheckpointBindingClient(t, func(req *http.Request) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersions/VERSION_123":
@@ -581,7 +597,7 @@ func TestVerifyResumedCheckpointRechecksRoutingCoverageInput(t *testing.T) {
 		},
 	}
 	messages := []string{}
-	if err := verifyResumedCheckpointBinding(context.Background(), client, opts, &checkpoint, func(message string) {
+	if err := verifyResumedCheckpointBinding(context.Background(), d, client, opts, &checkpoint, func(message string) {
 		messages = append(messages, message)
 	}); err != nil {
 		t.Fatalf("verifyResumedCheckpointBinding() error: %v", err)

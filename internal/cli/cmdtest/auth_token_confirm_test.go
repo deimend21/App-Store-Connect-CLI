@@ -2,9 +2,11 @@ package cmdtest
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -139,5 +141,57 @@ func TestAuthTokenMissingConfirmOmitsUnprintableReinvocation(t *testing.T) {
 	}
 	if strings.Contains(stderr, "Re-run:") {
 		t.Fatalf("expected no re-run suggestion for an unprintable profile, got %q", stderr)
+	}
+}
+
+func TestAuthTokenAcceptsPrivateKeyFlattenedBySecretStore(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
+	writeECDSAPEM(t, keyPath)
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	begin, body, end := lines[0], strings.Join(lines[1:len(lines)-1], ""), lines[len(lines)-1]
+
+	tests := []struct {
+		name    string
+		value   string
+		encoded string
+	}{
+		{name: "everything on one line", value: begin + body + end},
+		{name: "spaces for newlines", value: strings.Join(lines, " ")},
+		{name: "literal newlines around one line", value: begin + `\n` + body + `\n` + end},
+		{name: "body without markers", value: body},
+		{name: "base64", encoded: base64.StdEncoding.EncodeToString(data)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			isolateAuthTokenProfile(t)
+			t.Setenv("ASC_KEY_ID", "ENVKEY")
+			t.Setenv("ASC_ISSUER_ID", "12345678-abcd-1234-abcd-123456789012")
+			t.Setenv("ASC_PRIVATE_KEY_PATH", "")
+			t.Setenv("ASC_PRIVATE_KEY_B64", test.encoded)
+			t.Setenv("ASC_PRIVATE_KEY", test.value)
+
+			root := RootCommand("1.2.3")
+			if err := root.Parse([]string{"auth", "token", "--confirm"}); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			var err error
+			stdout, stderr := captureOutput(t, func() {
+				// Inline API signing must work without a writable temporary directory.
+				t.Setenv("TMPDIR", keyPath)
+				t.Setenv("TMP", keyPath)
+				err = root.Run(context.Background())
+			})
+			if err != nil {
+				t.Fatalf("auth token error: %v (stderr %q)", err, stderr)
+			}
+			if got := strings.Count(strings.TrimSpace(stdout), "."); got != 2 {
+				t.Fatalf("expected a signed JWT on stdout, got %d dots", got)
+			}
+		})
 	}
 }

@@ -42,6 +42,41 @@ func TestLegalChecks_CopyrightAcceptsAppStoreConnectFreeTextForms(t *testing.T) 
 	}
 }
 
+func TestLegalChecks_CopyrightRangeEndingBeforeCurrentYear(t *testing.T) {
+	currentYear := time.Now().Year()
+	tests := []struct {
+		value        string
+		wantOutdated bool
+	}{
+		{value: fmt.Sprintf("2019-%d Acme Inc.", currentYear-1), wantOutdated: true},
+		{value: fmt.Sprintf("© 2019 – %d Acme Inc.", currentYear-2), wantOutdated: true},
+		{value: fmt.Sprintf("2019-%d Acme Inc.", currentYear), wantOutdated: false},
+		{value: "2019 Acme Inc.", wantOutdated: false},
+		{value: fmt.Sprintf("%d-%d Acme Inc.", currentYear-1, currentYear-3), wantOutdated: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.value, func(t *testing.T) {
+			checks := legalChecks(test.value, false, false, nil, nil)
+			var found []CheckResult
+			for _, check := range checks {
+				if check.ID == "legal.format.copyright_year_outdated" {
+					found = append(found, check)
+				}
+			}
+			if !test.wantOutdated {
+				if len(found) != 0 {
+					t.Fatalf("checks = %+v, want no outdated copyright check", checks)
+				}
+				return
+			}
+			if len(found) != 1 || found[0].Severity != SeverityInfo || found[0].Remediation == "" {
+				t.Fatalf("checks = %+v, want one outdated copyright info check with remediation", checks)
+			}
+		})
+	}
+}
+
 func TestLegalChecks_CopyrightYearAdvisesInsteadOfBlocking(t *testing.T) {
 	checks := legalChecks("Acme Inc.", false, false, nil, nil)
 
@@ -478,5 +513,35 @@ func TestValidate_PrivacyPolicyUsesActiveMonetizationOnly(t *testing.T) {
 	}
 	if !hasCheckID(report.Checks, "metadata.recommended.privacy_policy_url") {
 		t.Fatal("expected metadata.recommended.privacy_policy_url when only removed monetization exists")
+	}
+}
+
+func TestTVOSPrivacyPolicyTextChecks(t *testing.T) {
+	locs := []AppInfoLocalization{
+		{ID: "a", Locale: "ja", PrivacyPolicyURL: "https://example.com/privacy"},
+		{ID: "b", Locale: "en-US", PrivacyPolicyURL: "https://example.com/privacy", PrivacyPolicyText: "  We collect nothing.  "},
+		{ID: "c", Locale: "ko", PrivacyPolicyText: "   "},
+	}
+
+	checks := tvOSPrivacyPolicyTextChecks("TV_OS", locs)
+	if len(checks) != 2 {
+		t.Fatalf("expected an error for the two localizations without text, got %d: %#v", len(checks), checks)
+	}
+	for _, check := range checks {
+		if check.ID != "legal.required.privacy_policy_text" || check.Severity != SeverityError || check.Field != "privacyPolicyText" {
+			t.Fatalf("unexpected check %#v", check)
+		}
+	}
+	if checks[0].Locale != "ja" || checks[0].ResourceID != "a" || checks[1].Locale != "ko" || checks[1].ResourceID != "c" {
+		t.Fatalf("checks must name the failing localizations in order, got %#v", checks)
+	}
+
+	if got := tvOSPrivacyPolicyTextChecks(" tv_os ", locs); len(got) != 2 {
+		t.Fatalf("platform match must ignore case and whitespace, got %d checks", len(got))
+	}
+	for _, platform := range []string{"IOS", "MAC_OS", ""} {
+		if got := tvOSPrivacyPolicyTextChecks(platform, locs); len(got) != 0 {
+			t.Fatalf("platform %q must not require privacy policy text, got %#v", platform, got)
+		}
 	}
 }

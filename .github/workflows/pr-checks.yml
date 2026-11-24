@@ -125,8 +125,6 @@ jobs:
         if: contains(fromJSON('["docs", "full"]'), needs.changes.outputs.scope)
         run: |
           python3 scripts/test_check_docs.py
-          python3 scripts/test_check_docs_commands.py
-          python3 scripts/test_generate_command_docs.py
 
       - name: Check CI workflow contracts
         if: needs.changes.outputs.scope == 'full'
@@ -372,13 +370,23 @@ jobs:
             command: |
               ASC_BYPASS_KEYCHAIN=1 go test -count=1 ./internal/screenshots
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/secureopen
-              ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/shared -run '^(TestSafeWriteFileNoSymlink|TestPublishStagedFileNoReplace|TestWriteNewFileNoSymlink|TestCleanupIncompleteFile)'
+              ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 -v ./internal/cli/shared -run '^(TestSafeWriteFileNoSymlink|TestPublishStagedFileNoReplace|TestWriteNewFileNoSymlink|TestCleanupIncompleteFile|TestDefaultDepsAbsIsFilepathAbsOnWindows|TestDepsAbsResolvesAgainstInjectedDirectoryOnWindows)'
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/certificates -run '^TestCreateCertificateExportStagingFileProtectsDACLAtCreation$'
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/rootfs
               ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/xcode -run '^TestSigningApplyUnsupportedOnWindowsLeavesProjectUntouched$'
-              ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/xcode -run '^(TestXcodeHelpScopesMacOSRequirementToXcodeTooling|TestXcodeSigningApplyHelpExplainsWindowsBoundary)$'
+              ASC_BYPASS_KEYCHAIN=1 go test -short -count=1 ./internal/cli/xcode -run '^TestXcodeSigning(Plan|Apply)'
               CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o build/asc_dev_windows_amd64.exe .
               ASC_BYPASS_KEYCHAIN=1 ASC_WINDOWS_CREDENTIAL_SMOKE=1 ASC_WINDOWS_SMOKE_BINARY=../../../build/asc_dev_windows_amd64.exe go test -count=1 ./internal/cli/auth -run '^TestWindowsCredentialManagerNativeRoundTrip$'
+          - name: security-key macOS
+            runner: macos-latest
+            command: |
+              brew install libfido2 pkg-config
+              pkg-config --atleast-version=1.14.0 libfido2
+              # Go's cache key includes explicit cgo flags, so include Homebrew's current library path.
+              CGO_LDFLAGS="-O2 -g $(pkg-config --libs libfido2)"
+              export CGO_ENABLED=1 GOMAXPROCS=4 GOFLAGS=-p=4 CGO_LDFLAGS
+              go build -tags fido2 -o build/asc_dev_fido2_macos .
+              ASC_BYPASS_KEYCHAIN=1 go test -race -tags fido2 -p=1 -parallel=4 -count=1 ./internal/securitykey ./internal/web ./internal/cli/web ./internal/cli/cmdtest -run 'SecurityKey|SecurityChallenge|TwoFactorDelivery|TwoFactorPreference|SignCancelledBeforeDeviceDiscovery'
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -393,7 +401,15 @@ jobs:
         shell: bash
 
       - name: Build for ${{ matrix.name }}
-        run: ${{ matrix.command }}
+        run: |
+          output="$(mktemp)"
+          {
+          ${{ matrix.command }}
+          } 2>&1 | tee "$output"
+          if grep -F '[no tests to run]' "$output"; then
+            echo "a go test -run pattern above matches no test" >&2
+            exit 1
+          fi
         shell: bash
 
   ordinary-build:

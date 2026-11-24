@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -14,8 +13,13 @@ import (
 // subscription App Review screenshot that are about to be uploaded. A format
 // problem App Store Connect would reject at delivery is returned as an error
 // before any request. Documented but unconfirmed constraints (size and alpha)
-// and a payload that does not fully decode are printed to stderr as warnings.
-func PreflightReviewScreenshot(path string, file io.ReaderAt, size int64) error {
+// and a payload that does not fully decode are printed to d's stderr as
+// warnings.
+func (d *Deps) PreflightReviewScreenshot(path string, file io.ReaderAt, size int64) error {
+	return preflightReviewScreenshotTo(d.IO.ErrOut, path, file, size)
+}
+
+func preflightReviewScreenshotTo(stderr io.Writer, path string, file io.ReaderAt, size int64) error {
 	warnings, err := asc.CheckReviewScreenshotImage(path, io.NewSectionReader(file, 0, size))
 	if err != nil {
 		return err
@@ -24,20 +28,24 @@ func PreflightReviewScreenshot(path string, file io.ReaderAt, size int64) error 
 		warnings = append(warnings, warning)
 	}
 	for _, warning := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+		fmt.Fprintf(stderr, "Warning: %s\n", warning)
 	}
 	return nil
 }
 
 // ReviewScreenshotUsageError reports a review screenshot rejected before any
-// request. It prints message as one "Error:" line and returns a usage error
-// (exit 2) that does not wrap flag.ErrHelp, so the command's full usage page
-// does not follow and bury the one actionable line. parameter names the flag
-// that supplied the screenshot for diagnostics. Commands under a re-parented
-// tree pass message through RewriteUsageMessage first.
-func ReviewScreenshotUsageError(parameter, message string) error {
+// request. It prints message as one "Error:" line on d's stderr and returns a
+// usage error (exit 2) that does not wrap flag.ErrHelp, so the command's full
+// usage page does not follow and bury the one actionable line. parameter names
+// the flag that supplied the screenshot for diagnostics. Commands under a
+// re-parented tree pass message through RewriteUsageMessage first.
+func (d *Deps) ReviewScreenshotUsageError(parameter, message string) error {
+	return reviewScreenshotUsageErrorTo(d.IO.ErrOut, parameter, message)
+}
+
+func reviewScreenshotUsageErrorTo(stderr io.Writer, parameter, message string) error {
 	message = strings.TrimSpace(SanitizeTerminal(message))
-	fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+	fmt.Fprintf(stderr, "Error: %s\n", message)
 	return WithDiagnostic(NewReportedUsageError(UsageErrorInvalidValue, message), DiagnosticInvalidInput, parameter)
 }
 

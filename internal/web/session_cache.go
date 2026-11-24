@@ -23,6 +23,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/secureopen"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/testguard"
 )
 
 const (
@@ -81,6 +82,7 @@ type persistedSession struct {
 	Generation      string               `json:"generation,omitempty"`
 	UserEmail       string               `json:"user_email,omitempty"`
 	DeveloperTeamID string               `json:"developer_team_id,omitempty"`
+	ProviderID      int64                `json:"provider_id,omitempty"`
 	Cookies         map[string][]pCookie `json:"cookies"`
 }
 
@@ -110,7 +112,7 @@ type persistedLastSession struct {
 
 var (
 	sessionKeyringOpen = func() (keyring.Keyring, error) {
-		return keyring.Open(keyring.Config{
+		return testguard.OpenKeyring(keyring.Config{
 			ServiceName:                    webSessionKeyringService,
 			KeychainTrustApplication:       true,
 			KeychainSynchronizable:         false,
@@ -190,14 +192,18 @@ func resolveBackendSelection() backendSelection {
 }
 
 func webSessionCacheDir() (string, error) {
-	if custom := strings.TrimSpace(os.Getenv(webSessionCacheDirEnv)); custom != "" {
-		return custom, nil
+	dir := strings.TrimSpace(os.Getenv(webSessionCacheDirEnv))
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		dir = filepath.Join(home, ".asc", "web")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
+	if testguard.Hides(dir) {
+		return "", fmt.Errorf("%s holds the web sessions of the developer running the tests; set %s or HOME in the test", dir, webSessionCacheDirEnv)
 	}
-	return filepath.Join(home, ".asc", "web"), nil
+	return dir, nil
 }
 
 func webSessionCacheKey(username string) string {
@@ -298,8 +304,11 @@ func (j *sessionCookieTrackingJar) SetCookies(u *url.URL, cookies []*http.Cookie
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
-	j.CookieJar.SetCookies(u, cookies)
 	now := time.Now().UTC()
+	for _, supplied := range cookies {
+		j.expireHostOnlyAliases(u, supplied)
+	}
+	j.CookieJar.SetCookies(u, cookies)
 	for _, supplied := range cookies {
 		if supplied == nil || supplied.Name == "" {
 			continue
@@ -328,6 +337,47 @@ func (j *sessionCookieTrackingJar) SetCookies(u *url.URL, cookies []*http.Cookie
 			j.recordUpdate(trackedCookieKeyForCookie(origin, deadline), deadline, false)
 		}
 	}
+}
+
+// expireHostOnlyAliases removes the host-only copies the cache hydrated for a
+// Domain cookie. The jar keys cookies by domain, so a re-issued Domain cookie
+// would otherwise sit beside the hydrated copy, which is sent first. The
+// persisted format cannot keep both, so nothing restorable is lost. Genuine
+// host-only cookies are left alone, including on a Domain tombstone.
+func (j *sessionCookieTrackingJar) expireHostOnlyAliases(source *url.URL, supplied *http.Cookie) {
+	if source == nil || supplied == nil || supplied.Name == "" {
+		return
+	}
+	domain := normalizedCookieDomain(supplied.Domain)
+	if domain == "" || !cookieDomainMatchesHost(domain, source.Hostname()) {
+		return
+	}
+	path := effectiveCookiePath(source, supplied)
+	for _, origin := range sessionCookieURLs() {
+		if cookieDomainMatchesHost(domain, origin.Hostname()) && j.cachedNarrowedAlias(origin, supplied.Name, path, domain) {
+			j.CookieJar.SetCookies(origin, []*http.Cookie{{Name: supplied.Name, Path: path, MaxAge: -1}})
+		}
+	}
+}
+
+func (j *sessionCookieTrackingJar) cachedNarrowedAlias(origin *url.URL, name, path, domain string) bool {
+	if j.cached == nil {
+		return false
+	}
+	for cachedOrigin, list := range j.cached.Cookies {
+		base, err := url.Parse(cachedOrigin)
+		if err != nil || base == nil || !strings.EqualFold(base.Host, origin.Host) {
+			continue
+		}
+		for _, candidate := range list {
+			scope := persistedCookieScopeDomain(nil, candidate)
+			if candidate.Name == name && persistedCookiePath(candidate.Path) == persistedCookiePath(path) &&
+				scope != "" && strings.EqualFold(scope, domain) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sessionCookieUpdateOrigins(source *url.URL, supplied *http.Cookie, deleting bool) []string {
@@ -756,7 +806,7 @@ func cachedCookieHasActiveScope(cached *persistedSession, origin string, cookie 
 		}
 		for _, candidate := range list {
 			candidate, usable := normalizePersistedCookieDeadline(candidate, cached.UpdatedAt)
-			if !usable || isExpiredCookie(candidate, now) ||
+			if !usable || isExpiredCookie(candidate, now) || isSessionOnlyCookie(candidate) ||
 				candidate.Name != cookie.Name ||
 				!cookieScopesMatchForOrigin(origin, candidate, cookie) {
 				continue
@@ -836,15 +886,6 @@ func samePersistedCookieStorageScope(origin *url.URL, a, b pCookie) bool {
 		b = narrowCookieDomainForOrigin(origin, b)
 	}
 	return samePersistedCookieScope(a, b)
-}
-
-func persistedCookieListHasScope(cookies []pCookie, cookie pCookie) bool {
-	for _, existing := range cookies {
-		if samePersistedCookieScope(existing, cookie) {
-			return true
-		}
-	}
-	return false
 }
 
 func persistedCookieListHasUnknownIdentity(cookies []pCookie, cookie pCookie) bool {
@@ -1105,11 +1146,6 @@ func narrowPersistedCookieDomains(current *persistedSession) {
 			delete(current.Cookies, origin)
 		}
 	}
-}
-
-func serializeCookieJar(jar http.CookieJar, userEmail string) persistedSession {
-	sess, _ := serializeCookieJarWithError(jar, userEmail)
-	return sess
 }
 
 func serializeCookieJarWithError(jar http.CookieJar, userEmail string) (persistedSession, error) {
@@ -1395,29 +1431,13 @@ func removeLegacyLastKeyFromKeyring(kr keyring.Keyring) error {
 	return nil
 }
 
-func writeSessionToKeychain(key string, sess persistedSession) error {
-	return withSessionStoreLock(func() error { return writeSessionToKeychainUnlocked(key, sess) })
+type keychainSessionWrite struct {
+	merge            func(stored persistedSession) persistedSession
+	ifAbsent         bool
+	recoverMalformed bool
 }
 
-func writeSessionToKeychainUnlocked(key string, sess persistedSession) error {
-	kr, err := openSessionKeyring()
-	if err != nil {
-		return err
-	}
-	store, ok, err := readSessionStoreFromKeyring(kr)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		store = newPersistedSessionStore()
-	}
-	store = normalizePersistedSessionStore(store)
-	store.Sessions[key] = sess
-	store.LastKey = key
-	return writeSessionStoreToKeyring(kr, store)
-}
-
-func writeSessionToKeychainIfAbsentUnlocked(key string, sess persistedSession) error {
+func writeSessionToKeychainUnlocked(key string, sess persistedSession, write keychainSessionWrite) error {
 	kr, err := openSessionKeyring()
 	if err != nil {
 		return err
@@ -1426,38 +1446,23 @@ func writeSessionToKeychainIfAbsentUnlocked(key string, sess persistedSession) e
 	if err != nil {
 		// Never treat malformed or unreadable state as absent for a create-only
 		// import. Doing so could destroy another account's credentials.
-		return err
-	}
-	if ok {
-		if _, exists := store.Sessions[key]; exists {
-			return cachedSessionAlreadyExistsError(key)
-		}
-	} else {
-		store = newPersistedSessionStore()
-	}
-	store = normalizePersistedSessionStore(store)
-	store.Sessions[key] = sess
-	store.LastKey = key
-	return writeSessionStoreToKeyring(kr, store)
-}
-
-func writeSessionToKeychainWithRecoveryUnlocked(key string, sess persistedSession, recoverMalformed bool) error {
-	kr, err := openSessionKeyring()
-	if err != nil {
-		return err
-	}
-	store, ok, err := readSessionStoreFromKeyring(kr)
-	if err != nil {
-		if !recoverMalformed || !errors.Is(err, errMalformedSessionStore) {
+		if !write.recoverMalformed || !errors.Is(err, errMalformedSessionStore) {
 			return err
 		}
-		store = newPersistedSessionStore()
-		ok = true
+		ok = false
 	}
 	if !ok {
 		store = newPersistedSessionStore()
 	}
 	store = normalizePersistedSessionStore(store)
+	if stored, exists := store.Sessions[key]; exists {
+		if write.ifAbsent {
+			return cachedSessionAlreadyExistsError(key)
+		}
+		if write.merge != nil {
+			sess = write.merge(stored)
+		}
+	}
 	store.Sessions[key] = sess
 	store.LastKey = key
 	return writeSessionStoreToKeyring(kr, store)
@@ -1992,23 +1997,15 @@ func readSessionCacheFile(path string) ([]byte, error) {
 	return readBoundedSessionCacheFile(file, path)
 }
 
-func persistSessionBySelection(selection backendSelection, key string, sess persistedSession) error {
-	if selection.backend == sessionBackendOff {
-		return nil
-	}
-	// Hold the entry lock so a concurrent conditional delete cannot compare a
-	// stamp before this write and delete the entry it produces.
-	return withSessionEntryLock(key, func() error {
-		return persistSessionBySelectionLocked(selection, key, sess)
-	})
-}
-
-func persistSessionBySelectionLocked(selection backendSelection, key string, sess persistedSession) error {
+func persistSessionBySelectionLocked(selection backendSelection, key string, sess persistedSession, mergeKeychain func(stored persistedSession) persistedSession) error {
 	switch selection.backend {
 	case sessionBackendOff:
 		return nil
 	case sessionBackendKeychain:
-		if err := writeSessionToKeychain(key, sess); err != nil {
+		err := withSessionStoreLock(func() error {
+			return writeSessionToKeychainUnlocked(key, sess, keychainSessionWrite{merge: mergeKeychain})
+		})
+		if err != nil {
 			if selection.fallbackFile && isKeyringUnavailable(err) {
 				return writeSessionToFile(key, sess)
 			}
@@ -2151,7 +2148,7 @@ func persistImportedSessionBySelectionLocked(selection backendSelection, key str
 					return err
 				}
 			}
-			if err := writeSessionToKeychainIfAbsentUnlocked(key, sess); err != nil {
+			if err := writeSessionToKeychainUnlocked(key, sess, keychainSessionWrite{ifAbsent: true}); err != nil {
 				if selection.fallbackFile && isKeyringUnavailable(err) {
 					return writeSessionToFileIfAbsent(key, sess)
 				}
@@ -2169,7 +2166,7 @@ func persistImportedSessionBySelectionLocked(selection backendSelection, key str
 				return errors.Join(err, state.restore())
 			}
 		}
-		if err := writeSessionToKeychainWithRecoveryUnlocked(key, sess, true); err != nil {
+		if err := writeSessionToKeychainUnlocked(key, sess, keychainSessionWrite{recoverMalformed: true}); err != nil {
 			// Fail closed: a stale keychain entry must not remain ahead of a
 			// replacement written only to the file fallback.
 			return errors.Join(err, state.restore())
@@ -2192,7 +2189,7 @@ func persistImportedSessionBySelectionLocked(selection backendSelection, key str
 			return err
 		}
 		if selection.fallbackKeychain {
-			if err := deleteSessionFromKeychainWithRecoveryUnlocked(key, true); err != nil && !isKeyringUnavailable(err) {
+			if err := deleteSessionFromKeychainUnlocked(key, true); err != nil && !isKeyringUnavailable(err) {
 				return errors.Join(err, state.restore())
 			}
 		}
@@ -2234,26 +2231,21 @@ func sessionEntryOriginWhenFound(origin sessionEntryOrigin, found bool) sessionE
 	return origin
 }
 
-func readSessionFromFileIgnoringErrors(key string) (persistedSession, bool) {
+func readSessionFromFileIgnoringErrors(key string) (persistedSession, sessionEntryOrigin, bool) {
 	sess, ok, err := readSessionFromFile(key)
 	if err != nil {
-		return persistedSession{}, false
+		return persistedSession{}, sessionEntryOriginNone, false
 	}
-	return sess, ok
+	return sess, sessionEntryOriginWhenFound(sessionEntryOriginFile, ok), ok
 }
 
-func readLastSessionFromFileIgnoringErrorsWithKey() (persistedSession, string, bool) {
+func readLastSessionFromFileIgnoringErrorsWithKey() (persistedSession, sessionEntryOrigin, string, bool) {
 	key, ok, err := readLastKeyFromFile()
 	if err != nil || !ok {
-		return persistedSession{}, "", false
+		return persistedSession{}, sessionEntryOriginNone, "", false
 	}
-	sess, ok := readSessionFromFileIgnoringErrors(key)
-	return sess, key, ok
-}
-
-func readSessionBySelection(selection backendSelection, key string) (persistedSession, bool, error) {
-	sess, _, ok, err := readSessionBySelectionWithOrigin(selection, key)
-	return sess, ok, err
+	sess, origin, ok := readSessionFromFileIgnoringErrors(key)
+	return sess, origin, key, ok
 }
 
 func cachedSessionSourceForOrigin(origin sessionEntryOrigin) CachedSessionSource {
@@ -2278,7 +2270,7 @@ func selectionForCachedSessionSource(source CachedSessionSource) (backendSelecti
 	}
 }
 
-func readSessionBySelectionWithOrigin(selection backendSelection, key string) (persistedSession, sessionEntryOrigin, bool, error) {
+func readSessionBySelection(selection backendSelection, key string) (persistedSession, sessionEntryOrigin, bool, error) {
 	switch selection.backend {
 	case sessionBackendOff:
 		return persistedSession{}, sessionEntryOriginNone, false, nil
@@ -2286,12 +2278,14 @@ func readSessionBySelectionWithOrigin(selection backendSelection, key string) (p
 		sess, ok, err := readSessionFromKeychain(key)
 		if err != nil {
 			if selection.fallbackFile && isKeyringUnavailable(err) {
-				return readSessionFromFileIgnoringErrorsWithOrigin(key)
+				fallback, origin, fallbackOK := readSessionFromFileIgnoringErrors(key)
+				return fallback, origin, fallbackOK, nil
 			}
 			return persistedSession{}, sessionEntryOriginNone, false, err
 		}
 		if !ok && selection.fallbackFile {
-			return readSessionFromFileIgnoringErrorsWithOrigin(key)
+			fallback, origin, fallbackOK := readSessionFromFileIgnoringErrors(key)
+			return fallback, origin, fallbackOK, nil
 		}
 		return sess, sessionEntryOriginWhenFound(sessionEntryOriginKeychain, ok), ok, nil
 	case sessionBackendFile:
@@ -2299,16 +2293,6 @@ func readSessionBySelectionWithOrigin(selection backendSelection, key string) (p
 	default:
 		return persistedSession{}, sessionEntryOriginNone, false, nil
 	}
-}
-
-func readSessionFromFileIgnoringErrorsWithOrigin(key string) (persistedSession, sessionEntryOrigin, bool, error) {
-	sess, ok := readSessionFromFileIgnoringErrors(key)
-	return sess, sessionEntryOriginWhenFound(sessionEntryOriginFile, ok), ok, nil
-}
-
-func readLastSessionFromKeychain() (persistedSession, bool, error) {
-	sess, _, ok, err := readLastSessionFromKeychainWithKey()
-	return sess, ok, err
 }
 
 func readLastSessionFromKeychainWithKey() (persistedSession, string, bool, error) {
@@ -2331,12 +2315,7 @@ func readLastSessionFromKeychainWithKey() (persistedSession, string, bool, error
 	return sess, lastKey, true, nil
 }
 
-func readLastSessionBySelection(selection backendSelection) (persistedSession, bool, error) {
-	sess, _, _, ok, err := readLastSessionBySelectionWithOrigin(selection)
-	return sess, ok, err
-}
-
-func readLastSessionBySelectionWithOrigin(selection backendSelection) (persistedSession, sessionEntryOrigin, string, bool, error) {
+func readLastSessionBySelection(selection backendSelection) (persistedSession, sessionEntryOrigin, string, bool, error) {
 	switch selection.backend {
 	case sessionBackendOff:
 		return persistedSession{}, sessionEntryOriginNone, "", false, nil
@@ -2344,14 +2323,14 @@ func readLastSessionBySelectionWithOrigin(selection backendSelection) (persisted
 		sess, key, ok, err := readLastSessionFromKeychainWithKey()
 		if err != nil {
 			if selection.fallbackFile && isKeyringUnavailable(err) {
-				fallback, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
-				return fallback, sessionEntryOriginWhenFound(sessionEntryOriginFile, fallbackOK), fallbackKey, fallbackOK, nil
+				fallback, origin, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
+				return fallback, origin, fallbackKey, fallbackOK, nil
 			}
 			return persistedSession{}, sessionEntryOriginNone, "", false, err
 		}
 		if !ok && selection.fallbackFile {
-			fallback, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
-			return fallback, sessionEntryOriginWhenFound(sessionEntryOriginFile, fallbackOK), fallbackKey, fallbackOK, nil
+			fallback, origin, fallbackKey, fallbackOK := readLastSessionFromFileIgnoringErrorsWithKey()
+			return fallback, origin, fallbackKey, fallbackOK, nil
 		}
 		return sess, sessionEntryOriginWhenFound(sessionEntryOriginKeychain, ok), key, ok, nil
 	case sessionBackendFile:
@@ -2395,14 +2374,10 @@ func deleteSessionFromFile(key string) error {
 }
 
 func deleteSessionFromKeychain(key string) error {
-	return withSessionStoreLock(func() error { return deleteSessionFromKeychainUnlocked(key) })
+	return withSessionStoreLock(func() error { return deleteSessionFromKeychainUnlocked(key, false) })
 }
 
-func deleteSessionFromKeychainUnlocked(key string) error {
-	return deleteSessionFromKeychainWithRecoveryUnlocked(key, false)
-}
-
-func deleteSessionFromKeychainWithRecoveryUnlocked(key string, recoverMalformed bool) error {
+func deleteSessionFromKeychainUnlocked(key string, recoverMalformed bool) error {
 	kr, err := openSessionKeyring()
 	if err != nil {
 		return err
@@ -2530,7 +2505,7 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 	if loaded == 0 {
 		return nil, false, nil
 	}
-	client := newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess))
+	client := newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess), http.DefaultTransport)
 	info, err := sessionInfoFetcher(ctx, client)
 	if err != nil {
 		if isSessionInfoAuthExpired(err) {
@@ -2539,6 +2514,9 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 			return nil, false, ErrCachedSessionExpired
 		}
 		return nil, false, nil
+	}
+	if err := validateCachedSessionAccount(sess.UserEmail, info); err != nil {
+		return nil, false, err
 	}
 	cached := sess
 	session := &AuthSession{
@@ -2552,7 +2530,7 @@ func resumeFromPersistedSession(ctx context.Context, sess persistedSession) (*Au
 	return session, true, nil
 }
 
-func validatePersistedSessionReadOnly(ctx context.Context, sess persistedSession) (*http.Client, *sessionInfo, bool, error) {
+func validatePersistedSessionReadOnly(ctx context.Context, sess persistedSession, transport http.RoundTripper) (*http.Client, *sessionInfo, bool, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		return nil, nil, false, err
@@ -2561,7 +2539,7 @@ func validatePersistedSessionReadOnly(ctx context.Context, sess persistedSession
 	if loaded == 0 {
 		return nil, nil, false, nil
 	}
-	client := newWebHTTPClient(jar)
+	client := newWebHTTPClient(jar, transport)
 	info, err := sessionInfoFetcher(ctx, client)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2575,16 +2553,31 @@ func validatePersistedSessionReadOnly(ctx context.Context, sess persistedSession
 	return client, info, true, nil
 }
 
-func resumeFromPersistedSessionReadOnly(ctx context.Context, sess persistedSession) (*AuthSession, bool, error) {
+func resumeFromPersistedSessionReadOnly(ctx context.Context, sess persistedSession, transport http.RoundTripper) (*AuthSession, bool, error) {
 	identity := &AuthSession{UserEmail: strings.TrimSpace(sess.UserEmail)}
-	client, info, ok, err := validatePersistedSessionReadOnly(ctx, sess)
+	client, info, ok, err := validatePersistedSessionReadOnly(ctx, sess, transport)
 	if err != nil || !ok {
 		return identity, ok, err
+	}
+	if err := validateCachedSessionAccount(sess.UserEmail, info); err != nil {
+		return identity, false, err
 	}
 	session := &AuthSession{Client: client, UserEmail: strings.TrimSpace(sess.UserEmail)}
 	applySessionInfo(session, info)
 	session.DeveloperTeamID = strings.TrimSpace(sess.DeveloperTeamID)
 	return session, true, nil
+}
+
+func validateCachedSessionAccount(expected string, info *sessionInfo) error {
+	if info == nil {
+		return nil
+	}
+	expected = strings.TrimSpace(expected)
+	actual := strings.TrimSpace(info.User.EmailAddress)
+	if expected != "" && actual != "" && !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("%w: Apple session account does not match the cached account", ErrCachedSessionValidationFailed)
+	}
+	return nil
 }
 
 func readOnlyFileBackendSelection() backendSelection {
@@ -2608,9 +2601,10 @@ func loadSessionFromPersistedSession(sess persistedSession) (*AuthSession, bool,
 		return nil, false, nil
 	}
 	return &AuthSession{
-		Client:           newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess)),
+		Client:           newWebHTTPClient(newSessionCookieTrackingJarWithCached(jar, &sess), http.DefaultTransport),
 		UserEmail:        strings.TrimSpace(sess.UserEmail),
 		DeveloperTeamID:  strings.TrimSpace(sess.DeveloperTeamID),
+		ProviderID:       sess.ProviderID,
 		cachedUpdatedAt:  sess.UpdatedAt,
 		cachedGeneration: sess.Generation,
 		cachedSession:    &sess,
@@ -2619,7 +2613,7 @@ func loadSessionFromPersistedSession(sess persistedSession) (*AuthSession, bool,
 
 // PersistSession stores web-session cookies for later reuse.
 func PersistSession(session *AuthSession) error {
-	if session == nil || session.Client == nil || session.Client.Jar == nil {
+	if session == nil || session.Brokered || session.Client == nil || session.Client.Jar == nil {
 		return nil
 	}
 	session.persistMu.Lock()
@@ -2657,7 +2651,30 @@ func PersistSession(session *AuthSession) error {
 	// after narrowing, before the cache is made visible to the next load.
 	narrowPersistedCookieDomains(&serialized)
 	serialized.DeveloperTeamID = strings.TrimSpace(session.DeveloperTeamID)
-	if err := persistSessionBySelection(selection, key, serialized); err != nil {
+	serialized.ProviderID = session.ProviderID
+	merged := false
+	mergeNewer := func(current persistedSession) persistedSession {
+		if current.Generation != session.cachedGeneration {
+			keepUntouchedPersistedCookies(&serialized, current, updates)
+			merged = true
+		}
+		return serialized
+	}
+	err = withSessionEntryLock(key, func() error {
+		var mergeKeychain func(persistedSession) persistedSession
+		if session.cachedGeneration != "" {
+			switch session.cachedSource {
+			case CachedSessionSourceFile:
+				if current, ok, err := readSessionFromFile(key); err == nil && ok {
+					mergeNewer(current)
+				}
+			case CachedSessionSourceKeychain:
+				mergeKeychain = mergeNewer
+			}
+		}
+		return persistSessionBySelectionLocked(selection, key, serialized, mergeKeychain)
+	})
+	if err != nil {
 		return err
 	}
 	if tracker != nil {
@@ -2666,7 +2683,11 @@ func PersistSession(session *AuthSession) error {
 	cached := serialized
 	session.cachedSession = &cached
 	session.cachedUpdatedAt = serialized.UpdatedAt
-	session.cachedGeneration = serialized.Generation
+	// After a merge the live jar still holds the older cookies, so later
+	// saves must keep merging instead of overwriting the newer entry.
+	if !merged {
+		session.cachedGeneration = serialized.Generation
+	}
 	if tracker != nil {
 		tracker.mu.Lock()
 		tracker.cached = &cached
@@ -2675,21 +2696,58 @@ func PersistSession(session *AuthSession) error {
 	return nil
 }
 
+// keepUntouchedPersistedCookies merges onto an entry another process wrote
+// after this handle loaded it. Cookies this handle received a response for
+// replace the stored ones; every other cookie keeps the newer stored record.
+// Records are matched by host, name and path: the narrowed persisted format
+// cannot hold two cookies that differ only by domain.
+func keepUntouchedPersistedCookies(serialized *persistedSession, current persistedSession, updates map[trackedCookieKey]trackedCookieUpdate) {
+	type cookieScope struct{ host, name, path string }
+	scopeOf := func(origin, name, path string) cookieScope {
+		host := ""
+		if parsed, err := url.Parse(origin); err == nil && parsed != nil {
+			host = strings.ToLower(parsed.Hostname())
+		}
+		return cookieScope{host: host, name: name, path: persistedCookiePath(path)}
+	}
+	touched := make(map[cookieScope]bool, len(updates))
+	for key := range updates {
+		touched[scopeOf(key.origin, key.name, key.path)] = true
+	}
+	isTouched := func(origin string, cookie pCookie) bool {
+		return touched[scopeOf(origin, cookie.Name, cookie.Path)]
+	}
+	now := time.Now().UTC()
+	merged := make(map[string][]pCookie, len(current.Cookies))
+	for origin, list := range current.Cookies {
+		for _, cookie := range list {
+			cookie, usable := normalizePersistedCookieDeadline(cookie, current.UpdatedAt)
+			if usable && !isTouched(origin, cookie) && !isExpiredCookie(cookie, now) {
+				merged[origin] = append(merged[origin], cookie)
+			}
+		}
+	}
+	for origin, list := range serialized.Cookies {
+		for _, cookie := range list {
+			if isTouched(origin, cookie) {
+				merged[origin] = append(merged[origin], cookie)
+			}
+		}
+	}
+	serialized.Cookies = merged
+}
+
 // LoadCachedSession loads a cached web session cookie jar without validating it
 // against the live App Store Connect session endpoint. This is used for
 // best-effort relogin attempts that want to preserve Apple trust cookies.
 func LoadCachedSession(username string) (*AuthSession, bool, error) {
-	return loadCachedSessionWithSource(username, CachedSessionSourceUnknown)
+	return LoadCachedSessionFromSource(username, CachedSessionSourceUnknown)
 }
 
 // LoadCachedSessionFromSource loads an account from the backend that supplied
 // a default identity. Explicit account lookups should use LoadCachedSession so
 // configured backend precedence remains unchanged.
 func LoadCachedSessionFromSource(username string, source CachedSessionSource) (*AuthSession, bool, error) {
-	return loadCachedSessionWithSource(username, source)
-}
-
-func loadCachedSessionWithSource(username string, source CachedSessionSource) (*AuthSession, bool, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return nil, false, nil
@@ -2704,7 +2762,7 @@ func loadCachedSessionWithSource(username string, source CachedSessionSource) (*
 	}
 
 	key := webSessionCacheKey(username)
-	sess, origin, ok, err := readSessionBySelectionWithOrigin(selection, key)
+	sess, origin, ok, err := readSessionBySelection(selection, key)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -2716,8 +2774,9 @@ func loadCachedSessionWithSource(username string, source CachedSessionSource) (*
 }
 
 // ResumeCachedSessionWithoutPersist validates a cached session for one Apple
-// ID without prompting or writing/migrating cached state.
-func ResumeCachedSessionWithoutPersist(ctx context.Context, username string) (*AuthSession, bool, error) {
+// ID without prompting or writing/migrating cached state. The session client
+// sends through transport.
+func ResumeCachedSessionWithoutPersist(ctx context.Context, username string, transport http.RoundTripper) (*AuthSession, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2732,29 +2791,25 @@ func ResumeCachedSessionWithoutPersist(ctx context.Context, username string) (*A
 	}
 
 	key := webSessionCacheKey(username)
-	sess, ok, err := readSessionBySelection(selection, key)
+	sess, _, ok, err := readSessionBySelection(selection, key)
 	if err != nil || !ok {
 		return nil, false, err
 	}
 	if strings.TrimSpace(sess.UserEmail) == "" {
 		sess.UserEmail = username
 	}
-	return resumeFromPersistedSessionReadOnly(ctx, sess)
+	return resumeFromPersistedSessionReadOnly(ctx, sess, transport)
 }
 
 // TryResumeSession attempts to resume a session for a specific Apple ID.
 func TryResumeSession(ctx context.Context, username string) (*AuthSession, bool, error) {
-	return tryResumeSessionWithSource(ctx, username, CachedSessionSourceUnknown)
+	return TryResumeSessionFromSource(ctx, username, CachedSessionSourceUnknown)
 }
 
 // TryResumeSessionFromSource resumes an account from the backend that supplied
 // a default identity. Explicit account lookups should use TryResumeSession so
 // configured backend precedence remains unchanged.
 func TryResumeSessionFromSource(ctx context.Context, username string, source CachedSessionSource) (*AuthSession, bool, error) {
-	return tryResumeSessionWithSource(ctx, username, source)
-}
-
-func tryResumeSessionWithSource(ctx context.Context, username string, source CachedSessionSource) (*AuthSession, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2775,7 +2830,7 @@ func tryResumeSessionWithSource(ctx context.Context, username string, source Cac
 	}
 
 	key := webSessionCacheKey(username)
-	sess, origin, ok, err := readSessionBySelectionWithOrigin(selection, key)
+	sess, origin, ok, err := readSessionBySelection(selection, key)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -2832,7 +2887,7 @@ func LoadLastCachedSession() (*AuthSession, bool, error) {
 		return nil, false, nil
 	}
 
-	sess, ok, err := readLastSessionBySelection(selection)
+	sess, _, _, ok, err := readLastSessionBySelection(selection)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -2840,8 +2895,9 @@ func LoadLastCachedSession() (*AuthSession, bool, error) {
 }
 
 // ResumeLastCachedSessionWithoutPersist validates the last cached session
-// without prompting or writing/migrating cached state.
-func ResumeLastCachedSessionWithoutPersist(ctx context.Context) (*AuthSession, bool, error) {
+// without prompting or writing/migrating cached state. The session client
+// sends through transport.
+func ResumeLastCachedSessionWithoutPersist(ctx context.Context, transport http.RoundTripper) (*AuthSession, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -2851,11 +2907,11 @@ func ResumeLastCachedSessionWithoutPersist(ctx context.Context) (*AuthSession, b
 		return nil, false, nil
 	}
 
-	sess, ok, err := readLastSessionBySelection(selection)
+	sess, _, _, ok, err := readLastSessionBySelection(selection)
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	return resumeFromPersistedSessionReadOnly(ctx, sess)
+	return resumeFromPersistedSessionReadOnly(ctx, sess, transport)
 }
 
 // TryResumeLastSession attempts to resume the last successful web session.
@@ -2869,7 +2925,7 @@ func TryResumeLastSession(ctx context.Context) (*AuthSession, bool, error) {
 		return nil, false, nil
 	}
 
-	sess, origin, key, ok, err := readLastSessionBySelectionWithOrigin(selection)
+	sess, origin, key, ok, err := readLastSessionBySelection(selection)
 	if err != nil || !ok {
 		return nil, false, err
 	}
@@ -2982,7 +3038,7 @@ func DeleteSessionIfMatches(username string, loaded *AuthSession) (bool, error) 
 		if selected, selectedOK := selectionForCachedSessionSource(loaded.cachedSource); selectedOK {
 			readSelection = selected
 		}
-		current, origin, ok, err := readSessionBySelectionWithOrigin(readSelection, key)
+		current, origin, ok, err := readSessionBySelection(readSelection, key)
 		if err != nil {
 			deleted = true
 			return deleteSessionEntryLocked(readSelection, key)

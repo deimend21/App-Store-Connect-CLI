@@ -1,0 +1,293 @@
+package subscriptions
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"math/big"
+	"sort"
+	"strings"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/ascterritory"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/pppindex"
+)
+
+// newSubscriptionsPricingPPPCommand returns the ppp subcommand.
+func newSubscriptionsPricingPPPCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("subscriptions pricing ppp", flag.ExitOnError)
+
+	subscriptionID := shared.BindResourceIDFlag(fs, "subscription-id", "subscriptions", "Subscription ID, product ID, or exact current name (required)")
+	appID := addSubscriptionLookupAppFlag(fs)
+	baseTerritory := fs.String("base-territory", "USA", "Base territory (accepts alpha-2, alpha-3, or exact English country name)")
+	selection := shared.BindOnceCSVFlag(fs, "territory", "Only change these territories (comma-separated alpha-2, alpha-3, or English names)")
+	basePrice := fs.String("base-price", "", "Customer price in the base territory (required)")
+	rounding := fs.String("round", string(shared.PriceRoundingNearest), "Price-point resolution: exact, nearest, up, or down")
+	startDate := fs.String("start-date", "", "Start date (YYYY-MM-DD) for scheduled price changes")
+	preserved := fs.Bool("preserved", false, "Preserve current prices for existing subscribers")
+	autoStartDate := fs.Bool("auto-start-date", true, "Automatically schedule approved/live subscriptions for tomorrow when --start-date is omitted")
+	dryRun := fs.Bool("dry-run", false, "Show the purchasing-power plan without applying it")
+	confirm := fs.Bool("confirm", false, "Confirm applying the purchasing-power plan (required unless --dry-run)")
+	workers := fs.Int("workers", defaultEqualizeWorkers, "Number of concurrent planning workers and price mutations")
+	output := d.BindOutputFlags(fs)
+
+	return &ffcli.Command{
+		Name:       "ppp",
+		ShortUsage: "asc subscriptions pricing ppp [flags]",
+		ShortHelp:  "Plan and apply purchasing-power-parity prices from a base price.",
+		LongHelp: `Plan and apply purchasing-power-parity prices from a base price.
+
+Finds the subscription price point for --base-price in --base-territory and
+Apple's equalized price for it in every territory the subscription is priced
+in. Each equalized price is multiplied by the territory's price level divided
+by the base territory's price level (rounded to 4 decimals), then resolved to
+the subscription's Apple price-point ladder with --round. The plan reports the
+equalized, desired, current, and selected price for every territory.
+
+Rounding modes:
+  exact    Require the calculated price to exist.
+  nearest  Choose the closest price; exact ties choose the lower price.
+  up       Choose the lowest price greater than or equal to the calculation.
+  down     Choose the highest price less than or equal to the calculation.
+
+Price levels ship with the CLI: World Bank World Development Indicators PPP
+conversion factor, GDP (PA.NUS.PPP) divided by the official exchange rate
+(PA.NUS.FCRF), latest year from 2021 through 2025, United States = 1.
+License: CC BY 4.0. Series last updated ` + pppindex.AsOf + `.
+Territories without a price level are skipped and keep their current price.
+
+--territory limits changes to the listed countries priced on the effective date.
+The subscription must already have UPFRONT prices; only territories priced on
+the effective date are planned. Sale availability is not changed. --confirm builds a
+fresh plan, applies changed territories, and reads the prices back.
+
+Examples:
+  asc subscriptions pricing ppp --subscription-id "SUB_ID" --base-price "9.99" --dry-run
+  asc subscriptions pricing ppp --subscription-id "SUB_ID" --base-price "9.99" --round down --dry-run --output table
+  asc subscriptions pricing ppp --subscription-id "SUB_ID" --base-price "9.99" --territory "IN,BR,MX" --confirm
+  asc subscriptions pricing ppp --subscription-id "SUB_ID" --base-territory "GBR" --base-price "7.99" --start-date "YYYY-MM-DD" --confirm`,
+		FlagSet:   fs,
+		UsageFunc: d.DefaultUsageFunc,
+		Exec: func(ctx context.Context, args []string) error {
+			subID := strings.TrimSpace(*subscriptionID)
+			if subID == "" {
+				return d.RequiredFlag("--subscription-id")
+			}
+			price := strings.TrimSpace(*basePrice)
+			if price == "" {
+				return d.RequiredFlag("--base-price")
+			}
+			basePriceValue, ok := new(big.Rat).SetString(price)
+			if !shared.IsPriceDecimal(price) || !ok || basePriceValue.Sign() <= 0 {
+				return d.UsageError("--base-price must be a positive decimal")
+			}
+			territory, err := ascterritory.Normalize(*baseTerritory)
+			if err != nil {
+				return d.UsageError(fmt.Sprintf("invalid --base-territory: %v", err))
+			}
+			baseLevel, indexed := pppindex.PriceLevel(territory)
+			if !indexed {
+				return d.UsageError(fmt.Sprintf("invalid --base-territory: no purchasing-power price level for %s", territory))
+			}
+			roundMode, err := d.ParsePriceRounding(*rounding)
+			if err != nil {
+				return err
+			}
+			if *workers < 1 || *workers > 32 {
+				return d.UsageError("--workers must be between 1 and 32")
+			}
+			if *dryRun && *confirm {
+				return d.UsageError("--dry-run cannot be combined with --confirm")
+			}
+			if err := d.RequireConfirmUnlessDryRun(*dryRun, *confirm); err != nil {
+				return err
+			}
+			explicitStartDate, effectiveAt, err := normalizeEqualizeStartDate(d, *startDate)
+			if err != nil {
+				return err
+			}
+			if err := d.RequireAppForStableSelector(d.ResolveAppID(*appID), subID, "--subscription-id"); err != nil {
+				return err
+			}
+
+			selected, err := d.PPPTerritorySelection(selection)
+			if err != nil {
+				return err
+			}
+			client, err := d.Client()
+			if err != nil {
+				return fmt.Errorf("subscriptions pricing ppp: %w", err)
+			}
+			subID, err = resolveSubscriptionLookupIDWithTimeout(ctx, d, client, *appID, subID)
+			if err != nil {
+				return err
+			}
+
+			resolvedStartDate := explicitStartDate
+			subscriptionState := ""
+			autoScheduled := false
+			if resolvedStartDate == "" && *autoStartDate {
+				var scheduleErr error
+				resolvedStartDate, subscriptionState, autoScheduled, effectiveAt, scheduleErr = autoScheduleEqualizeStartDate(ctx, d, client, subID)
+				if scheduleErr != nil {
+					return fmt.Errorf("subscriptions pricing ppp: %w", scheduleErr)
+				}
+				if autoScheduled {
+					fmt.Fprintf(d.IO.ErrOut, "Subscription state is %s; scheduling price changes for %s\n", subscriptionState, resolvedStartDate)
+				}
+			}
+
+			fmt.Fprintln(d.IO.ErrOut, "Fetching current subscription prices...")
+			currentPrices, err := fetchResolvedSubscriptionPrices(
+				ctx, d, client, subID, 200, "", effectiveAt, asc.SubscriptionPlanTypeUpfront, "",
+			)
+			if err != nil {
+				return fmt.Errorf("subscriptions pricing ppp: fetch current prices: %w", err)
+			}
+			if len(currentPrices.Prices) == 0 {
+				return fmt.Errorf("subscriptions pricing ppp: subscription has no current UPFRONT prices; initialize its pricing with `asc subscriptions pricing equalize` first")
+			}
+
+			if len(selected) > 0 {
+				byTerritory := make(map[string]shared.ResolvedPriceRow, len(currentPrices.Prices))
+				for _, row := range currentPrices.Prices {
+					byTerritory[row.Territory] = row
+				}
+				scoped := make([]shared.ResolvedPriceRow, 0, len(selected))
+				for _, territory := range selected {
+					row, exists := byTerritory[territory]
+					if !exists {
+						return fmt.Errorf("subscriptions pricing ppp: requested territory %s has no current price", territory)
+					}
+					scoped = append(scoped, row)
+				}
+				currentPrices.Prices = scoped
+			}
+
+			fmt.Fprintf(d.IO.ErrOut, "Finding %s price point for %s...\n", territory, price)
+			baseCandidates, err := fetchSubscriptionPriceDeriveCandidatesByTerritory(ctx, d, client, subID, []string{territory})
+			if err != nil {
+				return fmt.Errorf("subscriptions pricing ppp: %w", err)
+			}
+			baseResolution, err := shared.ResolvePriceLadderPoint(baseCandidates[territory], basePriceValue, shared.PriceRoundingExact)
+			if err != nil {
+				return fmt.Errorf("subscriptions pricing ppp: --base-price %s in %s: %w", price, territory, err)
+			}
+			basePricePointID := baseResolution.PricePointID
+			price = baseResolution.CustomerPrice
+			fmt.Fprintln(d.IO.ErrOut, "Fetching equalized prices for all territories...")
+			equalizations, err := fetchEqualizations(ctx, d, client, basePricePointID, territory)
+			if err != nil {
+				return fmt.Errorf("subscriptions pricing ppp: %w", err)
+			}
+			equalizedByTerritory := make(map[string]equalization, len(equalizations)+1)
+			equalizedByTerritory[territory] = equalization{Territory: territory, Price: price, PricePointID: basePricePointID}
+			for _, item := range equalizations {
+				equalizedByTerritory[strings.ToUpper(strings.TrimSpace(item.Territory))] = item
+			}
+
+			sourcePrices := &shared.ResolvedPricesResult{}
+			var unequalized []asc.SubscriptionPricingDeriveRow
+			for _, current := range currentPrices.Prices {
+				currentTerritory := strings.ToUpper(strings.TrimSpace(current.Territory))
+				equalized, ok := equalizedByTerritory[currentTerritory]
+				if !ok {
+					row := asc.SubscriptionPricingDeriveRow{
+						Territory:            currentTerritory,
+						Currency:             strings.TrimSpace(current.Currency),
+						CurrentTargetPrice:   strings.TrimSpace(current.CustomerPrice),
+						CurrentTargetPointID: strings.TrimSpace(current.PricePointID),
+						Action:               "skip",
+						Status:               "skipped",
+					}
+					if _, indexed := pppindex.PriceLevel(currentTerritory); indexed {
+						row.Action = "error"
+						row.Status = "unresolved"
+						row.Error = fmt.Sprintf("%s: no equalized price for base price point %s", currentTerritory, basePricePointID)
+					}
+					unequalized = append(unequalized, row)
+					continue
+				}
+				sourcePrices.Prices = append(sourcePrices.Prices, shared.ResolvedPriceRow{
+					Territory:     currentTerritory,
+					Currency:      current.Currency,
+					CustomerPrice: equalized.Price,
+					PricePointID:  equalized.PricePointID,
+				})
+			}
+
+			fmt.Fprintf(d.IO.ErrOut, "Resolving price points for %d territor%s...\n", len(sourcePrices.Prices), pluralizeEqualizeTerritories(len(sourcePrices.Prices)))
+			rows := buildSubscriptionPriceDerivePlan(
+				ctx,
+				d,
+				client,
+				subID,
+				sourcePrices,
+				currentPrices,
+				func(target string) (*big.Rat, bool) { return pppindex.RelativeLevel(baseLevel, target) },
+				roundMode,
+				*workers,
+			)
+			rows = append(rows, unequalized...)
+			sort.Slice(rows, func(i, j int) bool { return rows[i].Territory < rows[j].Territory })
+
+			result := &asc.SubscriptionPricingPPPResult{
+				SubscriptionID:   subID,
+				BaseTerritory:    territory,
+				BasePrice:        price,
+				BasePricePointID: basePricePointID,
+				Index: asc.SubscriptionPricingPPPIndex{
+					Source:  pppindex.Source,
+					License: pppindex.License,
+					AsOf:    pppindex.AsOf,
+				},
+				Rounding:          string(roundMode),
+				StartDate:         resolvedStartDate,
+				AutoScheduled:     autoScheduled,
+				Preserved:         *preserved,
+				SubscriptionState: subscriptionState,
+				DryRun:            *dryRun,
+				Rows:              rows,
+				Verification:      asc.SubscriptionPricingDeriveVerification{Status: "skipped"},
+			}
+			result.Summary = shared.SummarizePriceLadderRows(rows)
+
+			if result.Summary.Unresolved > 0 {
+				if err := d.PrintOutput(result, *output.Output, *output.Pretty); err != nil {
+					return err
+				}
+				return shared.NewReportedError(fmt.Errorf(
+					"subscriptions pricing ppp: %d territor%s could not be resolved; no changes were applied",
+					result.Summary.Unresolved,
+					pluralizeEqualizeTerritories(result.Summary.Unresolved),
+				))
+			}
+			if *dryRun {
+				return d.PrintOutput(result, *output.Output, *output.Pretty)
+			}
+
+			attrs := asc.SubscriptionPriceCreateAttributes{
+				StartDate: result.StartDate,
+				PlanType:  asc.SubscriptionPlanTypeUpfront,
+			}
+			if *preserved {
+				attrs.Preserved = preserved
+			}
+			var verificationErr error
+			result.Summary, result.Verification, verificationErr = applyAndVerifySubscriptionPriceDeriveRows(
+				ctx,
+				d, client, subID, result.Rows, *workers, attrs, effectiveAt, "", "territory price", "scheduled prices",
+			)
+			if err := d.PrintOutput(result, *output.Output, *output.Pretty); err != nil {
+				return err
+			}
+			if verificationErr != nil {
+				return shared.NewReportedError(fmt.Errorf("subscriptions pricing ppp: %w", verificationErr))
+			}
+			return nil
+		},
+	}
+}

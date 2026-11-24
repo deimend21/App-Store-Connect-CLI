@@ -51,7 +51,6 @@ func TestExecuteDistributionPlanUsesExactLocalIdentityBeforeAccountPlanning(t *t
 
 	var calls []string
 	deps := validDistributionOrchestrationDependencies(t)
-	deps.now = func() time.Time { return now }
 	deps.readConfig = func(got string) (distributionConfig, string, error) {
 		calls = append(calls, "read_config")
 		if got != configPath {
@@ -66,7 +65,7 @@ func TestExecuteDistributionPlanUsesExactLocalIdentityBeforeAccountPlanning(t *t
 		}
 		return testDistributionDeviceFileSHA256, nil
 	}
-	deps.inspectIdentity = func(_ context.Context, options signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
+	deps.inspectIdentity = func(_ context.Context, _ *shared.Deps, options signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
 		calls = append(calls, "inspect_identity")
 		wantIdentity := filepath.Join(configDir, "secrets", "distribution.p12")
 		wantPassword := filepath.Join(configDir, "secrets", "password.txt")
@@ -83,7 +82,7 @@ func TestExecuteDistributionPlanUsesExactLocalIdentityBeforeAccountPlanning(t *t
 		return validDistributionArchiveSnapshot(), nil
 	}
 	var nestedPlan signing.ReconcilePlanView
-	deps.reconcilePlan = func(_ context.Context, options signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+	deps.reconcilePlan = func(_ context.Context, _ *shared.Deps, options signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 		calls = append(calls, "reconcile_plan")
 		if !containsString(calls, "inspect_identity") {
 			t.Fatal("account reconciliation planning started before local PKCS#12 inspection")
@@ -123,7 +122,7 @@ func TestExecuteDistributionPlanUsesExactLocalIdentityBeforeAccountPlanning(t *t
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionPlan(context.Background(), distributionPlanRequest{
+	result, err := executeDistributionPlan(context.Background(), distributionTestDepsAt(now), distributionPlanRequest{
 		ArchivePath: "/archives/Demo.xcarchive",
 		ConfigPath:  configPath,
 		PlanPath:    planPath,
@@ -189,7 +188,7 @@ func TestDistributionRunPathDriftFailStopsBeforePublication(t *testing.T) {
 			plan := validPersistedDistributionPlan(t)
 			deps := validApplyDistributionOrchestrationDependencies(t, plan)
 			changed := false
-			deps.acquireLease = func(context.Context, string, string) (func() error, func() error, error) {
+			deps.acquireLease = func(context.Context, *shared.Deps, string, string) (func() error, func() error, error) {
 				return func() error {
 					if changed {
 						return errors.New("run path replaced")
@@ -214,12 +213,12 @@ func TestDistributionRunPathDriftFailStopsBeforePublication(t *testing.T) {
 				return result, err
 			}
 			publishCalls := 0
-			deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+			deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 				publishCalls++
 				return validDistributionPublishResult(), nil
 			}
 			installDistributionOrchestrationDependencies(t, deps)
-			result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: plan.ConfigPath, Confirmation: plan.PlanHash})
+			result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: plan.ConfigPath, Confirmation: plan.PlanHash})
 			if err == nil || result != nil {
 				t.Fatalf("path drift result=%#v err=%v", result, err)
 			}
@@ -301,13 +300,13 @@ func TestExistingPreparedBundleRequiresExactDescriptorBytesBeforeReuse(t *testin
 	state.Artifacts.IPA.SHA256 = ipaSHA
 	state.Artifacts.IPA.SizeBytes = int64(len(ipa))
 	state.Artifacts.Bundle.DescriptorSHA256 = digestDistributionBytes(descriptorBytes)
-	if err := validateExistingDistributionPreparedBundle(bundleDir, plan, state); err != nil {
+	if err := validateExistingDistributionPreparedBundle(newDistributeTestDeps(), bundleDir, plan, state); err != nil {
 		t.Fatalf("exact prepared bundle rejected: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(bundleDir, "bundle.json"), append(descriptorBytes, '\n'), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateExistingDistributionPreparedBundle(bundleDir, plan, state); err == nil || !strings.Contains(err.Error(), "descriptor bytes") {
+	if err := validateExistingDistributionPreparedBundle(newDistributeTestDeps(), bundleDir, plan, state); err == nil || !strings.Contains(err.Error(), "descriptor bytes") {
 		t.Fatalf("semantically equivalent descriptor rewrite accepted: %v", err)
 	}
 }
@@ -340,7 +339,7 @@ func TestDistributionAuthorizationBindsNestedReconcileActionKinds(t *testing.T) 
 			deps.readReconcilePlan = func(signing.ReconcileApplyOptions) (signing.ReconcilePlanView, error) { return nested, nil }
 			deps.createRun = func(string, string) error { t.Fatal("run created for mismatched nested plan"); return nil }
 			installDistributionOrchestrationDependencies(t, deps)
-			_, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: plan.ConfigPath, Confirmation: plan.PlanHash})
+			_, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: plan.ConfigPath, Confirmation: plan.PlanHash})
 			if err == nil || !strings.Contains(err.Error(), "effect authorization") {
 				t.Fatalf("error=%v, want effect authorization mismatch", err)
 			}
@@ -415,12 +414,11 @@ func TestExecuteDistributionPlanRejectsIdentityDriftBeforeAccountPlanning(t *tes
 			}
 			plannerCalls := 0
 			deps := validDistributionOrchestrationDependencies(t)
-			deps.now = func() time.Time { return now }
 			deps.readConfig = func(string) (distributionConfig, string, error) { return config, testDistributionConfigSHA256(), nil }
-			deps.inspectIdentity = func(context.Context, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
+			deps.inspectIdentity = func(context.Context, *shared.Deps, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
 				return local, nil
 			}
-			deps.reconcilePlan = func(context.Context, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+			deps.reconcilePlan = func(context.Context, *shared.Deps, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 				plannerCalls++
 				return remote, nil
 			}
@@ -430,7 +428,7 @@ func TestExecuteDistributionPlanRejectsIdentityDriftBeforeAccountPlanning(t *tes
 			}
 			installDistributionOrchestrationDependencies(t, deps)
 
-			_, err := executeDistributionPlan(context.Background(), distributionPlanRequest{
+			_, err := executeDistributionPlan(context.Background(), distributionTestDepsAt(now), distributionPlanRequest{
 				ArchivePath: "/archives/Demo.xcarchive", ConfigPath: "/config/distribution.json",
 				PlanPath: "/plans/plan.json", StateDir: "/state/runs",
 			})
@@ -451,8 +449,7 @@ func TestExecuteDistributionPlanRejectsIdentityDriftBeforeAccountPlanning(t *tes
 func TestExecuteDistributionPlanReturnsTypedBlockerForMultipleTargets(t *testing.T) {
 	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
 	deps := validDistributionOrchestrationDependencies(t)
-	deps.now = func() time.Time { return now }
-	deps.reconcilePlan = func(context.Context, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+	deps.reconcilePlan = func(context.Context, *shared.Deps, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 		plan := validDistributionReconcilePlan(now)
 		plan.Targets = append(plan.Targets, signing.ReconcileTargetView{Kind: "extension", BundleID: "com.example.demo.widget"})
 		return plan, nil
@@ -461,7 +458,7 @@ func TestExecuteDistributionPlanReturnsTypedBlockerForMultipleTargets(t *testing
 	deps.writePlan = func(_ string, plan persistedDistributionPlan) error { written = plan; return nil }
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionPlan(context.Background(), distributionPlanRequest{
+	result, err := executeDistributionPlan(context.Background(), distributionTestDepsAt(now), distributionPlanRequest{
 		ArchivePath: "/archives/Demo.xcarchive", ConfigPath: "/config/distribution.json",
 		PlanPath: "/plans/plan.json", StateDir: "/state/runs",
 	})
@@ -492,7 +489,7 @@ func TestExecuteDistributionApplyRejectsConfirmationMismatchBeforeSideEffects(t 
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	_, err := executeDistributionApply(context.Background(), distributionApplyRequest{
+	_, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{
 		PlanPath: "/plans/plan.json", Confirmation: strings.Repeat("9", 64),
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "confirm") {
@@ -513,14 +510,13 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 	var calls []string
 	var states []persistedDistributionRunState
 	deps := validDistributionOrchestrationDependencies(t)
-	deps.now = func() time.Time { return now }
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 	deps.readConfig = func(string) (distributionConfig, string, error) { return config, plan.ConfigSHA256, nil }
 	deps.createRun = func(_, _ string) error { calls = append(calls, "create_run"); return nil }
 	deps.readRun = func(string, string) (persistedDistributionRunState, error) {
 		return persistedDistributionRunState{}, os.ErrNotExist
 	}
-	deps.acquireLock = func(_ context.Context, _, _ string) (func() error, error) {
+	deps.acquireLock = func(_ context.Context, _ *shared.Deps, _, _ string) (func() error, error) {
 		calls = append(calls, "lock")
 		return func() error { calls = append(calls, "unlock"); return nil }, nil
 	}
@@ -528,7 +524,7 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 		states = append(states, state)
 		return nil
 	}
-	deps.inspectIdentity = func(context.Context, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
+	deps.inspectIdentity = func(context.Context, *shared.Deps, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
 		calls = append(calls, "inspect_identity")
 		return validDistributionIdentity(now), nil
 	}
@@ -550,11 +546,11 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 		}
 		return plan.DeviceSet.FileSHA256, nil
 	}
-	deps.preflightPublish = func(context.Context, distributionPublicationConfig) error {
+	deps.preflightPublish = func(context.Context, *shared.Deps, distributionPublicationConfig) error {
 		calls = append(calls, "preflight_publish")
 		return nil
 	}
-	deps.reconcileApply = func(_ context.Context, options signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(_ context.Context, _ *shared.Deps, options signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		calls = append(calls, "reconcile_apply")
 		if !containsString(calls, "snapshot_archive") || !containsString(calls, "preflight_publish") {
 			t.Fatal("account mutation started before archive snapshot and S3 credential preflight")
@@ -576,7 +572,7 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 	}
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "S3-SECRET-CANARY")
 	t.Setenv("ASC_PRIVATE_KEY", "ASC-SECRET-CANARY")
-	deps.runSigning = func(ctx context.Context, options signing.EphemeralRunOptions, callback func(context.Context) error) error {
+	deps.runSigning = func(ctx context.Context, _ *shared.Deps, options signing.EphemeralRunOptions, callback func(context.Context) error) error {
 		calls = append(calls, "signing_start")
 		if options.ExpectedCertificateSHA256 != testDistributionCertificateSHA256 || options.ExpectedProfileSHA256 != testDistributionProfileSHA256 {
 			t.Fatalf("ephemeral signing pins = cert %q profile %q", options.ExpectedCertificateSHA256, options.ExpectedProfileSHA256)
@@ -613,7 +609,7 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 		}
 		return validDistributionPrepareResult(), nil
 	}
-	deps.publish = func(_ context.Context, request privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(_ context.Context, _ *shared.Deps, request privatePublishIntentRequest) (publishExecutionResult, error) {
 		calls = append(calls, "publish")
 		if !containsString(calls, "signing_cleanup") || !containsString(calls, "prepare") {
 			t.Fatal("publication began before cleanup and preparation")
@@ -642,7 +638,7 @@ func TestExecuteDistributionApplyOrdersPreflightAndBindsEverySigningStage(t *tes
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(now), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err != nil {
 		t.Fatalf("executeDistributionApply() error: %v", err)
 	}
@@ -663,11 +659,11 @@ func TestExecuteDistributionApplyBoundsCredentialPreflightBeforeSideEffects(t *t
 		t.Fatal("archive snapshot ran after credential preflight failed")
 		return archiveTreeSnapshot{}, nil
 	}
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		t.Fatal("ASC reconciliation ran after credential preflight failed")
 		return signing.ReconcileReceiptView{}, nil
 	}
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		t.Fatal("storage publication ran after credential preflight failed")
 		return publishExecutionResult{}, nil
 	}
@@ -684,7 +680,7 @@ func TestExecuteDistributionApplyBoundsCredentialPreflightBeforeSideEffects(t *t
 		return nil, time.Time{}, context.DeadlineExceeded
 	}
 
-	state, err := executeDistributionApply(context.Background(), distributionApplyRequest{
+	state, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{
 		PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash,
 	})
 	if err == nil || !strings.Contains(err.Error(), "storage_preflight_failed") {
@@ -708,7 +704,7 @@ func TestPreflightDistributionPublicationPropagatesCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := preflightDistributionPublication(ctx, validDistributionOrchestrationConfig().Publication)
+	err := preflightDistributionPublication(ctx, newDistributeTestDeps(), validDistributionOrchestrationConfig().Publication)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("preflight error = %v, want context cancellation", err)
 	}
@@ -723,13 +719,13 @@ func TestExecuteDistributionApplyStopsBeforePublishOnPreparedEvidenceMismatch(t 
 		return result, nil
 	}
 	publishCalls := 0
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		publishCalls++
 		return publishExecutionResult{}, nil
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	state, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	state, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "profile") {
 		t.Fatalf("error = %v, want prepared profile binding mismatch", err)
 	}
@@ -766,7 +762,7 @@ func TestDistributionApplyBlocksDeterministicallyIneligibleIPA(t *testing.T) {
 		return core.PrepareResult{}, core.ErrNotEligible
 	}
 	installDistributionOrchestrationDependencies(t, deps)
-	state, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	state, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil || state == nil || state.Status != "blocked" || state.Recoverable {
 		t.Fatalf("ineligible IPA state=%#v error=%v", state, err)
 	}
@@ -788,11 +784,11 @@ func TestDistributionResumeReusesCheckpointedArtifactsAfterRecoverablePublishFai
 		return state, nil
 	}
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		reconcileCalls++
 		return validDistributionReconcileReceipt(), nil
 	}
-	deps.verifyReconcile = func(_ context.Context, options signing.ReconcileApplyOptions, archivePath string, evidence signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
+	deps.verifyReconcile = func(_ context.Context, _ *shared.Deps, options signing.ReconcileApplyOptions, archivePath string, evidence signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
 		reconcileVerifyCalls++
 		if options.PlanPath != plan.Reconcile.PlanPath || options.ExpectedPlanHash != plan.Reconcile.PlanHash || !options.Confirm {
 			t.Fatalf("reconcile verification options = %#v", options)
@@ -815,7 +811,7 @@ func TestDistributionResumeReusesCheckpointedArtifactsAfterRecoverablePublishFai
 		result.Reused = prepareCalls > 1
 		return result, nil
 	}
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		publishCalls++
 		if publishCalls == 1 {
 			return publishExecutionResult{}, errors.New("object store response lost after request")
@@ -833,7 +829,7 @@ func TestDistributionResumeReusesCheckpointedArtifactsAfterRecoverablePublishFai
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	failed, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	failed, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil {
 		t.Fatal("apply unexpectedly succeeded")
 	}
@@ -844,7 +840,7 @@ func TestDistributionResumeReusesCheckpointedArtifactsAfterRecoverablePublishFai
 		t.Fatal("apply did not allocate a run ID")
 	}
 
-	resumed, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: runID, StateDir: plan.Paths.StateDir})
+	resumed, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: runID, StateDir: plan.Paths.StateDir})
 	if err != nil {
 		t.Fatalf("executeDistributionResume() error: %v", err)
 	}
@@ -931,7 +927,7 @@ func TestDistributionResumeVerifiesFromRunLocalReconcileEvidenceAfterNestedOutpu
 		return nested, nil
 	}
 	verifyCalls := 0
-	deps.verifyReconcile = func(_ context.Context, options signing.ReconcileApplyOptions, archivePath string, evidence signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
+	deps.verifyReconcile = func(_ context.Context, _ *shared.Deps, options signing.ReconcileApplyOptions, archivePath string, evidence signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
 		verifyCalls++
 		if _, err := os.Stat(plan.Reconcile.ReceiptPath); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("nested receipt unexpectedly remains available: %v", err)
@@ -961,12 +957,12 @@ func TestDistributionResumeVerifiesFromRunLocalReconcileEvidenceAfterNestedOutpu
 		result.Profiles = []signing.ReconcileProfileView{*result.MainProfile}
 		return result, nil
 	}
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		result := validDistributionPublishResult()
 		result.Receipt.Signing.EmbeddedProfileSHA256 = run.Artifacts.Profile.SHA256
 		return result, nil
 	}
-	deps.reverifyPublish = func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+	deps.reverifyPublish = func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 		result := validDistributionPublishResult()
 		result.Receipt.Signing.EmbeddedProfileSHA256 = run.Artifacts.Profile.SHA256
 		return result, nil
@@ -981,7 +977,7 @@ func TestDistributionResumeVerifiesFromRunLocalReconcileEvidenceAfterNestedOutpu
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
+	result, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
 	if err != nil {
 		t.Fatalf("executeDistributionResume() error: %v", err)
 	}
@@ -1012,7 +1008,7 @@ func TestExecuteDistributionStatusIsStrictlyLocal(t *testing.T) {
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	got, err := executeDistributionStatus(context.Background(), distributionRunRequest{RunID: want.RunID, StateDir: "/state/runs"})
+	got, err := executeDistributionStatus(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: want.RunID, StateDir: "/state/runs"})
 	if err != nil {
 		t.Fatalf("executeDistributionStatus() error: %v", err)
 	}
@@ -1037,7 +1033,7 @@ func TestExecuteDistributionVerifyRevalidatesExactPublicationAndOptionallyObserv
 				return receipt, nil
 			}
 			verifyCalls := 0
-			deps.reverifyPublish = func(_ context.Context, request privatePublishVerificationRequest) (publishExecutionResult, error) {
+			deps.reverifyPublish = func(_ context.Context, _ *shared.Deps, request privatePublishVerificationRequest) (publishExecutionResult, error) {
 				verifyCalls++
 				runRoot := filepath.Join(plan.Paths.StateDir, run.RunID)
 				if request.BundleDir != filepath.Join(runRoot, run.Artifacts.Bundle.Path) ||
@@ -1060,7 +1056,7 @@ func TestExecuteDistributionVerifyRevalidatesExactPublicationAndOptionallyObserv
 			}
 			installDistributionOrchestrationDependencies(t, deps)
 
-			result, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{
+			result, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{
 				RunID: run.RunID, StateDir: plan.Paths.StateDir, Device: device, Timeout: 45 * time.Second,
 			})
 			if err != nil {
@@ -1100,7 +1096,7 @@ func TestExecuteDistributionVerifyRejectsPublicationDifferentFromCompletionRecei
 	deps.readRun = func(string, string) (persistedDistributionRunState, error) { return run, nil }
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 	deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) { return receipt, nil }
-	deps.reverifyPublish = func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+	deps.reverifyPublish = func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 		result := validDistributionPublishResultForCompletion(plan, run)
 		result.Receipt.Artifact.Key = "team/app/objects/sha256/different.ipa"
 		return result, nil
@@ -1111,7 +1107,7 @@ func TestExecuteDistributionVerifyRejectsPublicationDifferentFromCompletionRecei
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	_, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{
+	_, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{
 		RunID: run.RunID, StateDir: plan.Paths.StateDir, Device: "my-connected-phone", Timeout: 45 * time.Second,
 	})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "publication") {
@@ -1202,7 +1198,7 @@ func TestExecuteDistributionVerifyNeverAcceptsRunOrArtifactSubtreeReplacement(t 
 			deps.readRun = func(string, string) (persistedDistributionRunState, error) { return run, nil }
 			deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 			deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) { return receipt, nil }
-			deps.reverifyPublish = func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+			deps.reverifyPublish = func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 				runRoot := filepath.Join(stateDir, run.RunID)
 				original := runRoot
 				if target == "prepared bundle" {
@@ -1219,7 +1215,7 @@ func TestExecuteDistributionVerifyNeverAcceptsRunOrArtifactSubtreeReplacement(t 
 			}
 			installDistributionOrchestrationDependencies(t, deps)
 
-			result, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{
+			result, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{
 				RunID: run.RunID, StateDir: stateDir, Timeout: 45 * time.Second,
 			})
 			if err == nil || (result != nil && result.PublicationVerified) {
@@ -1242,7 +1238,7 @@ func TestExecuteDistributionVerifyMissingRunIsReadOnly(t *testing.T) {
 	deps.acquireVerifyLease = acquireDistributionVerifyPathLease
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{RunID: runID, StateDir: stateDir, Timeout: time.Second})
+	result, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{RunID: runID, StateDir: stateDir, Timeout: time.Second})
 	if err == nil || result != nil {
 		t.Fatalf("missing-run verify result=%#v err=%v", result, err)
 	}
@@ -1264,7 +1260,7 @@ func testDistributionVerifyUsesOneTotalTimeoutBudget(t *testing.T) {
 	deps.readRun = func(string, string) (persistedDistributionRunState, error) { return run, nil }
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 	deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) { return receipt, nil }
-	deps.reverifyPublish = func(ctx context.Context, request privatePublishVerificationRequest) (publishExecutionResult, error) {
+	deps.reverifyPublish = func(ctx context.Context, _ *shared.Deps, request privatePublishVerificationRequest) (publishExecutionResult, error) {
 		if request.VerifyTimeout <= 0 || request.VerifyTimeout > 80*time.Second {
 			t.Fatalf("publication timeout = %s", request.VerifyTimeout)
 		}
@@ -1284,7 +1280,7 @@ func testDistributionVerifyUsesOneTotalTimeoutBudget(t *testing.T) {
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 	started := time.Now()
-	_, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir, Device: "phone", Timeout: 80 * time.Second})
+	_, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir, Device: "phone", Timeout: 80 * time.Second})
 	if err == nil || time.Since(started) > 80*time.Second {
 		t.Fatalf("total deadline error=%v elapsed=%s", err, time.Since(started))
 	}
@@ -1299,7 +1295,7 @@ func TestDistributionVerifyTreatsInsufficientRemainingDeviceBudgetAsTimeout(t *t
 	deps.readRun = func(string, string) (persistedDistributionRunState, error) { return run, nil }
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 	deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) { return receipt, nil }
-	deps.reverifyPublish = func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+	deps.reverifyPublish = func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 		return validDistributionPublishResultForCompletion(plan, run), nil
 	}
 	deps.observeDevice = func(context.Context, distributionDeviceObservationRequest) (deviceObservation, error) {
@@ -1308,7 +1304,7 @@ func TestDistributionVerifyTreatsInsufficientRemainingDeviceBudgetAsTimeout(t *t
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionVerify(context.Background(), distributionVerifyRequest{
+	result, err := executeDistributionVerify(context.Background(), distributionTestDepsAt(distributionTestNow), distributionVerifyRequest{
 		RunID: run.RunID, StateDir: plan.Paths.StateDir, Device: "phone", Timeout: deviceObservationMinimumTimeout,
 	})
 	if err == nil || result != nil || !strings.Contains(err.Error(), "verification_timeout") {
@@ -1350,7 +1346,7 @@ func TestExecuteDistributionApplySamePlanReturnsSameRunWithoutRepeatingStages(t 
 		states[state.RunID] = state
 		return nil
 	}
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		reconcileCalls++
 		return validDistributionReconcileReceipt(), nil
 	}
@@ -1358,7 +1354,7 @@ func TestExecuteDistributionApplySamePlanReturnsSameRunWithoutRepeatingStages(t 
 		exportCalls++
 		return &localxcode.ExportResult{IPAPath: "/state/run/export/Demo.ipa", BundleID: testDistributionBundleID, Version: "1.2.3", BuildNumber: "42"}, nil
 	}
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		publishCalls++
 		return validDistributionPublishResult(), nil
 	}
@@ -1376,11 +1372,11 @@ func TestExecuteDistributionApplySamePlanReturnsSameRunWithoutRepeatingStages(t 
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	first, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	first, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err != nil {
 		t.Fatalf("first apply error: %v", err)
 	}
-	second, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	second, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err != nil {
 		t.Fatalf("second apply error: %v", err)
 	}
@@ -1413,7 +1409,7 @@ func TestConcurrentApplyInitializesOnlyAfterReadingStateUnderRunLock(t *testing.
 		createOnce.Do(func() { close(createReturned) })
 		return nil
 	}
-	deps.acquireLock = func(context.Context, string, string) (func() error, error) {
+	deps.acquireLock = func(context.Context, *shared.Deps, string, string) (func() error, error) {
 		<-allowFirstLock
 		return func() error { return nil }, nil
 	}
@@ -1421,7 +1417,7 @@ func TestConcurrentApplyInitializesOnlyAfterReadingStateUnderRunLock(t *testing.
 	deps.writeRun = func(string, persistedDistributionRunState) error {
 		return fixture.Errorf("stale creator overwrote completed state")
 	}
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		return signing.ReconcileReceiptView{}, fixture.Errorf("stale creator repeated reconciliation")
 	}
 	deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) {
@@ -1430,7 +1426,7 @@ func TestConcurrentApplyInitializesOnlyAfterReadingStateUnderRunLock(t *testing.
 	installDistributionOrchestrationDependencies(t, deps)
 	done := make(chan error, 1)
 	go func() {
-		result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+		result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 		if err == nil && (result == nil || result.Status != "complete") {
 			err = fmt.Errorf("unexpected result %#v", result)
 		}
@@ -1473,13 +1469,13 @@ func TestConcurrentDistributionResumeSerializesSameRunAndRechecksStateInsideLock
 		current = state
 		return nil
 	}
-	deps.acquireLock = func(context.Context, string, string) (func() error, error) {
+	deps.acquireLock = func(context.Context, *shared.Deps, string, string) (func() error, error) {
 		lockAttempts <- struct{}{}
 		runLock.Lock()
 		return func() error { runLock.Unlock(); return nil }, nil
 	}
 	deps.revalidateArchive = func(context.Context, string, string, distributionArchiveSnapshot) error { return nil }
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		stateMutex.Lock()
 		publishCalls++
 		call := publishCalls
@@ -1502,13 +1498,13 @@ func TestConcurrentDistributionResumeSerializesSameRunAndRechecksStateInsideLock
 
 	result := make(chan error, 2)
 	go func() {
-		_, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
+		_, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
 		result <- err
 	}()
 	<-lockAttempts
 	<-publishEntered
 	go func() {
-		_, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
+		_, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
 		result <- err
 	}()
 	<-lockAttempts
@@ -1532,11 +1528,11 @@ func TestDistributionApplyRecoversEphemeralSigningAfterRunLockBeforeOtherWork(t 
 	plan := validPersistedDistributionPlan(t)
 	deps := validApplyDistributionOrchestrationDependencies(t, plan)
 	var calls []string
-	deps.acquireLock = func(context.Context, string, string) (func() error, error) {
+	deps.acquireLock = func(context.Context, *shared.Deps, string, string) (func() error, error) {
 		calls = append(calls, "lock")
 		return func() error { calls = append(calls, "unlock"); return nil }, nil
 	}
-	deps.recoverEphemeral = func(context.Context) error {
+	deps.recoverEphemeral = func(context.Context, *shared.Deps) error {
 		calls = append(calls, "recover_ephemeral")
 		return errors.New("validated signing journal recovery failed")
 	}
@@ -1544,17 +1540,17 @@ func TestDistributionApplyRecoversEphemeralSigningAfterRunLockBeforeOtherWork(t 
 		calls = append(calls, "snapshot")
 		return archiveTreeSnapshot{}, nil
 	}
-	deps.preflightPublish = func(context.Context, distributionPublicationConfig) error {
+	deps.preflightPublish = func(context.Context, *shared.Deps, distributionPublicationConfig) error {
 		calls = append(calls, "storage_preflight")
 		return nil
 	}
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		calls = append(calls, "reconcile_mutation")
 		return signing.ReconcileReceiptView{}, nil
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "recover") {
 		t.Fatalf("error = %v, want signing recovery failure", err)
 	}
@@ -1569,9 +1565,9 @@ func TestDistributionApplyRecoversEphemeralSigningAfterRunLockBeforeOtherWork(t 
 func TestDistributionApplyBlocksInvalidSigningRecoveryJournal(t *testing.T) {
 	plan := validPersistedDistributionPlan(t)
 	deps := validApplyDistributionOrchestrationDependencies(t, plan)
-	deps.recoverEphemeral = func(context.Context) error { return signing.ErrEphemeralRecoveryJournalInvalid }
+	deps.recoverEphemeral = func(context.Context, *shared.Deps) error { return signing.ErrEphemeralRecoveryJournalInvalid }
 	installDistributionOrchestrationDependencies(t, deps)
-	result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil || result == nil || result.Status != "blocked" || result.Recoverable {
 		t.Fatalf("invalid journal result=%#v error=%v", result, err)
 	}
@@ -1648,11 +1644,11 @@ func TestDistributionApplyCheckpointsEveryPublicationCrashBoundary(t *testing.T)
 			deps := validApplyDistributionOrchestrationDependencies(t, plan)
 			var states []persistedDistributionRunState
 			deps.writeRun = func(_ string, state persistedDistributionRunState) error { states = append(states, state); return nil }
-			deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+			deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 				return publishExecutionResult{}, errors.New(phase)
 			}
 			installDistributionOrchestrationDependencies(t, deps)
-			result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+			result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 			if err == nil || result == nil || result.Status != "recoverable" || result.Stage != "publish" || !result.Recoverable {
 				t.Fatalf("result=%#v error=%v", result, err)
 			}
@@ -1671,7 +1667,7 @@ func TestDistributionApplyRecoversAcrossFinalReceiptAndFinalStateCrashBoundaries
 		deps.writeRun = func(_ string, state persistedDistributionRunState) error { states = append(states, state); return nil }
 		deps.writeReceipt = func(string, persistedDistributionReceipt) error { return errors.New("final receipt fsync failed") }
 		installDistributionOrchestrationDependencies(t, deps)
-		result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+		result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 		if err == nil || result == nil || !result.Recoverable || result.Status != "recoverable" {
 			t.Fatalf("result=%#v error=%v", result, err)
 		}
@@ -1706,7 +1702,7 @@ func TestDistributionApplyRecoversAcrossFinalReceiptAndFinalStateCrashBoundaries
 			}
 			return state, nil
 		}
-		deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+		deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 			publishCalls++
 			return validDistributionPublishResult(), nil
 		}
@@ -1719,11 +1715,11 @@ func TestDistributionApplyRecoversAcrossFinalReceiptAndFinalStateCrashBoundaries
 		}
 		deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
 		installDistributionOrchestrationDependencies(t, deps)
-		failed, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+		failed, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 		if err == nil || failed == nil || !failed.Recoverable {
 			t.Fatalf("failed result=%#v error=%v", failed, err)
 		}
-		resumed, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: failed.RunID, StateDir: plan.Paths.StateDir})
+		resumed, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: failed.RunID, StateDir: plan.Paths.StateDir})
 		if err != nil || resumed.Status != "complete" {
 			t.Fatalf("resumed=%#v error=%v", resumed, err)
 		}
@@ -1779,7 +1775,7 @@ func TestCompleteDistributionStatusRequiresExactImmutableReceiptMatch(t *testing
 			}
 			deps.readReceipt = func(string, string) (persistedDistributionReceipt, error) { return receipt, nil }
 			installDistributionOrchestrationDependencies(t, deps)
-			_, err := executeDistributionStatus(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
+			_, err := executeDistributionStatus(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir})
 			if test.valid && err != nil {
 				t.Fatalf("exact completion rejected: %v", err)
 			}
@@ -1816,7 +1812,7 @@ func TestIncompleteDistributionStatusStillRequiresExactPlanBinding(t *testing.T)
 			deps.readRun = func(string, string) (persistedDistributionRunState, error) { return candidateState, nil }
 			deps.readPlan = func(string) (persistedDistributionPlan, error) { return candidatePlan, nil }
 			installDistributionOrchestrationDependencies(t, deps)
-			if _, err := executeDistributionStatus(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir}); err == nil {
+			if _, err := executeDistributionStatus(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: plan.Paths.StateDir}); err == nil {
 				t.Fatal("incomplete state with mismatched plan binding was accepted")
 			}
 		})
@@ -1834,11 +1830,11 @@ func TestDistributionProviderErrorsNeverLeakURLUDIDOrSecretCanaries(t *testing.T
 	deps := validApplyDistributionOrchestrationDependencies(t, plan)
 	var states []persistedDistributionRunState
 	deps.writeRun = func(_ string, state persistedDistributionRunState) error { states = append(states, state); return nil }
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		return publishExecutionResult{}, providerError
 	}
 	installDistributionOrchestrationDependencies(t, deps)
-	result, err := executeDistributionApply(context.Background(), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
+	result, err := executeDistributionApply(context.Background(), distributionTestDepsAt(distributionTestNow), distributionApplyRequest{PlanPath: "/plans/plan.json", Confirmation: plan.PlanHash})
 	if err == nil || result == nil {
 		t.Fatalf("result=%#v error=%v", result, err)
 	}
@@ -1864,8 +1860,7 @@ func TestDistributionPlanNeverPersistsProviderBlockerCanaries(t *testing.T) {
 	}
 	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
 	deps := validDistributionOrchestrationDependencies(t)
-	deps.now = func() time.Time { return now }
-	deps.reconcilePlan = func(context.Context, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+	deps.reconcilePlan = func(context.Context, *shared.Deps, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 		plan := validDistributionReconcilePlan(now)
 		plan.Ready = false
 		plan.Blockers = []string{"provider blocker at https://example.com/?" + strings.Join(canaries, "&")}
@@ -1875,7 +1870,7 @@ func TestDistributionPlanNeverPersistsProviderBlockerCanaries(t *testing.T) {
 	deps.writePlan = func(_ string, plan persistedDistributionPlan) error { written = plan; return nil }
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionPlan(context.Background(), distributionPlanRequest{
+	result, err := executeDistributionPlan(context.Background(), distributionTestDepsAt(now), distributionPlanRequest{
 		ArchivePath: "/archives/Demo.xcarchive", ConfigPath: "/config/distribution.json",
 		PlanPath: "/plans/plan.json", StateDir: "/state/runs",
 	})
@@ -1898,32 +1893,33 @@ func TestDistributionPlanNeverPersistsProviderBlockerCanaries(t *testing.T) {
 
 func validDistributionOrchestrationDependencies(t *testing.T) distributionOrchestrationDependencies {
 	t.Helper()
-	now := time.Date(2026, 8, 13, 8, 0, 0, 0, time.UTC)
+	now := distributionTestNow
 	return distributionOrchestrationDependencies{
-		now: func() time.Time { return now },
 		readConfig: func(string) (distributionConfig, string, error) {
 			return validDistributionOrchestrationConfig(), testDistributionConfigSHA256(), nil
 		},
 		hashProtectedFile: func(string) (string, error) { return testDistributionDeviceFileSHA256, nil },
-		inspectIdentity: func(context.Context, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
+		inspectIdentity: func(context.Context, *shared.Deps, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
 			return validDistributionIdentity(now), nil
 		},
 		digestArchive: func(context.Context, string) (archiveTreeSnapshot, error) {
 			return validDistributionArchiveSnapshot(), nil
 		},
-		reconcilePlan: func(context.Context, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+		reconcilePlan: func(context.Context, *shared.Deps, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 			return validDistributionReconcilePlan(now), nil
 		},
 		writePlan: func(string, persistedDistributionPlan) error { return nil },
 		readPlan: func(string) (persistedDistributionPlan, error) {
 			return persistedDistributionPlan{}, errors.New("unexpected plan read")
 		},
-		createRun:   func(string, string) error { return nil },
-		acquireLock: func(context.Context, string, string) (func() error, error) { return func() error { return nil }, nil },
+		createRun: func(string, string) error { return nil },
+		acquireLock: func(context.Context, *shared.Deps, string, string) (func() error, error) {
+			return func() error { return nil }, nil
+		},
 		acquireVerifyLease: func(string, string) (distributionVerifyLease, error) {
 			return noopDistributionVerifyLease{}, nil
 		},
-		recoverEphemeral: func(context.Context) error { return nil },
+		recoverEphemeral: func(context.Context, *shared.Deps) error { return nil },
 		readRun: func(string, string) (persistedDistributionRunState, error) {
 			return persistedDistributionRunState{}, errors.New("unexpected run read")
 		},
@@ -1941,11 +1937,11 @@ func validDistributionOrchestrationDependencies(t *testing.T) distributionOrches
 			return distributionSizedFileArtifact{Path: relative, SHA256: digest, SizeBytes: 512}, nil
 		},
 		revalidateArchive: func(context.Context, string, string, distributionArchiveSnapshot) error { return nil },
-		preflightPublish:  func(context.Context, distributionPublicationConfig) error { return nil },
-		reconcileApply: func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+		preflightPublish:  func(context.Context, *shared.Deps, distributionPublicationConfig) error { return nil },
+		reconcileApply: func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 			return validDistributionReconcileReceipt(), nil
 		},
-		verifyReconcile: func(context.Context, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
+		verifyReconcile: func(context.Context, *shared.Deps, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
 			return validDistributionReconcileReceipt(), nil
 		},
 		readReconcilePlan: func(signing.ReconcileApplyOptions) (signing.ReconcilePlanView, error) {
@@ -1960,13 +1956,13 @@ func validDistributionOrchestrationDependencies(t *testing.T) distributionOrches
 		validateExportOptions: func(context.Context, localxcode.ManualReleaseTestingExportOptions) (*localxcode.ManualReleaseTestingExportOptionsResult, error) {
 			return &localxcode.ManualReleaseTestingExportOptionsResult{Path: "/state/run/export/ExportOptions.plist", SHA256: testDistributionDescriptorSHA256}, nil
 		},
-		runSigning: func(ctx context.Context, _ signing.EphemeralRunOptions, callback func(context.Context) error) error {
+		runSigning: func(ctx context.Context, _ *shared.Deps, _ signing.EphemeralRunOptions, callback func(context.Context) error) error {
 			return callback(ctx)
 		},
 		validateSigningEvidence: func(string, persistedDistributionPlan, persistedDistributionRunState, distributionFileArtifact) error {
 			return nil
 		},
-		validatePreparedBundle: func(string, persistedDistributionPlan, persistedDistributionRunState) error { return nil },
+		validatePreparedBundle: func(*shared.Deps, string, persistedDistributionPlan, persistedDistributionRunState) error { return nil },
 		exportIPA: func(context.Context, localxcode.ReleaseTestingExportOptions) (*localxcode.ExportResult, error) {
 			return &localxcode.ExportResult{IPAPath: "/state/run/export/Demo.ipa", BundleID: testDistributionBundleID, Version: "1.2.3", BuildNumber: "42"}, nil
 		},
@@ -1974,10 +1970,10 @@ func validDistributionOrchestrationDependencies(t *testing.T) distributionOrches
 		prepareIPA: func(context.Context, distributionPrepareRequest) (core.PrepareResult, error) {
 			return validDistributionPrepareResult(), nil
 		},
-		publish: func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+		publish: func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 			return validDistributionPublishResult(), nil
 		},
-		reverifyPublish: func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+		reverifyPublish: func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 			return validDistributionPublishResult(), nil
 		},
 		observeDevice: func(context.Context, distributionDeviceObservationRequest) (deviceObservation, error) {
@@ -2018,7 +2014,7 @@ func panicOnDistributionOrchestrationSideEffects(t *testing.T) distributionOrche
 		return distributionConfig{}, "", nil
 	}
 	deps.hashProtectedFile = func(string) (string, error) { panicCall("hashProtectedFile"); return "", nil }
-	deps.inspectIdentity = func(context.Context, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
+	deps.inspectIdentity = func(context.Context, *shared.Deps, signing.PKCS12IdentityOptions) (signing.PKCS12IdentityInfo, error) {
 		panicCall("inspectIdentity")
 		return signing.PKCS12IdentityInfo{}, nil
 	}
@@ -2026,17 +2022,17 @@ func panicOnDistributionOrchestrationSideEffects(t *testing.T) distributionOrche
 		panicCall("digestArchive")
 		return archiveTreeSnapshot{}, nil
 	}
-	deps.reconcilePlan = func(context.Context, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
+	deps.reconcilePlan = func(context.Context, *shared.Deps, signing.ReconcilePlanOptions) (signing.ReconcilePlanView, error) {
 		panicCall("reconcilePlan")
 		return signing.ReconcilePlanView{}, nil
 	}
 	deps.writePlan = func(string, persistedDistributionPlan) error { panicCall("writePlan"); return nil }
 	deps.createRun = func(string, string) error { panicCall("createRun"); return nil }
-	deps.acquireLock = func(context.Context, string, string) (func() error, error) {
+	deps.acquireLock = func(context.Context, *shared.Deps, string, string) (func() error, error) {
 		panicCall("acquireLock")
 		return func() error { return nil }, nil
 	}
-	deps.recoverEphemeral = func(context.Context) error { panicCall("recoverEphemeral"); return nil }
+	deps.recoverEphemeral = func(context.Context, *shared.Deps) error { panicCall("recoverEphemeral"); return nil }
 	deps.writeRun = func(string, persistedDistributionRunState) error { panicCall("writeRun"); return nil }
 	deps.snapshotArchive = func(context.Context, string, string, string) (archiveTreeSnapshot, error) {
 		panicCall("snapshotArchive")
@@ -2050,12 +2046,15 @@ func panicOnDistributionOrchestrationSideEffects(t *testing.T) distributionOrche
 		panicCall("revalidateArchive")
 		return nil
 	}
-	deps.preflightPublish = func(context.Context, distributionPublicationConfig) error { panicCall("preflightPublish"); return nil }
-	deps.reconcileApply = func(context.Context, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
+	deps.preflightPublish = func(context.Context, *shared.Deps, distributionPublicationConfig) error {
+		panicCall("preflightPublish")
+		return nil
+	}
+	deps.reconcileApply = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions) (signing.ReconcileReceiptView, error) {
 		panicCall("reconcileApply")
 		return signing.ReconcileReceiptView{}, nil
 	}
-	deps.verifyReconcile = func(context.Context, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
+	deps.verifyReconcile = func(context.Context, *shared.Deps, signing.ReconcileApplyOptions, string, signing.ReconcileCompletionEvidence) (signing.ReconcileReceiptView, error) {
 		panicCall("verifyReconcile")
 		return signing.ReconcileReceiptView{}, nil
 	}
@@ -2063,7 +2062,7 @@ func panicOnDistributionOrchestrationSideEffects(t *testing.T) distributionOrche
 		panicCall("writeExportOptions")
 		return nil, nil
 	}
-	deps.runSigning = func(context.Context, signing.EphemeralRunOptions, func(context.Context) error) error {
+	deps.runSigning = func(context.Context, *shared.Deps, signing.EphemeralRunOptions, func(context.Context) error) error {
 		panicCall("runSigning")
 		return nil
 	}
@@ -2079,11 +2078,11 @@ func panicOnDistributionOrchestrationSideEffects(t *testing.T) distributionOrche
 		panicCall("prepareIPA")
 		return core.PrepareResult{}, nil
 	}
-	deps.publish = func(context.Context, privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(context.Context, *shared.Deps, privatePublishIntentRequest) (publishExecutionResult, error) {
 		panicCall("publish")
 		return publishExecutionResult{}, nil
 	}
-	deps.reverifyPublish = func(context.Context, privatePublishVerificationRequest) (publishExecutionResult, error) {
+	deps.reverifyPublish = func(context.Context, *shared.Deps, privatePublishVerificationRequest) (publishExecutionResult, error) {
 		panicCall("reverifyPublish")
 		return publishExecutionResult{}, nil
 	}

@@ -1,162 +1,82 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
-func TestProfilesListDefaultsToActiveAndInvalidStates(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet || req.URL.Path != "/v1/profiles" {
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-		}
-		if got := req.URL.Query().Get("filter[profileState]"); got != "ACTIVE,INVALID" {
-			t.Fatalf("expected default profileState filter ACTIVE,INVALID, got %q", got)
-		}
-		body := `{"data":[` +
-			`{"type":"profiles","id":"profile-active","attributes":{"name":"Active","profileType":"IOS_APP_STORE","profileState":"ACTIVE"}},` +
-			`{"type":"profiles","id":"profile-invalid","attributes":{"name":"Expired","profileType":"IOS_APP_ADHOC","profileState":"INVALID"}}` +
-			`]}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "list", "--output", "json"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if runErr != nil {
-		t.Fatalf("run error: %v", runErr)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
-	var payload struct {
-		Data []struct {
-			ID         string `json:"id"`
-			Attributes struct {
-				ProfileState string `json:"profileState"`
-			} `json:"attributes"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
-		t.Fatalf("unmarshal profiles output: %v\n%s", err, stdout)
-	}
-	if len(payload.Data) != 2 {
-		t.Fatalf("expected active and invalid profiles, got %d", len(payload.Data))
-	}
-	if payload.Data[0].Attributes.ProfileState != "ACTIVE" || payload.Data[1].Attributes.ProfileState != "INVALID" {
-		t.Fatalf("unexpected profile states: %+v", payload.Data)
-	}
-}
-
 func TestProfilesListProfileStateFilter(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet || req.URL.Path != "/v1/profiles" {
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-		}
-		if got := req.URL.Query().Get("filter[profileState]"); got != "INVALID" {
-			t.Fatalf("expected profileState filter INVALID, got %q", got)
-		}
-		body := `{"data":[{"type":"profiles","id":"profile-invalid","attributes":{"name":"Expired","profileType":"IOS_APP_ADHOC","profileState":"INVALID"}}]}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "list", "--profile-state", "invalid", "--output", "json"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if runErr != nil {
-		t.Fatalf("run error: %v", runErr)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+	tests := []struct {
+		name       string
+		args       []string
+		wantFilter string
+		response   string
+		wantIDs    []string
+		wantStates []string
+	}{
+		{
+			name:       "defaults to active and invalid",
+			wantFilter: "ACTIVE,INVALID",
+			response:   `{"data":[{"type":"profiles","id":"profile-active","attributes":{"name":"Active","profileType":"IOS_APP_STORE","profileState":"ACTIVE"}},{"type":"profiles","id":"profile-invalid","attributes":{"name":"Expired","profileType":"IOS_APP_ADHOC","profileState":"INVALID"}}]}`,
+			wantIDs:    []string{"profile-active", "profile-invalid"},
+			wantStates: []string{"ACTIVE", "INVALID"},
+		},
+		{
+			name:       "normalizes an explicit state",
+			args:       []string{"--profile-state", "invalid"},
+			wantFilter: "INVALID",
+			response:   `{"data":[{"type":"profiles","id":"profile-invalid","attributes":{"name":"Expired","profileType":"IOS_APP_ADHOC","profileState":"INVALID"}}]}`,
+			wantIDs:    []string{"profile-invalid"},
+			wantStates: []string{"INVALID"},
+		},
 	}
 
-	var payload struct {
-		Data []struct {
-			ID         string `json:"id"`
-			Attributes struct {
-				ProfileState string `json:"profileState"`
-			} `json:"attributes"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
-		t.Fatalf("unmarshal profiles output: %v\n%s", err, stdout)
-	}
-	if len(payload.Data) != 1 || payload.Data[0].ID != "profile-invalid" || payload.Data[0].Attributes.ProfileState != "INVALID" {
-		t.Fatalf("unexpected profiles output: %+v", payload.Data)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reg := asctest.NewRegistry(t)
+			reg.Register(asctest.GET("/v1/profiles", "filter[profileState]="+test.wantFilter), asctest.JSON(http.StatusOK, test.response))
+
+			args := append([]string{"profiles", "list"}, test.args...)
+			stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), append(args, "--output", "json")...)
+			if runErr != nil {
+				t.Fatalf("run error: %v", runErr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+			var payload struct {
+				Data []struct {
+					ID         string `json:"id"`
+					Attributes struct {
+						ProfileState string `json:"profileState"`
+					} `json:"attributes"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("unmarshal profiles output: %v\n%s", err, stdout)
+			}
+			if len(payload.Data) != len(test.wantIDs) {
+				t.Fatalf("profile count = %d, want %d", len(payload.Data), len(test.wantIDs))
+			}
+			for i, profile := range payload.Data {
+				if profile.ID != test.wantIDs[i] || profile.Attributes.ProfileState != test.wantStates[i] {
+					t.Fatalf("profile[%d] = %+v, want id %q and state %q", i, profile, test.wantIDs[i], test.wantStates[i])
+				}
+			}
+		})
 	}
 }
 
 func TestProfilesListProfileStateInvalidValueReturnsUsageError(t *testing.T) {
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
 
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		t.Fatalf("unexpected HTTP request for invalid profile-state: %s %s", req.Method, req.URL.String())
-		return nil, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "list", "--profile-state", "EXPIRED"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "profiles", "list", "--profile-state", "EXPIRED")
 
 	if !errors.Is(runErr, flag.ErrHelp) {
 		t.Fatalf("expected flag.ErrHelp usage error, got %v", runErr)
@@ -167,193 +87,30 @@ func TestProfilesListProfileStateInvalidValueReturnsUsageError(t *testing.T) {
 	if !strings.Contains(stderr, "--profile-state must be one of: ACTIVE, INVALID") {
 		t.Fatalf("expected profile-state usage error, got %q", stderr)
 	}
-	if requestCount != 0 {
+	if requestCount := len(reg.Requests()); requestCount != 0 {
 		t.Fatalf("expected 0 requests, got %d", requestCount)
 	}
 }
 
-func TestProfilesListPaginateFromNext(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/profiles?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/profiles?cursor=BQ&limit=200"
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
+func TestProfilesListsPaginateFromNext(t *testing.T) {
+	runPaginateFromNextCases(t, []paginateFromNextCase{
+		{
+			args:     []string{"profiles", "list"},
+			firstURL: "https://api.appstoreconnect.apple.com/v1/profiles?cursor=AQ&limit=200",
+			dataType: "profiles",
+			deps:     true,
+		},
+		{
+			args:     []string{"profiles", "links", "certificates"},
+			firstURL: "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/certificates?cursor=AQ&limit=200",
+			dataType: "certificates",
+			deps:     true,
+		},
+		{
+			args:     []string{"profiles", "links", "devices"},
+			firstURL: "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/devices?cursor=AQ&limit=200",
+			dataType: "devices",
+			deps:     true,
+		},
 	})
-
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.String() != firstURL {
-				t.Fatalf("unexpected first request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"profiles","id":"profile-next-1"}],"links":{"next":"` + secondURL + `"}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet || req.URL.String() != secondURL {
-				t.Fatalf("unexpected second request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"profiles","id":"profile-next-2"}],"links":{"next":""}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected extra request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "list", "--paginate", "--next", firstURL}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-	if !strings.Contains(stdout, `"id":"profile-next-1"`) || !strings.Contains(stdout, `"id":"profile-next-2"`) {
-		t.Fatalf("expected paginated profiles in output, got %q", stdout)
-	}
-}
-
-func TestProfilesRelationshipsCertificatesPaginateFromNextWithoutID(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/certificates?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/certificates?cursor=BQ&limit=200"
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.String() != firstURL {
-				t.Fatalf("unexpected first request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"certificates","id":"cert-next-1"}],"links":{"next":"` + secondURL + `"}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet || req.URL.String() != secondURL {
-				t.Fatalf("unexpected second request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"certificates","id":"cert-next-2"}],"links":{"next":""}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected extra request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "links", "certificates", "--paginate", "--next", firstURL}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-	if !strings.Contains(stdout, `"id":"cert-next-1"`) || !strings.Contains(stdout, `"id":"cert-next-2"`) {
-		t.Fatalf("expected paginated certificates in output, got %q", stdout)
-	}
-}
-
-func TestProfilesRelationshipsDevicesPaginateFromNextWithoutID(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	const firstURL = "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/devices?cursor=AQ&limit=200"
-	const secondURL = "https://api.appstoreconnect.apple.com/v1/profiles/profile-1/relationships/devices?cursor=BQ&limit=200"
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.String() != firstURL {
-				t.Fatalf("unexpected first request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"devices","id":"device-next-1"}],"links":{"next":"` + secondURL + `"}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet || req.URL.String() != secondURL {
-				t.Fatalf("unexpected second request: %s %s", req.Method, req.URL.String())
-			}
-			body := `{"data":[{"type":"devices","id":"device-next-2"}],"links":{"next":""}}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected extra request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"profiles", "links", "devices", "--paginate", "--next", firstURL}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-	if !strings.Contains(stdout, `"id":"device-next-1"`) || !strings.Contains(stdout, `"id":"device-next-2"`) {
-		t.Fatalf("expected paginated devices in output, got %q", stdout)
-	}
 }

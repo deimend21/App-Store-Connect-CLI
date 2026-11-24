@@ -3,10 +3,14 @@ package validate
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
@@ -232,6 +236,8 @@ func TestBuildDeepValidationUsesAgreementStatusAndMonetizationRelevance(t *testi
 		monetizationUnknown   bool
 		status                *asc.WebAgreementsStatusResult
 		want                  validation.DeepStatus
+		wantCommand           string
+		wantFixability        validation.Fixability
 	}{
 		{
 			name:   "expired program agreement blocks",
@@ -262,6 +268,44 @@ func TestBuildDeepValidationUsesAgreementStatusAndMonetizationRelevance(t *testi
 			want: validation.DeepStatusPassed,
 		},
 		{
+			name: "outstanding agreement without metadata cannot pass a free app",
+			status: &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{
+				{AgreementID: "current", DateEffective: "2026-08-01T00:00:00Z", Status: "Active", IsProgramLicenseAgreement: true},
+				{AgreementID: "outstanding", Pending: true, ProgramLicenseClassificationUnknown: true},
+			}},
+			appPricingKnown: true,
+			want:            validation.DeepStatusUnverified,
+		},
+		{
+			name: "dated outstanding agreement without classification cannot pass a free app",
+			status: &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{
+				{AgreementID: "current", DateEffective: "2026-08-01T00:00:00Z", Status: "Active", IsProgramLicenseAgreement: true},
+				{AgreementID: "outstanding", DateEffective: "2026-10-29T00:00:00Z", Pending: true, ProgramLicenseClassificationUnknown: true},
+			}},
+			appPricingKnown: true,
+			want:            validation.DeepStatusUnverified,
+		},
+		{
+			name: "undated known pending agreement is not hidden by accepted history",
+			status: &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{
+				{AgreementID: "old", DateEffective: "2026-08-01T00:00:00Z", Status: "Active", IsProgramLicenseAgreement: true},
+				{AgreementID: "new", Pending: true, IsProgramLicenseAgreement: true},
+			}},
+			want:           validation.DeepStatusBlocked,
+			wantCommand:    `asc web agreements accept --agreement-id "new" --confirm`,
+			wantFixability: validation.FixabilityWebFixable,
+		},
+		{
+			name: "known and unclassified pending agreements require manual review",
+			status: &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{
+				{AgreementID: "known", Pending: true, IsProgramLicenseAgreement: true},
+				{AgreementID: "unknown", Pending: true, ProgramLicenseClassificationUnknown: true},
+			}},
+			want:           validation.DeepStatusBlocked,
+			wantCommand:    `asc web agreements accept --agreement-id "known" --confirm`,
+			wantFixability: validation.FixabilityManual,
+		},
+		{
 			name: "new agreement supersedes active agreement",
 			status: &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{
 				{AgreementID: "old", Title: "Apple Developer Program License Agreement", Version: "5030", DateEffective: "2026-01-01T00:00:00Z", Status: "Active", IsProgramLicenseAgreement: true},
@@ -271,7 +315,7 @@ func TestBuildDeepValidationUsesAgreementStatusAndMonetizationRelevance(t *testi
 		},
 		{
 			name:            "paid agreement is irrelevant for free app",
-			status:          &asc.WebAgreementsStatusResult{Agreements: []asc.WebAgreement{{AgreementID: "pla", Status: "active", IsProgramLicenseAgreement: true}}, ContractMessages: []asc.WebAgreementContractMessage{{Subject: "Paid Apps Agreement update"}}},
+			status:          &asc.WebAgreementsStatusResult{Warnings: []string{"App Store Connect alert has no pending agreement in Developer Portal"}, Agreements: []asc.WebAgreement{{AgreementID: "pla", Status: "active", IsProgramLicenseAgreement: true}}, ContractMessages: []asc.WebAgreementContractMessage{{Subject: "Paid Apps Agreement update"}}},
 			appPricingKnown: true,
 			want:            validation.DeepStatusPassed,
 		},
@@ -314,6 +358,18 @@ func TestBuildDeepValidationUsesAgreementStatusAndMonetizationRelevance(t *testi
 			deep, _ := buildDeepValidation(context.Background(), report, client, validation.DeepSessionCached)
 			if got := deepCheckByID(t, deep, validation.DeepCheckAgreementsActive); got.Status != test.want {
 				t.Fatalf("agreement check = %#v, want %q", got, test.want)
+			}
+			if test.wantCommand != "" {
+				got := deepCheckByID(t, deep, validation.DeepCheckAgreementsActive)
+				if got.Resolution == nil || len(got.Resolution.Commands) != 1 || got.Resolution.Commands[0] != test.wantCommand || got.Resolution.Fixability != test.wantFixability {
+					t.Fatalf("agreement resolution = %#v, want %q with fixability %q", got.Resolution, test.wantCommand, test.wantFixability)
+				}
+			}
+			if len(test.status.ContractMessages) > 0 && test.want == validation.DeepStatusBlocked {
+				got := deepCheckByID(t, deep, validation.DeepCheckAgreementsActive)
+				if got.Message != "App Store Connect reports an agreement alert that needs review" || got.Resolution == nil || len(got.Resolution.Commands) != 0 {
+					t.Fatalf("banner-only check = %#v, want alert without acceptance command", got)
+				}
 			}
 		})
 	}
@@ -358,13 +414,16 @@ func TestBuildDeepValidationPreservesAgreementBannerWhenHistoryFails(t *testing.
 	}
 	found := false
 	for _, finding := range findings {
-		if finding.ID == "agreements.pending" {
+		if finding.ID == "agreements.alert" {
+			if finding.Severity != validation.SeverityError || finding.Resolution == nil || len(finding.Resolution.Commands) != 0 || strings.Contains(finding.Remediation, "accept") {
+				t.Fatalf("alert finding must fail closed without acceptance advice: %#v", finding)
+			}
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("findings = %#v, want agreements.pending", findings)
+		t.Fatalf("findings = %#v, want agreements.alert", findings)
 	}
 }
 
@@ -461,10 +520,13 @@ func TestRequiredAgreementFallbackReportKeepsDeepPublicGatesUnverified(t *testin
 		VersionID: "version-1",
 		Strict:    true,
 	})
-	if report.Summary.Errors != 1 || report.Summary.Warnings != 2 || report.Summary.Blocking != 3 {
+	if report.Summary.Errors != 1 || report.Summary.Warnings != 3 || report.Summary.Blocking != 4 {
 		t.Fatalf("fallback summary = %#v", report.Summary)
 	}
 	deep, _ := buildDeepValidation(context.Background(), report, nil, validation.DeepSessionUnavailable)
+	if got := deepCheckByID(t, deep, validation.DeepCheckIAPAttachment); got.Status != validation.DeepStatusUnverified || got.Source != validation.DeepSourcePublicAPI {
+		t.Fatalf("IAP attachment check = %#v, want unverified public API evidence", got)
+	}
 	if got := deepCheckByID(t, deep, validation.DeepCheckAvailabilityConfigured); got.Status != validation.DeepStatusUnverified {
 		t.Fatalf("availability check = %#v, want unverified", got)
 	}
@@ -501,4 +563,57 @@ func deepCheckByID(t *testing.T, report validation.DeepReport, id string) valida
 	}
 	t.Fatalf("deep check %q not found in %#v", id, report.Checks)
 	return validation.DeepCheck{}
+}
+
+func TestCollectDeepValidationLoadsSessionOnDepsTransport(t *testing.T) {
+	transport := &http.Transport{}
+	var loaderTransport http.RoundTripper
+	previous := loadDeepSessionFn
+	loadDeepSessionFn = func(_ context.Context, rt http.RoundTripper, _ string) (*webcore.AuthSession, bool, error) {
+		loaderTransport = rt
+		return nil, false, nil
+	}
+	t.Cleanup(func() { loadDeepSessionFn = previous })
+
+	d := &shared.Deps{HTTPTransport: func() http.RoundTripper { return transport }}
+	if _, _, err := collectDeepValidation(context.Background(), d, validation.Report{}, ""); err != nil {
+		t.Fatalf("collectDeepValidation() error: %v", err)
+	}
+	if loaderTransport != transport {
+		t.Fatalf("session loader transport = %v, want the deps transport", loaderTransport)
+	}
+}
+
+// Under a web session broker the cached session is not validate's to use: it
+// is neither read nor sent to Apple.
+func TestLoadDeepSessionLeavesTheCacheAloneUnderAWebBroker(t *testing.T) {
+	t.Setenv("ASC_WEB_SESSION_CACHE", "1")
+	t.Setenv("ASC_WEB_SESSION_CACHE_BACKEND", "file")
+	t.Setenv("ASC_WEB_SESSION_CACHE_DIR", t.TempDir())
+	jar, _ := cookiejar.New(nil)
+	jar.SetCookies(&url.URL{Scheme: "https", Host: "appstoreconnect.apple.com", Path: "/"}, []*http.Cookie{{Name: "myacinfo", Value: "cached", Path: "/"}})
+	if err := webcore.PersistSession(&webcore.AuthSession{Client: &http.Client{Jar: jar}, UserEmail: "user@example.com"}); err != nil {
+		t.Fatalf("seed cached session: %v", err)
+	}
+	t.Setenv(webcore.WebBrokerURLEnv, "https://broker.example.com")
+	t.Setenv(webcore.WebBrokerTokenEnv, "broker-token")
+
+	requests := 0
+	transport := buildsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("no request expected")
+	})
+	session, ok, err := loadDeepSession(context.Background(), transport, "user@example.com")
+	if session != nil || ok || err != nil || requests != 0 {
+		t.Fatalf("session=%v ok=%v err=%v requests=%d", session, ok, err, requests)
+	}
+	// The finding names no sign-in command: login is refused under a broker.
+	d := &shared.Deps{HTTPTransport: func() http.RoundTripper { return transport }}
+	_, findings, err := collectDeepValidation(context.Background(), d, validation.Report{AppID: "app-1"}, "user@example.com")
+	if err != nil || len(findings) != 1 || requests != 0 {
+		t.Fatalf("findings=%#v err=%v requests=%d", findings, err, requests)
+	}
+	if advice := findings[0].Remediation + strings.Join(findings[0].Resolution.Commands, " "); !strings.Contains(advice, webcore.WebBrokerURLEnv) || strings.Contains(advice, "asc web auth") {
+		t.Fatalf("advice=%q", advice)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -22,7 +23,6 @@ func preserveWebPasswordHooks(t *testing.T) {
 	originalDeleteAll := deleteAllStoredWebPasswordsFn
 	originalDeleteSession := deleteWebSessionFn
 	originalDeleteAllSessions := deleteAllWebSessionsFn
-	originalWarningWriter := passwordStoreWarningWriter
 	t.Cleanup(func() {
 		loadStoredWebPasswordFn = originalLoad
 		storeStoredWebPasswordFn = originalStore
@@ -31,7 +31,6 @@ func preserveWebPasswordHooks(t *testing.T) {
 		deleteAllStoredWebPasswordsFn = originalDeleteAll
 		deleteWebSessionFn = originalDeleteSession
 		deleteAllWebSessionsFn = originalDeleteAllSessions
-		passwordStoreWarningWriter = originalWarningWriter
 	})
 }
 
@@ -50,7 +49,6 @@ func preserveWebLoginHooks(t *testing.T) {
 	originalEnsure := ensureTwoFactorCodeRequestedFn
 	originalSubmit := submitTwoFactorCodeFn
 	originalPersist := persistWebSessionFn
-	originalExpiredWriter := sessionExpiredWriter
 	t.Cleanup(func() {
 		tryResumeSessionFn = originalTryResume
 		tryResumeLastFn = originalTryResumeLast
@@ -64,7 +62,6 @@ func preserveWebLoginHooks(t *testing.T) {
 		ensureTwoFactorCodeRequestedFn = originalEnsure
 		submitTwoFactorCodeFn = originalSubmit
 		persistWebSessionFn = originalPersist
-		sessionExpiredWriter = originalExpiredWriter
 	})
 }
 
@@ -95,6 +92,7 @@ func configureFreshPasswordLoginTest(t *testing.T) *webcore.AuthSession {
 }
 
 func TestResolveSessionStoresPromptedPasswordAfterSuccessfulLogin(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	expected := configureFreshPasswordLoginTest(t)
 
 	loginSucceeded := false
@@ -114,7 +112,7 @@ func TestResolveSessionStoresPromptedPasswordAfterSuccessfulLogin(t *testing.T) 
 		return nil
 	}
 
-	session, source, err := resolveSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
@@ -127,6 +125,7 @@ func TestResolveSessionStoresPromptedPasswordAfterSuccessfulLogin(t *testing.T) 
 }
 
 func TestResolveSessionDoesNotStoreEnvironmentPassword(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "env-secret")
@@ -154,12 +153,13 @@ func TestResolveSessionDoesNotStoreEnvironmentPassword(t *testing.T) {
 	}
 	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
 
-	if _, _, err := resolveSession(context.Background(), "user@example.com", "", ""); err != nil {
+	if _, _, err := resolveSession(context.Background(), d, "user@example.com", "", ""); err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
 }
 
 func TestResolveSessionOptOutSkipsStoredPasswordReadAndWrite(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	for _, optOutEnv := range []string{webDontStorePasswordEnv, "ASC_BYPASS_KEYCHAIN"} {
 		t.Run(optOutEnv, func(t *testing.T) {
 			configureFreshPasswordLoginTest(t)
@@ -175,7 +175,7 @@ func TestResolveSessionOptOutSkipsStoredPasswordReadAndWrite(t *testing.T) {
 			}
 			promptPasswordFn = func(context.Context) (string, error) { return "prompted-secret", nil }
 
-			if _, _, err := resolveSession(context.Background(), "user@example.com", "", ""); err != nil {
+			if _, _, err := resolveSession(context.Background(), d, "user@example.com", "", ""); err != nil {
 				t.Fatalf("resolveSession() error = %v", err)
 			}
 		})
@@ -183,6 +183,7 @@ func TestResolveSessionOptOutSkipsStoredPasswordReadAndWrite(t *testing.T) {
 }
 
 func TestResolveSessionInvalidOptOutFailsClosedWithWarning(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	configureFreshPasswordLoginTest(t)
 	t.Setenv(webDontStorePasswordEnv, "treu")
 
@@ -196,11 +197,11 @@ func TestResolveSessionInvalidOptOutFailsClosedWithWarning(t *testing.T) {
 	}
 	promptPasswordFn = func(context.Context) (string, error) { return "prompted-secret", nil }
 	var warning bytes.Buffer
-	passwordStoreWarningWriter = &warning
+	d.IO.ErrOut = &warning
 	resetInvalidWebPasswordOptOutWarnings()
 	t.Cleanup(resetInvalidWebPasswordOptOutWarnings)
 
-	if _, _, err := resolveSession(context.Background(), "user@example.com", "", ""); err != nil {
+	if _, _, err := resolveSession(context.Background(), d, "user@example.com", "", ""); err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
 	if got := warning.String(); !strings.Contains(got, `invalid ASC_WEB_DONT_STORE_PASSWORD value "treu"`) || !strings.Contains(got, "password storage disabled") {
@@ -209,6 +210,7 @@ func TestResolveSessionInvalidOptOutFailsClosedWithWarning(t *testing.T) {
 }
 
 func TestResolveSessionUsesStoredPasswordAndCachedCookiesForTwoFactorReauth(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -268,7 +270,7 @@ func TestResolveSessionUsesStoredPasswordAndCachedCookiesForTwoFactorReauth(t *t
 		return nil
 	}
 
-	session, source, err := resolveSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
@@ -278,6 +280,7 @@ func TestResolveSessionUsesStoredPasswordAndCachedCookiesForTwoFactorReauth(t *t
 }
 
 func TestResolveAppCreateSessionPersistsStoredPasswordAutoReauth(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -318,7 +321,7 @@ func TestResolveAppCreateSessionPersistsStoredPasswordAutoReauth(t *testing.T) {
 		return nil
 	}
 
-	session, source, err := resolveAppCreateSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveAppCreateSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveAppCreateSession() error = %v", err)
 	}
@@ -331,6 +334,7 @@ func TestResolveAppCreateSessionPersistsStoredPasswordAutoReauth(t *testing.T) {
 }
 
 func TestResolveSessionPromptedPasswordFallsBackFromExpiredCookiesToFreshClient(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -364,7 +368,7 @@ func TestResolveSessionPromptedPasswordFallsBackFromExpiredCookiesToFreshClient(
 	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
 	storeStoredWebPasswordFn = func(string, string) error { return nil }
 
-	session, source, err := resolveSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
@@ -374,6 +378,7 @@ func TestResolveSessionPromptedPasswordFallsBackFromExpiredCookiesToFreshClient(
 }
 
 func TestResolveSessionPromptedPasswordDoesNotRetryFreshAfterTwoFactorStarts(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -401,13 +406,14 @@ func TestResolveSessionPromptedPasswordDoesNotRetryFreshAfterTwoFactorStarts(t *
 		return nil, nil
 	}
 
-	_, _, err := resolveSession(context.Background(), "user@example.com", "", "")
+	_, _, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err == nil || !strings.Contains(err.Error(), "2fa challenge setup failed") {
 		t.Fatalf("resolveSession() error = %v, want original 2FA setup failure", err)
 	}
 }
 
 func TestResolveSessionAutoReauthDoesNotRetryFreshAfterTwoFactorStarts(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "env-secret")
 
@@ -433,13 +439,14 @@ func TestResolveSessionAutoReauthDoesNotRetryFreshAfterTwoFactorStarts(t *testin
 		return nil, nil
 	}
 
-	_, _, err := resolveSession(context.Background(), "user@example.com", "", "")
+	_, _, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err == nil || !strings.Contains(err.Error(), "2fa challenge setup failed") {
 		t.Fatalf("resolveSession() error = %v, want original automatic 2FA setup failure", err)
 	}
 }
 
 func TestResolveSessionReplacesRejectedStoredPasswordOnlyAfterSuccessfulLogin(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -456,6 +463,7 @@ func TestResolveSessionReplacesRejectedStoredPasswordOnlyAfterSuccessfulLogin(t 
 	}
 	loadStoredWebPasswordFn = func(string) (string, bool, error) { return "old-secret", true, nil }
 	promptPasswordFn = func(context.Context) (string, error) { return "new-secret", nil }
+	deleteStoredWebPasswordFn = func(string) error { return nil }
 
 	loginAttempts := 0
 	webLoginWithClientFn = func(_ context.Context, client *http.Client, credentials webcore.LoginCredentials) (*webcore.AuthSession, error) {
@@ -485,7 +493,7 @@ func TestResolveSessionReplacesRejectedStoredPasswordOnlyAfterSuccessfulLogin(t 
 	}
 	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
 	var warning bytes.Buffer
-	passwordStoreWarningWriter = &warning
+	d.IO.ErrOut = &warning
 	stored := ""
 	storeStoredWebPasswordFn = func(_ string, password string) error {
 		if loginAttempts != 2 {
@@ -495,19 +503,20 @@ func TestResolveSessionReplacesRejectedStoredPasswordOnlyAfterSuccessfulLogin(t 
 		return nil
 	}
 
-	session, source, err := resolveSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
 	if session != expected || source != "fresh" || stored != "new-secret" {
 		t.Fatalf("result = (%+v, %q, stored %q), want expected fresh session with replacement", session, source, stored)
 	}
-	if got := warning.String(); !strings.Contains(got, "Saved Apple Account password was rejected; enter the current password to replace it.") {
+	if got := warning.String(); !strings.Contains(got, "Saved Apple Account password was rejected; removing it. Enter the current password to save a new one.") {
 		t.Fatalf("warning = %q, want stored-password rejection notice", got)
 	}
 }
 
 func TestResolveSessionReplacesRejectedStoredPasswordWithoutCachedSession(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	preserveWebPasswordHooks(t)
 	preserveWebLoginHooks(t)
 	t.Setenv(webPasswordEnv, "")
@@ -520,6 +529,7 @@ func TestResolveSessionReplacesRejectedStoredPasswordWithoutCachedSession(t *tes
 	}
 	loadStoredWebPasswordFn = func(string) (string, bool, error) { return "old-secret", true, nil }
 	promptPasswordFn = func(context.Context) (string, error) { return "new-secret", nil }
+	deleteStoredWebPasswordFn = func(string) error { return nil }
 	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
 
 	loginAttempts := 0
@@ -542,7 +552,7 @@ func TestResolveSessionReplacesRejectedStoredPasswordWithoutCachedSession(t *tes
 		}
 	}
 	var warning bytes.Buffer
-	passwordStoreWarningWriter = &warning
+	d.IO.ErrOut = &warning
 	stored := ""
 	storeStoredWebPasswordFn = func(_ string, password string) error {
 		if loginAttempts != 2 {
@@ -552,26 +562,66 @@ func TestResolveSessionReplacesRejectedStoredPasswordWithoutCachedSession(t *tes
 		return nil
 	}
 
-	session, source, err := resolveSession(context.Background(), "user@example.com", "", "")
+	session, source, err := resolveSession(context.Background(), d, "user@example.com", "", "")
 	if err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
 	if session != expected || source != "fresh" || stored != "new-secret" {
 		t.Fatalf("result = (%+v, %q, stored %q), want expected fresh session with replacement", session, source, stored)
 	}
-	if got := warning.String(); !strings.Contains(got, "Saved Apple Account password was rejected; enter the current password to replace it.") {
+	if got := warning.String(); !strings.Contains(got, "Saved Apple Account password was rejected; removing it. Enter the current password to save a new one.") {
 		t.Fatalf("warning = %q, want stored-password rejection notice", got)
 	}
 }
 
+// A run without a terminal cannot replace a rejected saved password, so it must
+// be removed or every later run sends it to Apple again.
+func TestResolveSessionRemovesRejectedStoredPassword(t *testing.T) {
+	d, _, _ := newWebTestDeps()
+	for _, expiredCache := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expiredCache=%t", expiredCache), func(t *testing.T) {
+			configureFreshPasswordLoginTest(t)
+			if expiredCache {
+				tryResumeSessionFn = func(context.Context, string) (*webcore.AuthSession, bool, error) {
+					return nil, false, webcore.ErrCachedSessionExpired
+				}
+				loadCachedSessionFn = func(string) (*webcore.AuthSession, bool, error) {
+					return &webcore.AuthSession{Client: &http.Client{}, UserEmail: "user@example.com"}, true, nil
+				}
+			}
+			loadStoredWebPasswordFn = func(string) (string, bool, error) { return "old-secret", true, nil }
+			promptPasswordFn = func(context.Context) (string, error) { return "", errors.New("no terminal") }
+			webLoginFn = func(context.Context, webcore.LoginCredentials) (*webcore.AuthSession, error) {
+				return nil, webcore.ErrInvalidAppleAccountCredentials
+			}
+			webLoginWithClientFn = func(context.Context, *http.Client, webcore.LoginCredentials) (*webcore.AuthSession, error) {
+				return nil, webcore.ErrInvalidAppleAccountCredentials
+			}
+			var deleted []string
+			deleteStoredWebPasswordFn = func(appleID string) error {
+				deleted = append(deleted, appleID)
+				return nil
+			}
+
+			if _, _, err := resolveSession(context.Background(), d, "user@example.com", "", ""); err == nil {
+				t.Fatal("expected resolveSession to fail without a replacement password")
+			}
+			if len(deleted) != 1 || deleted[0] != "user@example.com" {
+				t.Fatalf("deleted saved passwords = %v, want [user@example.com]", deleted)
+			}
+		})
+	}
+}
+
 func TestResolveSessionWarnsButSucceedsWhenPromptedPasswordCannotBeStored(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	configureFreshPasswordLoginTest(t)
 	promptPasswordFn = func(context.Context) (string, error) { return "prompted-secret", nil }
 	storeStoredWebPasswordFn = func(string, string) error { return errors.New("keychain locked") }
 	var warning bytes.Buffer
-	passwordStoreWarningWriter = &warning
+	d.IO.ErrOut = &warning
 
-	if _, _, err := resolveSession(context.Background(), "user@example.com", "", ""); err != nil {
+	if _, _, err := resolveSession(context.Background(), d, "user@example.com", "", ""); err != nil {
 		t.Fatalf("resolveSession() error = %v", err)
 	}
 	if got := warning.String(); !strings.Contains(got, "could not save") || !strings.Contains(got, "keychain locked") {
@@ -591,12 +641,13 @@ func TestWebAuthStatusReportsStoredPasswordForExpiredSession(t *testing.T) {
 		return appleID == "user@example.com", nil
 	}
 
-	cmd := WebAuthStatusCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthStatusCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--apple-id", "user@example.com", "--output", "json"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if runErr != nil {
@@ -623,12 +674,13 @@ func TestWebAuthStatusReportsPersistedDeveloperTeamWhenExpired(t *testing.T) {
 	}
 	storedWebPasswordExistsFn = func(string) (bool, error) { return false, nil }
 
-	cmd := WebAuthStatusCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthStatusCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--apple-id", "user@example.com", "--output", "json"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if runErr != nil {
@@ -650,12 +702,13 @@ func TestWebAuthLogoutForgetPasswordRequiresConfirmation(t *testing.T) {
 		return nil
 	}
 
-	cmd := WebAuthLogoutCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthLogoutCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--apple-id", "user@example.com", "--forget-password"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	_, stderr := captureWebCommandOutput(t, func() {
+	_, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if !errors.Is(runErr, flag.ErrHelp) || !strings.Contains(stderr, "--confirm") {
@@ -675,12 +728,13 @@ func TestWebAuthLogoutCanForgetPasswordWithSession(t *testing.T) {
 		return nil
 	}
 
-	cmd := WebAuthLogoutCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthLogoutCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--apple-id", "user@example.com", "--forget-password", "--confirm"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if runErr != nil {
@@ -702,7 +756,8 @@ func TestWebAuthLogoutForgetPasswordFailsBeforeDeletingSession(t *testing.T) {
 		return nil
 	}
 
-	cmd := WebAuthLogoutCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAuthLogoutCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--apple-id", "user@example.com", "--forget-password", "--confirm"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -723,12 +778,13 @@ func TestWebAuthLogoutAllForgetPasswordRequiresConfirmationWithoutDeletingAnythi
 		return nil
 	}
 
-	cmd := WebAuthLogoutCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthLogoutCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--all", "--forget-password"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	_, stderr := captureWebCommandOutput(t, func() {
+	_, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if !errors.Is(runErr, flag.ErrHelp) || !strings.Contains(stderr, "--confirm") {
@@ -748,12 +804,13 @@ func TestWebAuthLogoutAllCanForgetPasswordsWithSessions(t *testing.T) {
 		return nil
 	}
 
-	cmd := WebAuthLogoutCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAuthLogoutCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--all", "--forget-password", "--confirm"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	var runErr error
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = cmd.Exec(context.Background(), nil)
 	})
 	if runErr != nil {

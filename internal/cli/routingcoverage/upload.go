@@ -34,13 +34,14 @@ type routingCoverageGeoJSON struct {
 
 var errRoutingCoverageSourceChanged = errors.New("routing coverage source changed while reading")
 
-// PrepareRoutingCoverageFile validates and fingerprints a routing coverage file.
-func PrepareRoutingCoverageFile(path string) (PreparedRoutingCoverageFile, error) {
-	return prepareRoutingCoverageFile(path, asc.ComputeChecksumFromReader)
+// PrepareRoutingCoverageFile validates and fingerprints a routing coverage
+// file, resolving a relative path against d's working directory.
+func PrepareRoutingCoverageFile(d *shared.Deps, path string) (PreparedRoutingCoverageFile, error) {
+	return prepareRoutingCoverageFile(d, path, asc.ComputeChecksumFromReader)
 }
 
-func prepareRoutingCoverageFile(path string, checksumFunc func(io.Reader, asc.ChecksumAlgorithm) (*asc.Checksum, error)) (PreparedRoutingCoverageFile, error) {
-	rootPath, relativePath, absolutePath, err := resolveRoutingCoverageSource(path)
+func prepareRoutingCoverageFile(d *shared.Deps, path string, checksumFunc func(io.Reader, asc.ChecksumAlgorithm) (*asc.Checksum, error)) (PreparedRoutingCoverageFile, error) {
+	rootPath, relativePath, absolutePath, err := resolveRoutingCoverageSource(d, path)
 	if err != nil {
 		return PreparedRoutingCoverageFile{}, err
 	}
@@ -91,21 +92,21 @@ func prepareRoutingCoverageFile(path string, checksumFunc func(io.Reader, asc.Ch
 	}, nil
 }
 
-func resolveRoutingCoverageSource(path string) (string, string, string, error) {
+func resolveRoutingCoverageSource(d *shared.Deps, path string) (string, string, string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", "", "", fmt.Errorf("file is required")
 	}
 
-	absolutePath, err := filepath.Abs(path)
+	absolutePath, err := d.Abs(path)
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolve file path: %w", err)
 	}
-	workingDir, err := os.Getwd()
+	workingDir, err := d.Getwd()
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolve current directory: %w", err)
 	}
-	rootPath, err := routingCoverageSourceRoot(workingDir, absolutePath)
+	rootPath, err := routingCoverageSourceRoot(d, workingDir, absolutePath)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -124,8 +125,8 @@ func resolveRoutingCoverageSource(path string) (string, string, string, error) {
 	return root.Path(), relativePath, resolvedPath, nil
 }
 
-func routingCoverageSourceRoot(workingDir, absolutePath string) (string, error) {
-	rootPath, err := filepath.Abs(workingDir)
+func routingCoverageSourceRoot(d *shared.Deps, workingDir, absolutePath string) (string, error) {
+	rootPath, err := d.Abs(workingDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve current directory: %w", err)
 	}
@@ -252,12 +253,12 @@ func equalCoordinates(left, right []*float64) bool {
 	return true
 }
 
-func (file PreparedRoutingCoverageFile) openSource() (*os.File, error) {
+func (file PreparedRoutingCoverageFile) openSource(d *shared.Deps) (*os.File, error) {
 	rootPath := file.rootPath
 	relativePath := file.relativePath
 	if rootPath == "" || relativePath == "" {
 		var err error
-		rootPath, relativePath, _, err = resolveRoutingCoverageSource(file.Path)
+		rootPath, relativePath, _, err = resolveRoutingCoverageSource(d, file.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -358,8 +359,8 @@ func verifyPreparedRoutingCoverageSourceWithChecksum(
 
 // RevalidatePreparedRoutingCoverageFile verifies that the prepared source has
 // not changed since it was initially validated.
-func RevalidatePreparedRoutingCoverageFile(file PreparedRoutingCoverageFile) error {
-	source, err := file.openSource()
+func RevalidatePreparedRoutingCoverageFile(d *shared.Deps, file PreparedRoutingCoverageFile) error {
+	source, err := file.openSource(d)
 	if err != nil {
 		return fmt.Errorf("open file: %w", err)
 	}
@@ -367,8 +368,8 @@ func RevalidatePreparedRoutingCoverageFile(file PreparedRoutingCoverageFile) err
 	return verifyPreparedRoutingCoverageSource(source, file)
 }
 
-func snapshotPreparedRoutingCoverageFile(file PreparedRoutingCoverageFile) (*os.File, error) {
-	source, err := file.openSource()
+func snapshotPreparedRoutingCoverageFile(d *shared.Deps, file PreparedRoutingCoverageFile) (*os.File, error) {
+	source, err := file.openSource(d)
 	if err != nil {
 		return nil, fmt.Errorf("open file: %w", err)
 	}
@@ -388,26 +389,28 @@ func snapshotPreparedRoutingCoverageFile(file PreparedRoutingCoverageFile) (*os.
 	return snapshot, nil
 }
 
-// UploadPreparedRoutingCoverageFile creates, uploads, and commits routing coverage.
-// A post-create error returns the reservation response alongside the error when
-// cleanup cannot remove it, so callers can report the retained reservation ID.
-func UploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, versionID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
-	return uploadPreparedRoutingCoverageFile(ctx, client, versionID, "", file)
+// UploadPreparedRoutingCoverageFileWith creates, uploads, and commits routing
+// coverage on d. A post-create error returns the reservation response alongside
+// the error when cleanup cannot remove it, so callers can report the retained
+// reservation ID.
+func UploadPreparedRoutingCoverageFileWith(ctx context.Context, d *shared.Deps, client *asc.Client, versionID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
+	return uploadPreparedRoutingCoverageFile(ctx, d, client, versionID, "", file)
 }
 
-// ReplaceRoutingCoverageWithPreparedFile revalidates the upload source before
-// deleting the current routing coverage, then creates, uploads, and commits its
-// replacement from the same open source handle. A post-create error returns the
-// replacement response alongside the error when cleanup cannot remove it.
-func ReplaceRoutingCoverageWithPreparedFile(ctx context.Context, client *asc.Client, versionID, currentCoverageID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
+// ReplaceRoutingCoverageWithPreparedFileWith revalidates the upload source
+// before deleting the current routing coverage, then creates, uploads, and
+// commits its replacement from the same open source handle, on d. A post-create
+// error returns the replacement response alongside the error when cleanup
+// cannot remove it.
+func ReplaceRoutingCoverageWithPreparedFileWith(ctx context.Context, d *shared.Deps, client *asc.Client, versionID, currentCoverageID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
 	currentCoverageID = strings.TrimSpace(currentCoverageID)
 	if currentCoverageID == "" {
 		return nil, fmt.Errorf("current routing coverage ID is required")
 	}
-	return uploadPreparedRoutingCoverageFile(ctx, client, versionID, currentCoverageID, file)
+	return uploadPreparedRoutingCoverageFile(ctx, d, client, versionID, currentCoverageID, file)
 }
 
-func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, versionID, currentCoverageID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
+func uploadPreparedRoutingCoverageFile(ctx context.Context, d *shared.Deps, client *asc.Client, versionID, currentCoverageID string, file PreparedRoutingCoverageFile) (*asc.RoutingAppCoverageResponse, error) {
 	if client == nil {
 		return nil, fmt.Errorf("client is required")
 	}
@@ -419,13 +422,13 @@ func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, 
 		ctx = context.Background()
 	}
 
-	source, err := snapshotPreparedRoutingCoverageFile(file)
+	source, err := snapshotPreparedRoutingCoverageFile(d, file)
 	if err != nil {
 		return nil, err
 	}
 	defer discardRoutingCoverageSnapshot(source)
 	if currentCoverageID != "" {
-		deleteCtx, deleteCancel := shared.ContextWithTimeout(ctx)
+		deleteCtx, deleteCancel := d.Timeout(ctx)
 		deleteErr := client.DeleteRoutingAppCoverage(deleteCtx, currentCoverageID)
 		deleteCancel()
 		if deleteErr != nil {
@@ -433,7 +436,7 @@ func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, 
 		}
 	}
 
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	response, err := client.CreateRoutingAppCoverage(requestCtx, versionID, file.FileName, file.FileSize)
 	cancel()
 	if err != nil {
@@ -447,7 +450,7 @@ func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, 
 		return nil, fmt.Errorf("created routing coverage response is missing an ID")
 	}
 	cleanupFailure := func(original error) (*asc.RoutingAppCoverageResponse, error) {
-		cleanupCtx, cleanupCancel := shared.ContextWithTimeout(context.WithoutCancel(ctx))
+		cleanupCtx, cleanupCancel := d.Timeout(context.WithoutCancel(ctx))
 		cleanupErr := client.DeleteRoutingAppCoverage(cleanupCtx, coverageID)
 		cleanupCancel()
 		if cleanupErr != nil && !asc.IsNotFound(cleanupErr) {
@@ -462,7 +465,7 @@ func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, 
 	// The upload streams from an unlinked snapshot that was size- and checksum-
 	// verified before the reservation, and the upload only reads it, so there is
 	// nothing left to re-verify once the operations complete.
-	uploadCtx, uploadCancel := shared.ContextWithUploadTimeout(ctx)
+	uploadCtx, uploadCancel := d.UploadTimeout(ctx)
 	err = asc.ExecuteUploadOperationsFromFile(uploadCtx, source, response.Data.Attributes.UploadOperations)
 	uploadCancel()
 	if err != nil {
@@ -474,7 +477,7 @@ func uploadPreparedRoutingCoverageFile(ctx context.Context, client *asc.Client, 
 		SourceFileChecksum: &file.Checksum,
 		Uploaded:           &uploaded,
 	}
-	commitCtx, commitCancel := shared.ContextWithUploadTimeout(ctx)
+	commitCtx, commitCancel := d.UploadTimeout(ctx)
 	committed, err := client.UpdateRoutingAppCoverage(commitCtx, coverageID, attributes)
 	commitCancel()
 	if err != nil {

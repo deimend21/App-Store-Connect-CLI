@@ -23,7 +23,7 @@ func TestPlatformCommandInventoryMatchesIndependentFixture(t *testing.T) {
 		"campaigns resume": {},
 	}
 
-	leaves := collectDirectPlatformCommandLeaves(AdsCommand())
+	leaves := collectDirectPlatformCommandLeaves(NewAdsCommand(newAdsTestDeps()))
 	for path, count := range leaves {
 		if count != 1 {
 			t.Errorf("asc ads %s is registered %d times, want exactly once", path, count)
@@ -57,7 +57,7 @@ func TestPlatformCommandInventoryMatchesIndependentFixture(t *testing.T) {
 
 	// Upload is represented by a dedicated multipart command rather than the
 	// generated JSON endpoint command, but it must still occupy the fixture leaf.
-	upload := findCommand(AdsCommand(), "assets", "upload")
+	upload := findCommand(NewAdsCommand(newAdsTestDeps()), "assets", "upload")
 	if upload == nil || upload.Exec == nil {
 		t.Fatal("missing executable asc ads assets upload command")
 	}
@@ -126,7 +126,7 @@ func collectDirectPlatformCommandLeaves(root *ffcli.Command) map[string]int {
 		}
 	}
 	for _, subcommand := range root.Subcommands {
-		if subcommand.Name == "auth" || subcommand.Name == "v5" {
+		if subcommand.Name == "auth" {
 			continue
 		}
 		walk(subcommand, []string{subcommand.Name})

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
@@ -97,6 +98,9 @@ type unknownFlagSuggestionOptions struct {
 	// exclude lists flag names, without leading dashes, that the surrounding
 	// diagnostic already printed.
 	exclude []string
+	// passed lists flags already on the command line; the selector tier never
+	// suggests one of them.
+	passed []string
 }
 
 // unknownFlagSuggestions ranks up to maxUnknownFlagSuggestions defined flags of
@@ -163,7 +167,7 @@ func unknownFlagSuggestions(flags *flag.FlagSet, flagName string, options unknow
 		add(nearest)
 	}
 	if len(suggestions) == 0 && options.allowSelectorFallback {
-		if selector := identifierSelectorFlag(name, candidates); selector != "" {
+		if selector := identifierSelectorFlag(name, candidates); selector != "" && !slices.Contains(options.passed, selector) {
 			add(selector)
 		}
 	}
@@ -306,4 +310,206 @@ func guidanceFlagNames(rule removedFlagRule) []string {
 		names = append(names, match[1])
 	}
 	return names
+}
+
+// filterSuggestion answers the App Store Connect REST filter spellings callers
+// guess (`--filter[app]=X`, `--filter app:X`, `--filter "app=X,version=7"`) by
+// naming the command with the flags those filter keys map to on it. It does
+// not run the command: --filter is not a flag asc maps.
+//
+// A key maps only to a flag of exactly that name (camelCase read as
+// kebab-case) that selects the app or filters results. Values are printed only
+// when every key mapped and every value was read whole; otherwise the mapped
+// flags are named with placeholders, so a suggestion never carries a value the
+// caller did not give that exact key. When no key maps, the usual unknown-flag
+// answer applies. A key that means a different thing to Apple than to the flag
+// of the same name (ambiguousFilterKeys) never carries a value, and its note
+// is returned for the caller to print.
+func filterSuggestion(analysis invocationAnalysis, commandName string, args []string) (string, []string, bool) {
+	command := analysis.command
+	if command == nil || command.FlagSet == nil {
+		return "", nil, false
+	}
+	index := analysis.unknownIndex
+	if index < 0 || index >= len(args) || !hasValidFlagPrefix(args[index]) {
+		return "", nil, false
+	}
+	pairs, exact, ok := readFilterArgs(args[index:])
+	if !ok {
+		return "", nil, false
+	}
+
+	flags := make([]string, 0, len(pairs))
+	values := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		name, mapped := filterKeyFlag(command.FlagSet, pair.key)
+		if !mapped {
+			exact = false
+			continue
+		}
+		if slices.Contains(flags, name) {
+			exact = false
+			continue
+		}
+		quoted, quotable := "", isExactFilterValue(pair.value)
+		if quotable {
+			quoted, quotable = shared.ShellQuote(pair.value)
+		}
+		if !quotable {
+			exact = false
+		}
+		flags = append(flags, name)
+		values = append(values, quoted)
+	}
+	if len(flags) == 0 {
+		return "", nil, false
+	}
+
+	var suggestion strings.Builder
+	var notes []string
+	suggestion.WriteString(commandName)
+	for i, name := range flags {
+		value := values[i]
+		note, ambiguous := ambiguousFilterKeys[commandName][name]
+		if ambiguous {
+			notes = append(notes, note)
+		}
+		if !exact || ambiguous {
+			value = filterFlagPlaceholder(name)
+		}
+		suggestion.WriteString(" --" + name + " " + value)
+	}
+	return suggestion.String(), notes, true
+}
+
+// ambiguousFilterKeys names, per command, the flags whose filter key means
+// something else to Apple. On /v1/builds, filter[version] is the build number
+// (CFBundleVersion), while `asc builds list --version` is the marketing
+// version, so a value given for `version` could belong to either flag.
+var ambiguousFilterKeys = map[string]map[string]string{
+	"asc builds list": {
+		"version": "Apple's filter[version] on builds is the build number; for that, use --build-number BUILD_NUMBER.",
+	},
+}
+
+// filterPair is one key and value read from a filter expression.
+type filterPair struct {
+	key   string
+	value string
+}
+
+// readFilterArgs reads the filter arguments starting at args[0], which must be
+// one. It returns every key and value it could read, whether every piece was
+// read as a key and value, and false when args[0] is not a filter argument.
+// Arguments that are not filters are skipped.
+func readFilterArgs(args []string) ([]filterPair, bool, bool) {
+	var pairs []filterPair
+	exact := true
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		name, value, hasInlineValue := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
+		key, bracketed := filterBracketKey(name)
+		if !bracketed && !strings.EqualFold(name, "filter") {
+			if i == 0 {
+				return nil, false, false
+			}
+			continue
+		}
+		if !hasInlineValue {
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				value = args[i]
+			} else {
+				value = ""
+			}
+		}
+		if bracketed {
+			pairs = append(pairs, filterPair{key: key, value: strings.TrimSpace(value)})
+			continue
+		}
+		expressionPairs, expressionExact := readFilterExpression(value)
+		pairs = append(pairs, expressionPairs...)
+		exact = exact && expressionExact
+	}
+	return pairs, exact, true
+}
+
+// readFilterExpression splits `app=X,version=7`, `app:X&version:7`, or
+// `filter[app]=X&filter[version]=7` into its keys and values, and reports
+// whether every piece had a key and a separator.
+func readFilterExpression(expression string) ([]filterPair, bool) {
+	pieces := strings.FieldsFunc(expression, func(r rune) bool { return r == ',' || r == '&' })
+	pairs := make([]filterPair, 0, len(pieces))
+	exact := len(pieces) > 0
+	for _, piece := range pieces {
+		separator := strings.IndexAny(piece, ":=")
+		if separator <= 0 {
+			exact = false
+			continue
+		}
+		key := strings.TrimSpace(piece[:separator])
+		if bracketKey, bracketed := filterBracketKey(key); bracketed {
+			key = bracketKey
+		}
+		pairs = append(pairs, filterPair{key: key, value: strings.TrimSpace(piece[separator+1:])})
+	}
+	return pairs, exact
+}
+
+// filterBracketKey reads the key out of `filter[key]`.
+func filterBracketKey(name string) (string, bool) {
+	lowered := strings.ToLower(name)
+	if !strings.HasPrefix(lowered, "filter[") || !strings.HasSuffix(lowered, "]") {
+		return "", false
+	}
+	return strings.TrimSpace(name[len("filter[") : len(name)-1]), true
+}
+
+// filterKeyPattern matches a filter key that can name a flag: a camelCase or
+// kebab-case word, never a dotted relationship path such as
+// `preReleaseVersion.version`.
+var filterKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]*$`)
+
+// filterKeyFlag names the flag a filter key maps to exactly on a command: the
+// flag spelled like the key, read as kebab-case, that selects the app or whose
+// help says it filters. A value-less boolean flag never maps.
+func filterKeyFlag(flags *flag.FlagSet, key string) (string, bool) {
+	if !filterKeyPattern.MatchString(key) {
+		return "", false
+	}
+	var name strings.Builder
+	for i, r := range key {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				name.WriteByte('-')
+			}
+			r += 'a' - 'A'
+		}
+		name.WriteRune(r)
+	}
+	for _, candidate := range suggestibleFlags(flags) {
+		if candidate.Name != name.String() || isBoolFlag(candidate) {
+			continue
+		}
+		if candidate.Name == "app" || strings.HasPrefix(strings.ToLower(candidate.Usage), "filter by") {
+			return candidate.Name, true
+		}
+	}
+	return "", false
+}
+
+// isExactFilterValue reports whether a value was read whole: present, and not
+// holding a list or another key and value.
+func isExactFilterValue(value string) bool {
+	return value != "" && !strings.ContainsAny(value, ",&=:[]")
+}
+
+// filterFlagPlaceholder names the value a flag takes, as in `--app APP_ID`.
+func filterFlagPlaceholder(name string) string {
+	if name == "app" {
+		return "APP_ID"
+	}
+	return strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 }

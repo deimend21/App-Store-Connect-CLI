@@ -1,7 +1,6 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,8 +15,75 @@ import (
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	appclipscli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/appclips"
 )
+
+// Both read paths must decode numeric versions without losing integer precision.
+func TestAppClipsAdvancedExperiencesPreserveVersionJSON(t *testing.T) {
+	const version = `9007199254740993`
+	for _, command := range []struct {
+		name     string
+		selector string
+		id       string
+		path     string
+	}{
+		{"list", "--app-clip-id", "clip-1", "/v1/appClips/clip-1/appClipAdvancedExperiences"},
+		{"view", "--experience-id", "adv-1", "/v1/appClipAdvancedExperiences/adv-1"},
+	} {
+		t.Run(command.name, func(t *testing.T) {
+			data := `{"type":"appClipAdvancedExperiences","id":"adv-1","attributes":{"link":"https://example.com","version":` + version + `}}`
+			if command.name == "list" {
+				data = "[" + data + "]"
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != command.path {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"data":`+data+`,"links":{}}`)
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
+			keyPath := filepath.Join(t.TempDir(), "key.p8")
+			writeECDSAPEM(t, keyPath)
+			client, err := newAppClipsTestServerClient(t, server, keyPath)
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			stdout, stderr, code := runWithDeps(t, func() (*asc.Client, error) { return client, nil }, "app-clips", "advanced-experiences", command.name, command.selector, command.id, "--output", "json")
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0", code)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
+			var response struct {
+				Data json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+				t.Fatalf("unmarshal stdout: %v\nstdout=%q", err, stdout)
+			}
+			if command.name == "list" {
+				var items []json.RawMessage
+				if err := json.Unmarshal(response.Data, &items); err != nil || len(items) != 1 {
+					t.Fatalf("expected one resource, got %s (error: %v)", response.Data, err)
+				}
+				response.Data = items[0]
+			}
+			var item struct {
+				ID         string                     `json:"id"`
+				Attributes map[string]json.RawMessage `json:"attributes"`
+			}
+			if err := json.Unmarshal(response.Data, &item); err != nil {
+				t.Fatalf("unmarshal resource: %v", err)
+			}
+			if item.ID != "adv-1" || string(item.Attributes["version"]) != version {
+				t.Fatalf("resource = %s, want id adv-1 and version %q", response.Data, version)
+			}
+		})
+	}
+}
 
 func TestAppClipsAdvancedExperiencesCreateSupportsMultipleInlineLocalizations(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -59,26 +125,21 @@ func TestAppClipsAdvancedExperiencesCreateSupportsMultipleInlineLocalizations(t 
 		_, _ = w.Write([]byte(`{"data":{"type":"appClipAdvancedExperiences","id":"adv-1","attributes":{"link":"https://example.com"}},"links":{}}`))
 	}))
 	defer server.Close()
-	newDefaultExperiencesCreateClient(t, server)
+	client := newDefaultExperiencesCreateClient(t, server)
 
-	root := RootCommand("1.2.3")
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"app-clips", "advanced-experiences", "create",
-			"--app-clip-id", "clip-1",
-			"--link", "https://example.com",
-			"--default-language", "EN",
-			"--is-powered-by",
-			"--header-image-id", "img-1",
-			"--inline-localization", `{"language":"EN","title":"Order ahead","subtitle":"Ready when you arrive"}`,
-			"--inline-localization", `{"language":"FR","title":"Commander","subtitle":"Prêt à votre arrivée"}`,
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, client,
+		"app-clips", "advanced-experiences", "create",
+		"--app-clip-id", "clip-1",
+		"--link", "https://example.com",
+		"--default-language", "EN",
+		"--is-powered-by",
+		"--header-image-id", "img-1",
+		"--inline-localization", `{"language":"EN","title":"Order ahead","subtitle":"Ready when you arrive"}`,
+		"--inline-localization", `{"language":"FR","title":"Commander","subtitle":"Prêt à votre arrivée"}`,
+	)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -142,10 +203,7 @@ func TestAppClipsAdvancedExperiencesCreateRejectsInvalidInlineLocalizationsAsUsa
 			}
 			args = append(args, test.args...)
 
-			var code int
-			stdout, stderr := captureOutput(t, func() {
-				code = rootcmd.Run(args, "1.2.3")
-			})
+			stdout, stderr, code := runWithDeps(t, nil, args...)
 
 			if code != rootcmd.ExitUsage {
 				t.Fatalf("expected exit code %d, got %d", rootcmd.ExitUsage, code)
@@ -221,20 +279,13 @@ func TestAppClipsAdvancedExperienceImagesCreateSupportsUnattachedAndAttachedUplo
 				}
 			}))
 			defer server.Close()
-			newDefaultExperiencesCreateClient(t, server)
+			client := newDefaultExperiencesCreateClient(t, server)
 
 			args := []string{"app-clips", "advanced-experiences", "images", "create", "--file", filePath}
 			if test.experienceID != "" {
 				args = append(args, "--experience-id", test.experienceID)
 			}
-			root := RootCommand("1.2.3")
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				runErr = root.Run(context.Background())
-			})
+			stdout, stderr, runErr := runRootWithDeps(t, client, args...)
 			if stderr != "" {
 				t.Fatalf("expected empty stderr, got %q", stderr)
 			}
@@ -277,11 +328,10 @@ func TestAppClipsAdvancedExperienceImagesCreateSupportsUnattachedAndAttachedUplo
 // registered and fails with the generic unknown-command usage error.
 func TestAppClipsAdvancedExperienceImagesDeleteIsRemoved(t *testing.T) {
 	clientFactoryCalls := 0
-	restore := appclipscli.SetClientFactory(func() (*asc.Client, error) {
+	clientFactory := func() (*asc.Client, error) {
 		clientFactoryCalls++
 		return nil, errors.New("must not authenticate")
-	})
-	t.Cleanup(restore)
+	}
 
 	root := RootCommand("5.0.0")
 	if command := findSubcommand(root, "app-clips", "advanced-experiences", "images", "delete"); command != nil {
@@ -295,10 +345,7 @@ func TestAppClipsAdvancedExperienceImagesDeleteIsRemoved(t *testing.T) {
 		t.Fatalf("images help still advertises the removed delete verb: %q", images.LongHelp)
 	}
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = rootcmd.Run([]string{"app-clips", "advanced-experiences", "images", "delete", "--id", "img-1", "--confirm"}, "5.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, clientFactory, "app-clips", "advanced-experiences", "images", "delete", "--id", "img-1", "--confirm")
 
 	if code != rootcmd.ExitUsage {
 		t.Fatalf("exit code = %d, want %d", code, rootcmd.ExitUsage)

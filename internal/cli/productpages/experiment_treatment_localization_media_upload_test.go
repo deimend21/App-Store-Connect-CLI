@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_UploadCreatesSetAndOrdersUploads(t *testing.T) {
@@ -91,13 +92,10 @@ func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_UploadCreatesSet
 	})
 
 	client := newCustomPageTestClientWithTimeout(t, 0)
-	origFactory := experimentTreatmentLocalizationMediaClientFactory
-	experimentTreatmentLocalizationMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		experimentTreatmentLocalizationMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), "tloc-1", dir, "IPHONE_65", false)
+	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), d, "tloc-1", dir, "IPHONE_65", false, false)
 	if err != nil {
 		t.Fatalf("executeExperimentTreatmentLocalizationScreenshotUpload() error: %v", err)
 	}
@@ -161,13 +159,10 @@ func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_CanonicalizesAli
 	})
 
 	client := newCustomPageTestClient(t)
-	origFactory := experimentTreatmentLocalizationMediaClientFactory
-	experimentTreatmentLocalizationMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		experimentTreatmentLocalizationMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), "tloc-1", dir, "IPHONE_69", false)
+	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), d, "tloc-1", dir, "IPHONE_69", false, false)
 	if err != nil {
 		t.Fatalf("executeExperimentTreatmentLocalizationScreenshotUpload() error: %v", err)
 	}
@@ -245,13 +240,10 @@ func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_UploadPreservesE
 	})
 
 	client := newCustomPageTestClient(t)
-	origFactory := experimentTreatmentLocalizationMediaClientFactory
-	experimentTreatmentLocalizationMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		experimentTreatmentLocalizationMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), "tloc-1", dir, "IPHONE_65", false)
+	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), d, "tloc-1", dir, "IPHONE_65", false, false)
 	if err != nil {
 		t.Fatalf("executeExperimentTreatmentLocalizationScreenshotUpload() error: %v", err)
 	}
@@ -334,13 +326,10 @@ func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_SyncDeletesExist
 	})
 
 	client := newCustomPageTestClient(t)
-	origFactory := experimentTreatmentLocalizationMediaClientFactory
-	experimentTreatmentLocalizationMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		experimentTreatmentLocalizationMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), "tloc-1", dir, "IPHONE_65", true)
+	result, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), d, "tloc-1", dir, "IPHONE_65", true, true)
 	if err != nil {
 		t.Fatalf("executeExperimentTreatmentLocalizationScreenshotUpload() error: %v", err)
 	}
@@ -403,13 +392,10 @@ func TestExecuteExperimentTreatmentLocalizationScreenshotUpload_UsesRequestTimeo
 	})
 
 	client := newCustomPageTestClient(t)
-	origFactory := experimentTreatmentLocalizationMediaClientFactory
-	experimentTreatmentLocalizationMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		experimentTreatmentLocalizationMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	if _, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), "tloc-1", dir, "IPHONE_65", false); err != nil {
+	if _, err := executeExperimentTreatmentLocalizationScreenshotUpload(context.Background(), d, "tloc-1", dir, "IPHONE_65", false, false); err != nil {
 		t.Fatalf("executeExperimentTreatmentLocalizationScreenshotUpload() error: %v", err)
 	}
 

@@ -16,9 +16,8 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-func startProfilesListStaleStub(t *testing.T) *atomic.Int32 {
+func startProfilesListStaleStub(t *testing.T) (func() (*asc.Client, error), *atomic.Int32) {
 	t.Helper()
-	setupAuth(t)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		requests.Add(1)
@@ -39,23 +38,19 @@ func startProfilesListStaleStub(t *testing.T) *atomic.Int32 {
 		))
 	}))
 	t.Cleanup(server.Close)
-	installStaleProfilesClient(t, server)
-	return &requests
+	return stubServerClient(t, server), &requests
 }
 
-func runProfilesList(t *testing.T, args ...string) (int, string, string) {
+func runProfilesList(t *testing.T, client func() (*asc.Client, error), args ...string) (int, string, string) {
 	t.Helper()
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = rootcmd.Run(append([]string{"profiles", "list"}, args...), "test")
-	})
+	stdout, stderr, code := runWithDeps(t, client, append([]string{"profiles", "list"}, args...)...)
 	return code, stdout, stderr
 }
 
 func TestProfilesListStaleOnlyIsAComputedViewOverEveryPage(t *testing.T) {
-	requests := startProfilesListStaleStub(t)
+	client, requests := startProfilesListStaleStub(t)
 
-	code, stdout, stderr := runProfilesList(t, "--stale-only", "--output", "json")
+	code, stdout, stderr := runProfilesList(t, client, "--stale-only", "--output", "json")
 	if code != rootcmd.ExitSuccess {
 		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
 	}
@@ -87,45 +82,43 @@ func TestProfilesListStaleOnlyIsAComputedViewOverEveryPage(t *testing.T) {
 	}
 }
 
-func TestProfilesListIncludeStaleRejectsJSON(t *testing.T) {
-	requests := startProfilesListStaleStub(t)
+func TestProfilesListStaleFlagUsageErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "include-stale with json", args: []string{"--include-stale", "--output", "json"}, want: "--include-stale requires --output table or markdown"},
+		{name: "stale-only with next", args: []string{"--stale-only", "--next", "https://api.appstoreconnect.apple.com/v1/profiles?cursor=2"}, want: "--next cannot be combined with --stale-only"},
+	}
 
-	code, stdout, stderr := runProfilesList(t, "--include-stale", "--output", "json")
-	if code != rootcmd.ExitUsage {
-		t.Fatalf("exit code = %d, want %d", code, rootcmd.ExitUsage)
-	}
-	if stdout != "" || !strings.Contains(stderr, "--include-stale requires --output table or markdown") {
-		t.Fatalf("stdout = %q, stderr = %q", stdout, stderr)
-	}
-	if got := requests.Load(); got != 0 {
-		t.Fatalf("requests = %d, want 0", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, requests := startProfilesListStaleStub(t)
+
+			code, stdout, stderr := runProfilesList(t, client, test.args...)
+			if code != rootcmd.ExitUsage {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, rootcmd.ExitUsage, stderr)
+			}
+			if stdout != "" || !strings.Contains(stderr, test.want) {
+				t.Fatalf("stdout = %q, stderr = %q, want %q", stdout, stderr, test.want)
+			}
+			if got := requests.Load(); got != 0 {
+				t.Fatalf("requests = %d, want 0", got)
+			}
+		})
 	}
 }
 
 func TestProfilesListIncludeStaleAddsColumnToTable(t *testing.T) {
-	startProfilesListStaleStub(t)
+	client, _ := startProfilesListStaleStub(t)
 
-	code, stdout, stderr := runProfilesList(t, "--include-stale", "--output", "table", "--paginate")
+	code, stdout, stderr := runProfilesList(t, client, "--include-stale", "--output", "table", "--paginate")
 	if code != rootcmd.ExitSuccess {
 		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
 	}
 	if !strings.Contains(stdout, "Stale") || !strings.Contains(stdout, "fresh-1") {
 		t.Fatalf("table = %q, want a Stale column with every profile", stdout)
-	}
-}
-
-func TestProfilesListStaleOnlyRejectsNext(t *testing.T) {
-	requests := startProfilesListStaleStub(t)
-
-	code, _, stderr := runProfilesList(t, "--stale-only", "--next", "https://api.appstoreconnect.apple.com/v1/profiles?cursor=2")
-	if code != rootcmd.ExitUsage {
-		t.Fatalf("exit code = %d, want %d (stderr %q)", code, rootcmd.ExitUsage, stderr)
-	}
-	if !strings.Contains(stderr, "--next cannot be combined with --stale-only") {
-		t.Fatalf("stderr = %q", stderr)
-	}
-	if got := requests.Load(); got != 0 {
-		t.Fatalf("requests = %d, want 0", got)
 	}
 }
 
@@ -162,8 +155,8 @@ func staleProfileJSON(id, state, expiration string) string {
 func TestProfilesListStaleFlagsRequireStalenessFields(t *testing.T) {
 	for _, flagName := range []string{"--stale-only", "--include-stale"} {
 		t.Run(flagName, func(t *testing.T) {
-			requests := startProfilesListStaleStub(t)
-			code, stdout, stderr := runProfilesList(t, flagName, "--fields", "name,profileState", "--output", "table")
+			client, requests := startProfilesListStaleStub(t)
+			code, stdout, stderr := runProfilesList(t, client, flagName, "--fields", "name,profileState", "--output", "table")
 			if code != rootcmd.ExitUsage {
 				t.Fatalf("exit code = %d, want %d (stderr %q)", code, rootcmd.ExitUsage, stderr)
 			}
@@ -178,7 +171,6 @@ func TestProfilesListStaleFlagsRequireStalenessFields(t *testing.T) {
 }
 
 func TestProfilesListStaleOnlyKeepsOnlyReferencedIncludedResources(t *testing.T) {
-	setupAuth(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		writeSigningFetchOutputJSON(t, w, http.StatusOK, `{"data":[
 			{"type":"profiles","id":"expired-1","attributes":{"name":"Old","profileType":"IOS_APP_STORE","profileState":"ACTIVE","expirationDate":"2000-01-01T00:00:00Z"},
@@ -193,9 +185,9 @@ func TestProfilesListStaleOnlyKeepsOnlyReferencedIncludedResources(t *testing.T)
 		],"links":{"self":"https://api.appstoreconnect.apple.com/v1/profiles"}}`)
 	}))
 	t.Cleanup(server.Close)
-	installStaleProfilesClient(t, server)
+	client := stubServerClient(t, server)
 
-	code, stdout, stderr := runProfilesList(t, "--stale-only", "--include", "bundleId,certificates", "--output", "json")
+	code, stdout, stderr := runProfilesList(t, client, "--stale-only", "--include", "bundleId,certificates", "--output", "json")
 	if code != rootcmd.ExitSuccess {
 		t.Fatalf("exit code = %d (stderr %q)", code, stderr)
 	}

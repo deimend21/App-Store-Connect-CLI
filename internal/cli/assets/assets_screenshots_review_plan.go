@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -70,6 +69,7 @@ type screenshotReviewPlanOptions struct {
 	SkipExisting    bool
 	Replace         bool
 	Apply           bool
+	Confirm         bool
 }
 
 type screenshotGroupKey struct {
@@ -78,20 +78,20 @@ type screenshotGroupKey struct {
 	displayType    string
 }
 
-// AssetsScreenshotsPlanCommand returns the screenshots plan subcommand.
-func AssetsScreenshotsPlanCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("plan", flag.ExitOnError)
+// NewAssetsScreenshotsPlanCommand returns the screenshots plan subcommand.
+func NewAssetsScreenshotsPlanCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("plan", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	version := fs.String("version", "", "App Store version string")
+	version := fs.String("version", "", "App Store version ID or numeric version string")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
-	platform := fs.String("platform", "", "Platform for --version lookups: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS with --version)")
+	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS for version strings; IDs use their actual platform)")
 	reviewOutputDir := fs.String("review-output-dir", defaultReviewOutputDir, "Directory containing review artifacts")
 	manifestPath := fs.String("manifest-path", "", "Optional manifest path (default: <review-output-dir>/manifest.json)")
 	approvalPath := fs.String("approval-path", "", "Optional approvals path (default: <review-output-dir>/approved.json)")
 	skipExisting := fs.Bool("skip-existing", false, "Skip files whose checksum already exists remotely")
 	replace := fs.Bool("replace", false, "Delete existing screenshots in each target set before uploading")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "plan",
@@ -105,14 +105,11 @@ version localizations, and previews grouped upload intent per display type.
 Examples:
   asc screenshots plan --app "123456789" --version "1.2.3"
   asc screenshots plan --app "123456789" --version "1.2.3" --skip-existing
-  asc screenshots plan --app "123456789" --version-id "VERSION_ID" --replace`,
+  asc screenshots plan --app "123456789" --version "VERSION_ID" --replace`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("screenshots plan does not accept positional arguments")
-			}
-			result, err := executeScreenshotReviewPlan(ctx, screenshotReviewPlanOptions{
+			result, err := executeScreenshotReviewPlan(ctx, d, screenshotReviewPlanOptions{
 				AppID:           *appID,
 				Version:         *version,
 				VersionID:       *versionID,
@@ -124,7 +121,7 @@ Examples:
 				Replace:         *replace,
 				Apply:           false,
 			})
-			if printErr := printScreenshotReviewPlanResult(result, output); printErr != nil {
+			if printErr := printScreenshotReviewPlanResult(d, result, output); printErr != nil {
 				return printErr
 			}
 			if err != nil {
@@ -138,21 +135,21 @@ Examples:
 	}
 }
 
-// AssetsScreenshotsApplyCommand returns the screenshots apply subcommand.
-func AssetsScreenshotsApplyCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("apply", flag.ExitOnError)
+// NewAssetsScreenshotsApplyCommand returns the screenshots apply subcommand.
+func NewAssetsScreenshotsApplyCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("apply", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	version := fs.String("version", "", "App Store version string")
+	version := fs.String("version", "", "App Store version ID or numeric version string")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
-	platform := fs.String("platform", "", "Platform for --version lookups: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS with --version)")
+	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS for version strings; IDs use their actual platform)")
 	reviewOutputDir := fs.String("review-output-dir", defaultReviewOutputDir, "Directory containing review artifacts")
 	manifestPath := fs.String("manifest-path", "", "Optional manifest path (default: <review-output-dir>/manifest.json)")
 	approvalPath := fs.String("approval-path", "", "Optional approvals path (default: <review-output-dir>/approved.json)")
 	skipExisting := fs.Bool("skip-existing", false, "Skip files whose checksum already exists remotely")
 	replace := fs.Bool("replace", false, "Delete existing screenshots in each target set before uploading")
 	confirm := fs.Bool("confirm", false, "Confirm screenshot uploads (required)")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "apply",
@@ -163,19 +160,11 @@ func AssetsScreenshotsApplyCommand() *ffcli.Command {
 Examples:
   asc screenshots apply --app "123456789" --version "1.2.3" --confirm
   asc screenshots apply --app "123456789" --version "1.2.3" --skip-existing --confirm
-  asc screenshots apply --app "123456789" --version-id "VERSION_ID" --replace --confirm`,
+  asc screenshots apply --app "123456789" --version "VERSION_ID" --replace --confirm`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("screenshots apply does not accept positional arguments")
-			}
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required to apply screenshot uploads")
-				return shared.MissingRequiredUsageError("--confirm")
-			}
-
-			result, err := executeScreenshotReviewPlan(ctx, screenshotReviewPlanOptions{
+			result, err := executeScreenshotReviewPlan(ctx, d, screenshotReviewPlanOptions{
 				AppID:           *appID,
 				Version:         *version,
 				VersionID:       *versionID,
@@ -186,8 +175,9 @@ Examples:
 				SkipExisting:    *skipExisting,
 				Replace:         *replace,
 				Apply:           true,
+				Confirm:         *confirm,
 			})
-			if printErr := printScreenshotReviewPlanResult(result, output); printErr != nil {
+			if printErr := printScreenshotReviewPlanResult(d, result, output); printErr != nil {
 				return printErr
 			}
 			if err != nil {
@@ -201,37 +191,47 @@ Examples:
 	}
 }
 
-func executeScreenshotReviewPlan(ctx context.Context, opts screenshotReviewPlanOptions) (*screenshotReviewPlanResult, error) {
-	resolvedAppID := shared.ResolveAppID(opts.AppID)
+func executeScreenshotReviewPlan(ctx context.Context, d *shared.Deps, opts screenshotReviewPlanOptions) (*screenshotReviewPlanResult, error) {
+	resolvedAppID := d.ResolveAppID(opts.AppID)
 	if strings.TrimSpace(resolvedAppID) == "" {
-		fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --app is required (or set ASC_APP_ID)")
 		return nil, shared.MissingRequiredUsageError("--app")
 	}
 
 	versionValue := strings.TrimSpace(opts.Version)
 	versionIDValue := strings.TrimSpace(opts.VersionID)
 	if versionValue == "" && versionIDValue == "" {
-		return nil, shared.UsageError("--version or --version-id is required")
+		return nil, d.UsageError("--version or --version-id is required")
+	}
+	if opts.Apply {
+		if err := d.RequireConfirm(opts.Confirm); err != nil {
+			return nil, err
+		}
 	}
 	if versionValue != "" && versionIDValue != "" {
-		return nil, shared.UsageError("--version and --version-id are mutually exclusive")
+		return nil, d.UsageError("--version and --version-id are mutually exclusive")
 	}
 	if opts.SkipExisting && opts.Replace {
-		fmt.Fprintln(os.Stderr, "Error: --skip-existing and --replace are mutually exclusive")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --skip-existing and --replace are mutually exclusive")
 		return nil, flag.ErrHelp
+	}
+
+	versionValue, versionIDValue, err := normalizeScreenshotVersionSelector(versionValue, versionIDValue)
+	if err != nil {
+		return nil, d.UsageError(err.Error())
 	}
 
 	normalizedPlatform, err := resolveAppScopedScreenshotPlatform(versionValue, opts.Platform)
 	if err != nil {
-		return nil, shared.UsageError(err.Error())
+		return nil, d.UsageError(err.Error())
 	}
 
-	client, err := shared.GetASCClient()
+	client, err := d.Client()
 	if err != nil {
 		return nil, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), err)
 	}
 
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	defer cancel()
 
 	resolvedAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, resolvedAppID)
@@ -239,7 +239,7 @@ func executeScreenshotReviewPlan(ctx context.Context, opts screenshotReviewPlanO
 		return nil, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), err)
 	}
 
-	reviewOutputDir, manifestPath, approvalPath, err := resolveReviewArtifactPaths(opts.ReviewOutputDir, opts.ManifestPath, opts.ApprovalPath)
+	reviewOutputDir, manifestPath, approvalPath, err := resolveReviewArtifactPaths(d, opts.ReviewOutputDir, opts.ManifestPath, opts.ApprovalPath)
 	if err != nil {
 		return nil, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), err)
 	}
@@ -255,10 +255,10 @@ func executeScreenshotReviewPlan(ctx context.Context, opts screenshotReviewPlanO
 
 	resolvedVersionID, resolvedVersion, resolvedPlatform, err := resolveScreenshotPlanVersion(requestCtx, client, resolvedAppID, versionValue, versionIDValue, normalizedPlatform)
 	if err != nil {
-		return nil, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), err)
+		return nil, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), screenshotVersionSelectorError(err, opts.Version))
 	}
 
-	localizationsResp, err := client.GetAppStoreVersionLocalizations(requestCtx, resolvedVersionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+	localizationsResp, err := client.GetAppStoreVersionLocalizations(requestCtx, resolvedVersionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	if err != nil {
 		return nil, fmt.Errorf("screenshots %s: fetch version localizations: %w", reviewPlanVerb(opts.Apply), err)
 	}
@@ -442,34 +442,37 @@ func executeScreenshotReviewPlan(ctx context.Context, opts screenshotReviewPlanO
 	uploadParentCtx := shared.ContextWithoutTimeout(ctx)
 	for _, key := range groupKeys {
 		files := cloneSortedFiles(groupedFiles[key])
-		uploadResult, err := uploadScreenshots(uploadParentCtx, client, key.localizationID, key.displayType, files, opts.SkipExisting, opts.Replace, !opts.Apply)
+		uploadResult, err := uploadScreenshots(uploadParentCtx, d, client, key.localizationID, key.displayType, files, opts.SkipExisting, opts.Replace, !opts.Apply)
+		if err == nil || len(uploadResult.Results) > 0 {
+			result.Groups = append(result.Groups, screenshotReviewPlanGroup{
+				Locale:                key.locale,
+				VersionLocalizationID: key.localizationID,
+				DisplayType:           key.displayType,
+				Files:                 files,
+				Result:                uploadResult,
+			})
+		}
 		if err != nil {
+			appendScreenshotReviewIssue(result, "error", "", key.locale, key.displayType, err.Error(), "")
 			return result, fmt.Errorf("screenshots %s: %w", reviewPlanVerb(opts.Apply), err)
 		}
-		result.Groups = append(result.Groups, screenshotReviewPlanGroup{
-			Locale:                key.locale,
-			VersionLocalizationID: key.localizationID,
-			DisplayType:           key.displayType,
-			Files:                 files,
-			Result:                uploadResult,
-		})
 	}
 
 	return result, nil
 }
 
 // printScreenshotReviewPlanResult renders whatever the run produced, including
-// the groups that completed before a failing group aborted the run.
-func printScreenshotReviewPlanResult(result *screenshotReviewPlanResult, output shared.OutputFlags) error {
+// completed screenshot receipts from a group that failed partway through.
+func printScreenshotReviewPlanResult(d *shared.Deps, result *screenshotReviewPlanResult, output shared.OutputFlags) error {
 	if result == nil {
 		return nil
 	}
-	return shared.PrintOutputWithRenderers(
+	return d.PrintOutputWithRenderers(
 		result,
 		*output.Output,
 		*output.Pretty,
-		func() error { return renderScreenshotReviewPlanResult(result, false) },
-		func() error { return renderScreenshotReviewPlanResult(result, true) },
+		func() error { return renderScreenshotReviewPlanResult(d, result, false) },
+		func() error { return renderScreenshotReviewPlanResult(d, result, true) },
 	)
 }
 
@@ -490,8 +493,12 @@ func resolveScreenshotPlanVersion(ctx context.Context, client *asc.Client, appID
 	return resolvedVersionID, strings.TrimSpace(version), strings.TrimSpace(platform), nil
 }
 
-func resolveReviewArtifactPaths(outputDir, manifestPath, approvalPath string) (string, string, string, error) {
-	resolvedOutputDir, err := reviewshots.ResolveReviewOutputDir(strings.TrimSpace(outputDir))
+func resolveReviewArtifactPaths(d *shared.Deps, outputDir, manifestPath, approvalPath string) (string, string, string, error) {
+	outputDir = strings.TrimSpace(outputDir)
+	if outputDir != "" {
+		outputDir = d.OSPath(outputDir)
+	}
+	resolvedOutputDir, err := reviewshots.ResolveReviewOutputDir(outputDir)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -532,12 +539,29 @@ func cloneSortedFiles(files []string) []string {
 	return cloned
 }
 
-func renderScreenshotReviewPlanResult(result *screenshotReviewPlanResult, markdown bool) error {
+func renderScreenshotReviewPlanResult(d *shared.Deps, result *screenshotReviewPlanResult, markdown bool) error {
 	if result == nil {
 		return fmt.Errorf("result is nil")
 	}
 
-	shared.RenderSection("Summary", []string{"field", "value"}, [][]string{
+	renderSection := func(title string, headers []string, rows [][]string) error {
+		heading := d.Bold(strings.ToUpper(title)) + "\n"
+		renderRows := asc.WriteTableTo
+		if markdown {
+			heading = fmt.Sprintf("### %s\n\n", title)
+			renderRows = asc.WriteMarkdownTo
+		}
+		if _, err := fmt.Fprint(d.IO.Out, heading); err != nil {
+			return err
+		}
+		if err := renderRows(d.IO.Out, headers, rows); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(d.IO.Out)
+		return err
+	}
+
+	if err := renderSection("Summary", []string{"field", "value"}, [][]string{
 		{"appId", result.AppID},
 		{"version", result.Version},
 		{"versionId", result.VersionID},
@@ -550,7 +574,9 @@ func renderScreenshotReviewPlanResult(result *screenshotReviewPlanResult, markdo
 		{"plannedGroups", fmt.Sprintf("%d", result.PlannedGroups)},
 		{"errorCount", fmt.Sprintf("%d", result.ErrorCount)},
 		{"warningCount", fmt.Sprintf("%d", result.WarningCount)},
-	}, markdown)
+	}); err != nil {
+		return err
+	}
 
 	if len(result.Groups) > 0 {
 		rows := make([][]string, 0, len(result.Groups))
@@ -563,7 +589,9 @@ func renderScreenshotReviewPlanResult(result *screenshotReviewPlanResult, markdo
 				summarizeUploadStates(group.Result.Results),
 			})
 		}
-		shared.RenderSection("Groups", []string{"locale", "displayType", "versionLocalizationId", "files", "result"}, rows, markdown)
+		if err := renderSection("Groups", []string{"locale", "displayType", "versionLocalizationId", "files", "result"}, rows); err != nil {
+			return err
+		}
 	}
 
 	if len(result.Issues) > 0 {
@@ -577,7 +605,9 @@ func renderScreenshotReviewPlanResult(result *screenshotReviewPlanResult, markdo
 				shared.OrNA(issue.Remediation),
 			})
 		}
-		shared.RenderSection("Issues", []string{"severity", "locale", "displayType", "message", "remediation"}, rows, markdown)
+		if err := renderSection("Issues", []string{"severity", "locale", "displayType", "message", "remediation"}, rows); err != nil {
+			return err
+		}
 	}
 
 	return nil

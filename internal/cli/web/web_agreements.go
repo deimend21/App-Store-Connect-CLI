@@ -33,9 +33,9 @@ var downloadAgreementFn = func(ctx context.Context, client *webcore.Client, agre
 	return client.DownloadAgreement(ctx, agreementID)
 }
 
-// WebAgreementsCommand returns the Apple Developer Program agreements group.
-func WebAgreementsCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("web agreements", flag.ExitOnError)
+// newWebAgreementsCommand returns the Apple Developer Program agreements group.
+func newWebAgreementsCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("web agreements", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "agreements",
@@ -55,11 +55,11 @@ Examples:
 
 `,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			WebAgreementsStatusCommand(),
-			WebAgreementsDownloadCommand(),
-			WebAgreementsAcceptCommand(),
+			newWebAgreementsStatusCommand(d),
+			newWebAgreementsDownloadCommand(d),
+			newWebAgreementsAcceptCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -67,13 +67,13 @@ Examples:
 	}
 }
 
-// WebAgreementsStatusCommand reports pending and accepted program agreements.
-func WebAgreementsStatusCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("web agreements status", flag.ExitOnError)
+// newWebAgreementsStatusCommand reports pending and accepted program agreements.
+func newWebAgreementsStatusCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("web agreements status", flag.ExitOnError)
 
 	authFlags := bindWebSessionFlags(fs)
 	portalFlags := bindDeveloperPortalFlags(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "status",
@@ -82,28 +82,28 @@ func WebAgreementsStatusCommand() *ffcli.Command {
 		LongHelp: `WEB SESSION WORKFLOWS
 
 Show the App Store Connect agreement alert banner and the team's Apple
-Developer Program agreement history, including whether an updated agreement
-is waiting for the Account Holder.
+Developer Program agreement history and outstanding agreement notifications,
+including updates that do not yet appear in accepted history.
 
-An agreement is reported as pending when App Store Connect shows an agreement
-alert banner or when the agreement's accepted date is older than its
-effective date.
+The compatibility field pending is true when App Store Connect shows an
+agreement alert, an agreement's accepted date is older than its effective
+date, or Developer Portal reports an outstanding agreement. pendingAgreementIds
+lists IDs identified as pending in history or outstanding notifications.
+An alert alone does not identify an agreement to accept. Review warnings and
+the Apple account before choosing an ID; do not reaccept an accepted row
+solely because pending is true.
 
 Example:
   asc web agreements status
 
 `,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("web agreements status does not accept positional arguments")
-			}
-
-			if err := validateDeveloperPortalFlags(portalFlags); err != nil {
+			if err := validateDeveloperPortalFlagsWith(d, portalFlags); err != nil {
 				return err
 			}
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommandWith(ctx, d, authFlags)
 			defer cancel()
 			if err != nil {
 				return err
@@ -111,34 +111,37 @@ Example:
 			client := newDeveloperPortalClient(session, portalFlags)
 
 			var result *asc.WebAgreementsStatusResult
-			err = withWebSpinner("Fetching Apple Developer Program agreement status", func() error {
+			err = withWebSpinnerWith(d, "Fetching Apple Developer Program agreement status", func() error {
 				var statusErr error
 				result, statusErr = getAgreementsStatusFn(requestCtx, client)
 				return statusErr
 			})
 			if err != nil {
+				if refusal := agreementsBrokerRefusalError("web agreements status", err); refusal != nil {
+					return refusal
+				}
 				return withWebAuthHint(err, "web agreements status")
 			}
 			if result == nil {
 				return fmt.Errorf("web agreements status failed: missing status result")
 			}
-			persistDeveloperPortalSession(session)
+			persistDeveloperPortalSessionWith(d, session)
 
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return d.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// WebAgreementsDownloadCommand saves the content of one program agreement.
-func WebAgreementsDownloadCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("web agreements download", flag.ExitOnError)
+// newWebAgreementsDownloadCommand saves the content of one program agreement.
+func newWebAgreementsDownloadCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("web agreements download", flag.ExitOnError)
 
 	agreementID := fs.String("agreement-id", "", "Developer Portal agreement ID to download (from `asc web agreements status`)")
 	out := fs.String("out", "", "Destination file path for the agreement content")
 	overwrite := fs.Bool("overwrite", false, "Replace an existing file at --out")
 	authFlags := bindWebSessionFlags(fs)
 	portalFlags := bindDeveloperPortalFlags(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "download",
@@ -150,6 +153,10 @@ Download the content of an Apple Developer Program agreement, such as the
 Apple Developer Program License Agreement PDF, so it can be reviewed before
 it is accepted. The file is fetched with the web session from the Developer
 Portal origin only; redirects to other origins or to plain HTTP are rejected.
+
+Download requires the agreement to appear in Developer Portal history with a
+download URL. Outstanding IDs reported only by notifications may need to be
+reviewed in the Apple Developer account before acceptance.
 
 The complete content is staged in a temporary file and renamed into --out
 with mode 0600, so a partial or empty download never lands at --out; on
@@ -165,38 +172,35 @@ Examples:
 
 `,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("web agreements download does not accept positional arguments")
-			}
 			if _, err := shared.ValidateOutputFormat(*output.Output, *output.Pretty); err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 
 			resolvedAgreementID := strings.TrimSpace(*agreementID)
 			if resolvedAgreementID == "" {
-				return shared.UsageError("--agreement-id is required")
+				return d.UsageError("--agreement-id is required")
 			}
 			// Keep the operator's path byte-for-byte; trimming would silently
 			// redirect the write (and any --overwrite) to a different file.
 			outPath := *out
 			if strings.TrimSpace(outPath) == "" {
-				return shared.UsageError("--out is required")
+				return d.UsageError("--out is required")
 			}
-			destination, err := newAgreementDownloadDestination(outPath)
+			destination, err := newAgreementDownloadDestination(d, outPath)
 			if err != nil {
-				return shared.UsageErrorf("--out must be a file path: %v", err)
+				return d.UsageErrorf("--out must be a file path: %v", err)
 			}
 			defer destination.close()
 			if err := destination.check(*overwrite); err != nil {
 				return fmt.Errorf("web agreements download failed: %w", err)
 			}
 
-			if err := validateDeveloperPortalFlags(portalFlags); err != nil {
+			if err := validateDeveloperPortalFlagsWith(d, portalFlags); err != nil {
 				return err
 			}
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommandWith(ctx, d, authFlags)
 			defer cancel()
 			if err != nil {
 				return err
@@ -204,7 +208,7 @@ Examples:
 			client := newDeveloperPortalClient(session, portalFlags)
 
 			var download *webcore.AgreementDownload
-			err = withWebSpinner("Downloading Apple Developer Program agreement", func() error {
+			err = withWebSpinnerWith(d, "Downloading Apple Developer Program agreement", func() error {
 				var downloadErr error
 				download, downloadErr = downloadAgreementFn(requestCtx, client, resolvedAgreementID)
 				return downloadErr
@@ -217,13 +221,13 @@ Examples:
 			}
 			// Persist before the local save so a later retry without
 			// --developer-team still targets the team that produced this download.
-			persistDeveloperPortalSession(session)
+			persistDeveloperPortalSessionWith(d, session)
 
 			if err := destination.write(download.Body, *overwrite); err != nil {
 				return fmt.Errorf("web agreements download failed: agreement %q was downloaded but saving %q failed: %w", resolvedAgreementID, outPath, err)
 			}
 
-			return shared.PrintOutput(&asc.WebAgreementDownloadResult{
+			return d.PrintOutput(&asc.WebAgreementDownloadResult{
 				AgreementID:  download.AgreementID,
 				TeamID:       download.TeamID,
 				Title:        download.Title,
@@ -244,7 +248,7 @@ type agreementDownloadDestination struct {
 	name string
 }
 
-func newAgreementDownloadDestination(outPath string) (agreementDownloadDestination, error) {
+func newAgreementDownloadDestination(d *shared.Deps, outPath string) (agreementDownloadDestination, error) {
 	if os.IsPathSeparator(outPath[len(outPath)-1]) {
 		return agreementDownloadDestination{}, fmt.Errorf("%q ends with a path separator", outPath)
 	}
@@ -255,7 +259,7 @@ func newAgreementDownloadDestination(outPath string) (agreementDownloadDestinati
 	if err := rootfs.ValidateRelative(base); err != nil {
 		return agreementDownloadDestination{}, err
 	}
-	root, prefix, err := newDownloadRoot(filepath.Dir(outPath))
+	root, prefix, err := newDownloadRootWith(d, filepath.Dir(outPath))
 	if err != nil {
 		return agreementDownloadDestination{}, err
 	}
@@ -299,16 +303,16 @@ func (d agreementDownloadDestination) close() {
 	_ = d.root.Close()
 }
 
-// WebAgreementsAcceptCommand accepts one or more pending program agreements.
-func WebAgreementsAcceptCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("web agreements accept", flag.ExitOnError)
+// newWebAgreementsAcceptCommand accepts one or more pending program agreements.
+func newWebAgreementsAcceptCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("web agreements accept", flag.ExitOnError)
 
 	var agreementIDs shared.MultiStringFlag
 	fs.Var(&agreementIDs, "agreement-id", "Developer Portal agreement ID to accept (from `asc web agreements status`; repeatable)")
 	confirm := fs.Bool("confirm", false, "Confirm accepting the agreements on behalf of the Account Holder")
 	authFlags := bindWebSessionFlags(fs)
 	portalFlags := bindDeveloperPortalFlags(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "accept",
@@ -336,24 +340,20 @@ Examples:
 
 `,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("web agreements accept does not accept positional arguments")
-			}
-
 			resolvedAgreementIDs := uniqueTrimmedStrings(agreementIDs)
 			switch {
 			case len(resolvedAgreementIDs) == 0:
-				return shared.UsageError("--agreement-id is required")
+				return d.UsageError("--agreement-id is required")
 			case !*confirm:
-				return shared.UsageError("--confirm is required")
+				return d.RequireConfirm(*confirm)
 			}
 
-			if err := validateDeveloperPortalFlags(portalFlags); err != nil {
+			if err := validateDeveloperPortalFlagsWith(d, portalFlags); err != nil {
 				return err
 			}
-			session, requestCtx, cancel, err := resolveWebSessionForCommand(ctx, authFlags)
+			session, requestCtx, cancel, err := resolveWebSessionForCommandWith(ctx, d, authFlags)
 			defer cancel()
 			if err != nil {
 				return err
@@ -361,7 +361,7 @@ Examples:
 			client := newDeveloperPortalClient(session, portalFlags)
 
 			var accepted *asc.WebAgreementsAcceptResult
-			err = withWebSpinner("Accepting Apple Developer Program agreements", func() error {
+			err = withWebSpinnerWith(d, "Accepting Apple Developer Program agreements", func() error {
 				var acceptErr error
 				accepted, acceptErr = acceptAgreementsFn(requestCtx, client, webcore.AgreementsAcceptRequest{
 					AgreementIDs: resolvedAgreementIDs,
@@ -371,7 +371,7 @@ Examples:
 			// Persist after the accept attempt so a later status/retry without
 			// --developer-team still inspects the team that may have accepted,
 			// including malformed 2xx bodies that never produce a receipt.
-			persistDeveloperPortalSession(session)
+			persistDeveloperPortalSessionWith(d, session)
 			if err != nil {
 				return withWebAuthHint(err, "web agreements accept")
 			}
@@ -384,10 +384,10 @@ Examples:
 			// whose failure would falsely report an unverified acceptance.
 			// The write already happened; give the verification read its own
 			// timeout window instead of whatever the accept request left over.
-			verifyCtx, cancelVerify := shared.ContextWithTimeout(ctx)
+			verifyCtx, cancelVerify := d.Timeout(ctx)
 			defer cancelVerify()
 			var status *asc.WebAgreementsStatusResult
-			err = withWebSpinner("Verifying Apple Developer Program agreement status", func() error {
+			err = withWebSpinnerWith(d, "Verifying Apple Developer Program agreement status", func() error {
 				var statusErr error
 				status, statusErr = getAgreementHistoryFn(verifyCtx, client)
 				return statusErr
@@ -403,7 +403,7 @@ Examples:
 				return fmt.Errorf("web agreements accept failed: %w", err)
 			}
 
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return d.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
 }

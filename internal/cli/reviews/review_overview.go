@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 
@@ -12,11 +11,12 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	submitcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/submit"
 	validatecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
-var reviewReadinessReportBuilder = validatecli.BuildReadinessReport
+var reviewReadinessReportBuilder = validatecli.BuildReadinessReportWith
 
 type reviewVersionContext struct {
 	ID          string `json:"id"`
@@ -45,6 +45,14 @@ type reviewSnapshot struct {
 	ReviewDetailID   string
 	LatestSubmission *reviewSubmissionContext
 	SubmissionItems  *reviewSubmissionItemsContext
+	// DraftSubmissionID is a READY_FOR_REVIEW submission with no other version
+	// linked. DraftHoldsOnlyVersion is read only when the next action needs it:
+	// the draft is empty or holds the selected version plus only subscription
+	// items, the drafts review submit reuses. DraftStagedItems are those
+	// subscription items, which go to App Review with the draft.
+	DraftSubmissionID     string
+	DraftHoldsOnlyVersion bool
+	DraftStagedItems      []asc.ReviewSubmissionReceiptItem
 }
 
 type reviewStatusResult struct {
@@ -79,15 +87,14 @@ type reviewCoverageWarning struct {
 	Remediation string `json:"remediation"`
 }
 
-// ReviewStatusCommand returns an app-scoped review status command.
-func ReviewStatusCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+func newReviewStatusCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("status", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string to inspect")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID to inspect")
 	platform := fs.String("platform", "", "Platform filter: IOS, MAC_OS, TV_OS, VISION_OS")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "status",
@@ -100,23 +107,19 @@ Examples:
   asc review status --app "123456789" --version "1.2.3"
   asc review status --app "123456789" --version-id "VERSION_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.WithDiagnostic(shared.UsageError("review status does not accept positional arguments"), shared.DiagnosticInvalidInput, "")
-			}
-
-			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(*appID, *version, *versionID, *platform)
+			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(d, *appID, *version, *versionID, *platform)
 			if err != nil {
 				return err
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review status: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			resolvedAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, resolvedAppID)
@@ -130,26 +133,25 @@ Examples:
 			}
 			result := buildReviewStatusResult(snapshot)
 
-			return shared.PrintOutputWithRenderers(
+			return d.PrintOutputWithRenderers(
 				result,
 				*output.Output,
 				*output.Pretty,
-				func() error { renderReviewStatus(result, false); return nil },
-				func() error { renderReviewStatus(result, true); return nil },
+				func() error { renderReviewStatus(d, result, false); return nil },
+				func() error { renderReviewStatus(d, result, true); return nil },
 			)
 		},
 	}
 }
 
-// ReviewDoctorCommand returns an app-scoped review blocker diagnosis command.
-func ReviewDoctorCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+func newReviewDoctorCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("doctor", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (required, or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string to diagnose")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID to diagnose")
 	platform := fs.String("platform", "", "Platform filter: IOS, MAC_OS, TV_OS, VISION_OS")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "doctor",
@@ -162,23 +164,19 @@ Examples:
   asc review doctor --app "123456789" --version "1.2.3"
   asc review doctor --app "123456789" --version-id "VERSION_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.WithDiagnostic(shared.UsageError("review doctor does not accept positional arguments"), shared.DiagnosticInvalidInput, "")
-			}
-
-			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(*appID, *version, *versionID, *platform)
+			resolvedAppID, versionValue, versionIDValue, platformValue, err := resolveReviewOverviewFlags(d, *appID, *version, *versionID, *platform)
 			if err != nil {
 				return err
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review doctor: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			resolvedAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, resolvedAppID)
@@ -193,7 +191,7 @@ Examples:
 
 			var report validation.Report
 			if snapshot.Version != nil {
-				report, err = reviewReadinessReportBuilder(requestCtx, validatecli.ReadinessOptions{
+				report, err = reviewReadinessReportBuilder(requestCtx, d, validatecli.ReadinessOptions{
 					AppID:     resolvedAppID,
 					VersionID: snapshot.Version.ID,
 					Platform:  snapshot.Version.Platform,
@@ -205,35 +203,35 @@ Examples:
 			}
 
 			result := buildReviewDoctorResult(snapshot, report)
-			return shared.PrintOutputWithRenderers(
+			return d.PrintOutputWithRenderers(
 				result,
 				*output.Output,
 				*output.Pretty,
-				func() error { renderReviewDoctor(result, false); return nil },
-				func() error { renderReviewDoctor(result, true); return nil },
+				func() error { renderReviewDoctor(d, result, false); return nil },
+				func() error { renderReviewDoctor(d, result, true); return nil },
 			)
 		},
 	}
 }
 
-func resolveReviewOverviewFlags(appID, version, versionID, platform string) (string, string, string, string, error) {
-	resolvedAppID := shared.ResolveAppID(appID)
+func resolveReviewOverviewFlags(d *shared.Deps, appID, version, versionID, platform string) (string, string, string, string, error) {
+	resolvedAppID := d.ResolveAppID(appID)
 	if strings.TrimSpace(resolvedAppID) == "" {
-		fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --app is required (or set ASC_APP_ID)")
 		return "", "", "", "", shared.MissingRequiredUsageError("--app")
 	}
 
 	versionValue := strings.TrimSpace(version)
 	versionIDValue := strings.TrimSpace(versionID)
 	if versionValue != "" && versionIDValue != "" {
-		return "", "", "", "", shared.WithDiagnostic(shared.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
+		return "", "", "", "", shared.WithDiagnostic(d.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
 	}
 
 	platformValue := strings.TrimSpace(platform)
 	if platformValue != "" {
 		normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(platformValue)
 		if err != nil {
-			return "", "", "", "", shared.WithDiagnostic(shared.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
+			return "", "", "", "", shared.WithDiagnostic(d.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
 		}
 		platformValue = normalizedPlatform
 	}
@@ -261,7 +259,7 @@ func buildReviewSnapshot(ctx context.Context, client *asc.Client, appID, version
 		}
 	}
 
-	submissionOpts := []asc.ReviewSubmissionsOption{asc.WithReviewSubmissionsLimit(200)}
+	submissionOpts := []asc.ReviewSubmissionsOption{asc.Limit[asc.ReviewSubmissionsOption](200)}
 	if versionContext != nil && strings.TrimSpace(versionContext.Platform) != "" {
 		submissionOpts = append(submissionOpts, asc.WithReviewSubmissionsPlatforms([]string{versionContext.Platform}))
 	} else if strings.TrimSpace(platform) != "" {
@@ -280,12 +278,21 @@ func buildReviewSnapshot(ctx context.Context, client *asc.Client, appID, version
 		selectedVersionID = strings.TrimSpace(versionContext.ID)
 	}
 	snapshot.LatestSubmission = selectRelevantReviewSubmission(reviewSubmissions, selectedVersionID)
+	snapshot.DraftSubmissionID = selectReusableDraftReviewSubmission(reviewSubmissions, selectedVersionID)
 	if selectedVersionID != "" && shouldInspectReviewSubmissionItems(snapshot.LatestSubmission) {
 		submissionItems, err := summarizeReviewSubmissionItems(ctx, client, snapshot.LatestSubmission.ID, selectedVersionID)
 		if err != nil {
 			return snapshot, fmt.Errorf("fetch review submission items for %q: %w", snapshot.LatestSubmission.ID, err)
 		}
 		snapshot.SubmissionItems = &submissionItems
+	}
+	if snapshot.DraftSubmissionID != "" && reviewSnapshotHasOnlyRemovedItems(snapshot) {
+		holdsOnlyVersion, stagedItems, err := submitcli.ReviewSubmissionHoldsOnlyVersion(ctx, client, snapshot.DraftSubmissionID, selectedVersionID)
+		if err != nil {
+			return snapshot, fmt.Errorf("fetch review submission items for %q: %w", snapshot.DraftSubmissionID, err)
+		}
+		snapshot.DraftHoldsOnlyVersion = holdsOnlyVersion
+		snapshot.DraftStagedItems = stagedItems
 	}
 
 	return snapshot, nil
@@ -301,7 +308,7 @@ func resolveReviewVersion(ctx context.Context, client *asc.Client, appID, versio
 		return &versionContext, nil
 	}
 
-	opts := []asc.AppStoreVersionsOption{asc.WithAppStoreVersionsLimit(200)}
+	opts := []asc.AppStoreVersionsOption{asc.Limit[asc.AppStoreVersionsOption](200)}
 	if strings.TrimSpace(version) != "" {
 		opts = append(opts, asc.WithAppStoreVersionsVersionStrings([]string{strings.TrimSpace(version)}))
 	}
@@ -378,6 +385,29 @@ func selectRelevantReviewSubmission(submissions []asc.ReviewSubmissionResource, 
 	return &context
 }
 
+// selectReusableDraftReviewSubmission returns the ID of a READY_FOR_REVIEW
+// submission that already holds versionID or holds no version yet, so the next
+// step can reuse that draft instead of creating another submission.
+func selectReusableDraftReviewSubmission(submissions []asc.ReviewSubmissionResource, versionID string) string {
+	normalizedVersionID := strings.TrimSpace(versionID)
+	if normalizedVersionID == "" {
+		return ""
+	}
+	emptyDraftID := ""
+	for _, submission := range submissions {
+		if !strings.EqualFold(strings.TrimSpace(string(submission.Attributes.SubmissionState)), string(asc.ReviewSubmissionStateReadyForReview)) {
+			continue
+		}
+		switch submissionVersionID := reviewSubmissionVersionID(submission); {
+		case strings.EqualFold(submissionVersionID, normalizedVersionID):
+			return strings.TrimSpace(submission.ID)
+		case submissionVersionID == "" && emptyDraftID == "":
+			emptyDraftID = strings.TrimSpace(submission.ID)
+		}
+	}
+	return emptyDraftID
+}
+
 func reviewSubmissionVersionID(submission asc.ReviewSubmissionResource) string {
 	if submission.Relationships == nil || submission.Relationships.AppStoreVersionForReview == nil {
 		return ""
@@ -404,7 +434,7 @@ func summarizeReviewSubmissionItems(ctx context.Context, client *asc.Client, sub
 	resp, err := client.GetReviewSubmissionItems(
 		ctx,
 		submissionID,
-		asc.WithReviewSubmissionItemsLimit(200),
+		asc.Limit[asc.ReviewSubmissionItemsOption](200),
 		asc.WithReviewSubmissionItemsInclude([]string{"appStoreVersion"}),
 		asc.WithReviewSubmissionItemsFields([]string{"state", "appStoreVersion"}),
 	)
@@ -414,7 +444,7 @@ func summarizeReviewSubmissionItems(ctx context.Context, client *asc.Client, sub
 
 	trimReviewSubmissionItemsNextURL(resp)
 	err = asc.PaginateEach(ctx, resp, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		nextPage, err := client.GetReviewSubmissionItems(ctx, submissionID, asc.WithReviewSubmissionItemsNextURL(strings.TrimSpace(nextURL)))
+		nextPage, err := client.GetReviewSubmissionItems(ctx, submissionID, asc.NextURL[asc.ReviewSubmissionItemsOption](strings.TrimSpace(nextURL)))
 		if err != nil {
 			return nil, err
 		}
@@ -482,8 +512,29 @@ func staleReviewSubmissionBlocker() string {
 	return "Latest completed review submission no longer contains active review items because all items were removed."
 }
 
-func staleReviewSubmissionNextAction() string {
-	return "Create a fresh review submission for the current version."
+func staleReviewSubmissionNextAction(snapshot reviewSnapshot) string {
+	draftID := strings.TrimSpace(snapshot.DraftSubmissionID)
+	if draftID == "" || snapshot.Version == nil || strings.TrimSpace(snapshot.Version.ID) == "" {
+		return "Create a fresh review submission for the current version."
+	}
+	versionID := strings.TrimSpace(snapshot.Version.ID)
+	if !snapshot.DraftHoldsOnlyVersion {
+		return fmt.Sprintf(
+			"Draft review submission %q holds other review items, so do not submit it for this version: run `asc review submit --app %q --version-id %q --build-id \"BUILD_ID\" --confirm`, which reuses a draft only when it is empty or holds this version plus subscription items, and otherwise creates a new submission.",
+			draftID, strings.TrimSpace(snapshot.AppID), versionID,
+		)
+	}
+	next := fmt.Sprintf(
+		"Reuse draft review submission %q: run `asc review items add --submission %q --item-type appStoreVersions --item-id %q --if-exists skip`, then `asc review submissions-submit --id %q --confirm`.",
+		draftID, draftID, versionID, draftID,
+	)
+	if staged := snapshot.DraftStagedItems; len(staged) > 0 {
+		next += fmt.Sprintf(
+			" It also holds %s, which go to App Review with it; to leave one out, first run `asc review items remove --id \"ITEM_ID\" --confirm`.",
+			submitcli.DescribeReviewItems(staged),
+		)
+	}
+	return next
 }
 
 func buildReviewStatusResult(snapshot reviewSnapshot) reviewStatusResult {
@@ -541,7 +592,7 @@ func buildReviewStatusResult(snapshot reviewSnapshot) reviewStatusResult {
 	if len(result.Blockers) > 0 {
 		switch {
 		case hasOnlyRemovedItems:
-			result.NextAction = staleReviewSubmissionNextAction()
+			result.NextAction = staleReviewSubmissionNextAction(snapshot)
 		case strings.Contains(result.Blockers[0], "review detail"):
 			result.NextAction = "Create or update the App Store review detail for the current version."
 		case strings.Contains(strings.ToLower(result.Blockers[0]), "unresolved issues"):
@@ -564,6 +615,25 @@ func buildReviewStatusResult(snapshot reviewSnapshot) reviewStatusResult {
 	}
 
 	return result
+}
+
+// unresolvedReviewSubmissionRemediation names the asc commands for a
+// submission App Review returned: read the rejection, then resolve the
+// REJECTED items and resubmit the same submission. It does not suggest
+// canceling: App Store Connect refuses to cancel an UNRESOLVED_ISSUES
+// submission, and the rejected version stays editable without it.
+func unresolvedReviewSubmissionRemediation(appID, submissionID string) string {
+	submissionID = strings.TrimSpace(submissionID)
+	if submissionID == "" {
+		return "Resolve the outstanding App Review issues in App Store Connect, then resubmit if needed."
+	}
+	return fmt.Sprintf(
+		"Read App Review's message with `asc web review show --app %q --submission %q`. Edit the version if the fix needs it, list the items with `asc review items list --submission %q`, mark each REJECTED item resolved with `asc review items update --id \"ITEM_ID\" --resolved true`, then resubmit with `asc review submissions-submit --id %q --confirm`.",
+		valueOrPlaceholder(strings.TrimSpace(appID), "APP_ID"),
+		submissionID,
+		submissionID,
+		submissionID,
+	)
 }
 
 func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) reviewDoctorResult {
@@ -621,7 +691,7 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 			ID:          "review.submission.unresolved_issues",
 			Severity:    validation.SeverityError,
 			Message:     "Latest review submission has unresolved issues in App Review",
-			Remediation: "Resolve the outstanding App Review issues in App Store Connect, then resubmit if needed.",
+			Remediation: unresolvedReviewSubmissionRemediation(snapshot.AppID, snapshot.LatestSubmission.ID),
 		}
 		result.BlockingChecks = append([]validation.CheckResult{synthetic}, result.BlockingChecks...)
 		result.Summary.Errors++
@@ -632,7 +702,7 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 			ID:          "review.submission.removed_items_only",
 			Severity:    validation.SeverityError,
 			Message:     staleReviewSubmissionBlocker(),
-			Remediation: staleReviewSubmissionNextAction(),
+			Remediation: staleReviewSubmissionNextAction(snapshot),
 		}
 		result.BlockingChecks = append(result.BlockingChecks, synthetic)
 		result.Summary.Errors++
@@ -648,7 +718,7 @@ func buildReviewDoctorResult(snapshot reviewSnapshot, report validation.Report) 
 
 	switch {
 	case reviewSnapshotHasOnlyRemovedItems(snapshot):
-		result.NextAction = staleReviewSubmissionNextAction()
+		result.NextAction = staleReviewSubmissionNextAction(snapshot)
 	case len(result.BlockingChecks) > 0 && strings.TrimSpace(result.BlockingChecks[0].Remediation) != "":
 		result.NextAction = result.BlockingChecks[0].Remediation
 	case len(result.BlockingChecks) > 0:
@@ -702,14 +772,14 @@ func reviewPostCompleteAction(versionState string) string {
 	}
 }
 
-func renderReviewStatus(result reviewStatusResult, markdown bool) {
+func renderReviewStatus(d *shared.Deps, result reviewStatusResult, markdown bool) {
 	rows := [][]string{
 		{"appId", result.AppID},
 		{"reviewState", shared.OrNA(result.ReviewState)},
 		{"nextAction", shared.OrNA(result.NextAction)},
 		{"blockerCount", fmt.Sprintf("%d", len(result.Blockers))},
 	}
-	shared.RenderSection("Summary", []string{"field", "value"}, rows, markdown)
+	d.RenderSection("Summary", []string{"field", "value"}, rows, markdown)
 
 	contextRows := [][]string{
 		{"versionId", shared.OrNA(reviewVersionField(result.Version, func(v *reviewVersionContext) string { return v.ID }))},
@@ -721,7 +791,7 @@ func renderReviewStatus(result reviewStatusResult, markdown bool) {
 		{"latestSubmissionId", shared.OrNA(reviewSubmissionField(result.LatestSubmission, func(s *reviewSubmissionContext) string { return s.ID }))},
 		{"submissionState", shared.OrNA(reviewSubmissionField(result.LatestSubmission, func(s *reviewSubmissionContext) string { return s.State }))},
 	}
-	shared.RenderSection("Current Review", []string{"field", "value"}, contextRows, markdown)
+	d.RenderSection("Current Review", []string{"field", "value"}, contextRows, markdown)
 
 	if len(result.Blockers) == 0 {
 		return
@@ -731,10 +801,10 @@ func renderReviewStatus(result reviewStatusResult, markdown bool) {
 	for idx, blocker := range result.Blockers {
 		blockerRows = append(blockerRows, []string{fmt.Sprintf("blocker_%d", idx+1), blocker})
 	}
-	shared.RenderSection("Blocking Issues", []string{"id", "detail"}, blockerRows, markdown)
+	d.RenderSection("Blocking Issues", []string{"id", "detail"}, blockerRows, markdown)
 }
 
-func renderReviewDoctor(result reviewDoctorResult, markdown bool) {
+func renderReviewDoctor(d *shared.Deps, result reviewDoctorResult, markdown bool) {
 	rows := [][]string{
 		{"appId", result.AppID},
 		{"reviewState", shared.OrNA(result.ReviewState)},
@@ -742,7 +812,7 @@ func renderReviewDoctor(result reviewDoctorResult, markdown bool) {
 		{"warningCount", fmt.Sprintf("%d", len(result.WarningChecks))},
 		{"nextAction", shared.OrNA(result.NextAction)},
 	}
-	shared.RenderSection("Summary", []string{"field", "value"}, rows, markdown)
+	d.RenderSection("Summary", []string{"field", "value"}, rows, markdown)
 
 	contextRows := [][]string{
 		{"versionId", shared.OrNA(reviewVersionField(result.Version, func(v *reviewVersionContext) string { return v.ID }))},
@@ -753,20 +823,20 @@ func renderReviewDoctor(result reviewDoctorResult, markdown bool) {
 		{"reviewDetailId", shared.OrNA(result.ReviewDetailID)},
 		{"latestSubmissionId", shared.OrNA(reviewSubmissionField(result.LatestSubmission, func(s *reviewSubmissionContext) string { return s.ID }))},
 	}
-	shared.RenderSection("Current Review", []string{"field", "value"}, contextRows, markdown)
+	d.RenderSection("Current Review", []string{"field", "value"}, contextRows, markdown)
 
 	coverageRows := make([][]string, 0, len(result.CoverageWarnings))
 	for _, warning := range result.CoverageWarnings {
 		coverageRows = append(coverageRows, []string{warning.ID, warning.Status, warning.Message, warning.Remediation})
 	}
-	shared.RenderSection("Coverage Warnings", []string{"id", "status", "message", "remediation"}, coverageRows, markdown)
+	d.RenderSection("Coverage Warnings", []string{"id", "status", "message", "remediation"}, coverageRows, markdown)
 
 	if len(result.BlockingChecks) > 0 {
 		blockerRows := make([][]string, 0, len(result.BlockingChecks))
 		for _, check := range result.BlockingChecks {
 			blockerRows = append(blockerRows, []string{check.ID, check.Message, shared.OrNA(check.Remediation)})
 		}
-		shared.RenderSection("Blocking Issues", []string{"id", "message", "remediation"}, blockerRows, markdown)
+		d.RenderSection("Blocking Issues", []string{"id", "message", "remediation"}, blockerRows, markdown)
 	}
 
 	if len(result.WarningChecks) > 0 {
@@ -774,7 +844,7 @@ func renderReviewDoctor(result reviewDoctorResult, markdown bool) {
 		for _, check := range result.WarningChecks {
 			warningRows = append(warningRows, []string{check.ID, check.Message, shared.OrNA(check.Remediation)})
 		}
-		shared.RenderSection("Warnings", []string{"id", "message", "remediation"}, warningRows, markdown)
+		d.RenderSection("Warnings", []string{"id", "message", "remediation"}, warningRows, markdown)
 	}
 }
 

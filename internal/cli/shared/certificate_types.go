@@ -2,7 +2,7 @@ package shared
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"strings"
 )
 
@@ -84,11 +84,16 @@ func CertificateCreateTypeList() []string {
 }
 
 // ValidateCertificateCreateType returns the canonical certificate type for value,
-// or a usage-class error when the value is not a CertificateType.
-func ValidateCertificateCreateType(flagName, value string) (string, error) {
+// or a usage-class error, with its "Error:" line on d's stderr, when the value is
+// not a CertificateType.
+func (d *Deps) ValidateCertificateCreateType(flagName, value string) (string, error) {
+	return validateCertificateCreateTypeTo(d.IO.ErrOut, flagName, value)
+}
+
+func validateCertificateCreateTypeTo(stderr io.Writer, flagName, value string) (string, error) {
 	canonical, ok := CanonicalCertificateType(value)
 	if !ok {
-		return "", UsageErrorf(
+		return "", usageErrorfTo(stderr,
 			"%s must be one of: %s (got %q)",
 			flagName,
 			strings.Join(CertificateCreateTypeList(), ", "),
@@ -101,15 +106,19 @@ func ValidateCertificateCreateType(flagName, value string) (string, error) {
 // ValidateCertificateCreateMerchantID enforces the merchantId relationship rules
 // for POST /v1/certificates: the Apple Pay types require it, every other type
 // must not send it. Callers must run this before side effects such as writing a
-// private key or CSR.
-func ValidateCertificateCreateMerchantID(certificateType, merchantID string) error {
+// private key or CSR. The "Error:" line goes to d's stderr.
+func (d *Deps) ValidateCertificateCreateMerchantID(certificateType, merchantID string) error {
+	return validateCertificateCreateMerchantIDTo(d.IO.ErrOut, certificateType, merchantID)
+}
+
+func validateCertificateCreateMerchantIDTo(stderr io.Writer, certificateType, merchantID string) error {
 	merchantID = strings.TrimSpace(merchantID)
 	switch {
 	case IsApplePayCertificateType(certificateType) && merchantID == "":
-		fmt.Fprintf(os.Stderr, "Error: --merchant-id is required with --certificate-type %s\n", certificateType)
+		fmt.Fprintf(stderr, "Error: --merchant-id is required with --certificate-type %s\n", certificateType)
 		return MissingRequiredUsageError("--merchant-id")
 	case !IsApplePayCertificateType(certificateType) && merchantID != "":
-		return UsageErrorf(
+		return usageErrorfTo(stderr,
 			"--merchant-id can only be used with --certificate-type %s",
 			strings.Join(ApplePayCertificateTypeList(), ", "),
 		)

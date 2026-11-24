@@ -178,7 +178,6 @@ var (
 	signingRunSystemRootsFn   = systemSigningRunRoots
 	signingRunProfileTrustFn  = verifySigningRunProfileTrust
 	signingRunEnvironmentFn   = runSigningEnvironment
-	signingRunNowFn           = time.Now
 )
 
 var sanitizedSigningChildEnvironmentNames = map[string]struct{}{
@@ -227,7 +226,7 @@ func SanitizedChildEnvironment(base []string) []string {
 // RunEphemeral runs callback once inside the same audited ephemeral signing
 // boundary used by `asc signing run`. The callback must be synchronous and
 // context-aware; any subprocess it starts must use SanitizedChildEnvironment.
-func RunEphemeral(ctx context.Context, options EphemeralRunOptions, callback func(context.Context) error) error {
+func RunEphemeral(ctx context.Context, d *shared.Deps, options EphemeralRunOptions, callback func(context.Context) error) error {
 	if strings.TrimSpace(options.IdentityPath) == "" {
 		return shared.NewValidationError(fmt.Errorf("signing run: identity path is required"))
 	}
@@ -249,7 +248,7 @@ func RunEphemeral(ctx context.Context, options EphemeralRunOptions, callback fun
 	if callback == nil {
 		return shared.NewValidationError(fmt.Errorf("signing run: callback is required"))
 	}
-	return executeSigningOperationFn(ctx, signingRunOptions{
+	return executeSigningOperationFn(ctx, d, signingRunOptions{
 		IdentityPath:              options.IdentityPath,
 		IdentityPasswordPath:      options.IdentityPasswordPath,
 		ProfilePath:               options.ProfilePath,
@@ -263,11 +262,8 @@ func RunEphemeral(ctx context.Context, options EphemeralRunOptions, callback fun
 // RecoverEphemeral serializes with every ephemeral signing run and performs
 // only validated crash-journal recovery. It reads no identity or profile and
 // creates no keychain or provisioning profile when no journal exists.
-func RecoverEphemeral(ctx context.Context) error {
-	if ctx == nil {
-		return shared.NewValidationError(fmt.Errorf("recover signing environment: context is required"))
-	}
-	deps := platformSigningRunDeps()
+func RecoverEphemeral(ctx context.Context, d *shared.Deps) error {
+	deps := platformSigningRunDeps(d)
 	if deps.GOOS != "darwin" {
 		return shared.NewValidationError(fmt.Errorf("recover signing environment is supported only on macOS"))
 	}
@@ -314,17 +310,14 @@ func normalizeSigningRunExpectedSHA256(value, label string) (string, error) {
 // InspectPKCS12Identity securely reads and validates one PKCS#12 identity and
 // returns only public leaf-certificate metadata. The certificate must be
 // currently valid and its private key must cryptographically match.
-func InspectPKCS12Identity(ctx context.Context, options PKCS12IdentityOptions) (PKCS12IdentityInfo, error) {
+func InspectPKCS12Identity(ctx context.Context, d *shared.Deps, options PKCS12IdentityOptions) (PKCS12IdentityInfo, error) {
 	if strings.TrimSpace(options.IdentityPath) == "" {
 		return PKCS12IdentityInfo{}, shared.NewValidationError(fmt.Errorf("inspect PKCS#12 identity: identity path is required"))
-	}
-	if ctx == nil {
-		return PKCS12IdentityInfo{}, shared.NewValidationError(fmt.Errorf("inspect PKCS#12 identity: context is required"))
 	}
 	if err := ctx.Err(); err != nil {
 		return PKCS12IdentityInfo{}, err
 	}
-	if platformSigningRunDeps().GOOS != "darwin" {
+	if platformSigningRunDeps(d).GOOS != "darwin" {
 		return PKCS12IdentityInfo{}, shared.NewValidationError(fmt.Errorf("inspect PKCS#12 identity is supported only on macOS"))
 	}
 	identityData, err := readBoundedSigningRunFile(options.IdentityPath, signingRunInputLimit, true)
@@ -345,7 +338,7 @@ func InspectPKCS12Identity(ctx context.Context, options PKCS12IdentityOptions) (
 	}
 	identityPassword := bytes.TrimSuffix(passwordData, []byte("\n"))
 	identityPassword = bytes.TrimSuffix(identityPassword, []byte("\r"))
-	identity, err := inspectSigningRunIdentity(identityData, identityPassword, signingRunNowFn())
+	identity, err := inspectSigningRunIdentity(identityData, identityPassword, d.Now())
 	if err != nil {
 		return PKCS12IdentityInfo{}, fmt.Errorf("inspect PKCS#12 identity: %w", err)
 	}
@@ -362,9 +355,8 @@ func InspectPKCS12Identity(ctx context.Context, options PKCS12IdentityOptions) (
 	}, nil
 }
 
-// SigningRunCommand returns the signing run subcommand.
-func SigningRunCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+func newSigningRunCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("run", flag.ExitOnError)
 
 	identityPath := fs.String("identity", "", "Path to a PKCS#12 distribution identity")
 	identityPasswordPath := fs.String("identity-password-file", "", "Path to a file containing the PKCS#12 password")
@@ -386,25 +378,25 @@ Examples:
   asc signing run --identity .asc/signing/App.p12 --profile .asc/signing/App.mobileprovision -- xcodebuild -exportArchive
   asc signing run --identity .asc/signing/App.p12 --identity-password-file .asc/secrets/p12-password --profile .asc/signing/App.mobileprovision --receipt .asc/distribution/signing-run.json -- xcodebuild -exportArchive`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			identity := strings.TrimSpace(*identityPath)
 			if identity == "" {
-				return shared.UsageError("--identity is required")
+				return d.UsageError("--identity is required")
 			}
 			profile := strings.TrimSpace(*profilePath)
 			if profile == "" {
-				return shared.UsageError("--profile is required")
+				return d.UsageError("--profile is required")
 			}
 			purposeValue := strings.TrimSpace(*purpose)
 			if purposeValue != signingRunPurposeReleaseTesting {
-				return shared.UsageError(`--purpose must be "release-testing"`)
+				return d.UsageError(`--purpose must be "release-testing"`)
 			}
 			if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-				return shared.UsageError("a child command is required after --")
+				return d.UsageError("a child command is required after --")
 			}
 
-			return classifySigningInputError(executeSigningRunFn(ctx, signingRunOptions{
+			return classifySigningInputError(executeSigningRunFn(ctx, d, signingRunOptions{
 				IdentityPath:         identity,
 				IdentityPasswordPath: strings.TrimSpace(*identityPasswordPath),
 				ProfilePath:          profile,
@@ -416,20 +408,14 @@ Examples:
 	}
 }
 
-func executeSigningRun(ctx context.Context, options signingRunOptions) error {
-	return executeSigningOperation(ctx, options, func(runCtx context.Context) error {
-		return runSigningRunChild(runCtx, options.Child)
+func executeSigningRun(ctx context.Context, d *shared.Deps, options signingRunOptions) error {
+	return executeSigningOperation(ctx, d, options, func(runCtx context.Context) error {
+		return runSigningRunChild(runCtx, d.After, options.Child)
 	})
 }
 
-func executeSigningOperation(ctx context.Context, options signingRunOptions, operation func(context.Context) error) error {
-	if ctx == nil {
-		return shared.NewValidationError(fmt.Errorf("signing run: context is required"))
-	}
-	if operation == nil {
-		return shared.NewValidationError(fmt.Errorf("signing run: callback is required"))
-	}
-	deps := platformSigningRunDeps()
+func executeSigningOperation(ctx context.Context, d *shared.Deps, options signingRunOptions, operation func(context.Context) error) error {
+	deps := platformSigningRunDeps(d)
 	if deps.GOOS != "darwin" {
 		return shared.NewValidationError(fmt.Errorf("signing run is supported only on macOS"))
 	}
@@ -441,7 +427,7 @@ func executeSigningOperation(ctx context.Context, options signingRunOptions, ope
 		if err != nil {
 			return fmt.Errorf("signing run: load system certificate roots: %w", err)
 		}
-		inspection, err := inspectSigningRunInputs(identityData, identityPassword, profileData, roots, signingRunNowFn())
+		inspection, err := inspectSigningRunInputs(identityData, identityPassword, profileData, roots, d.Now())
 		if err != nil {
 			return fmt.Errorf("signing run: preflight: %w", err)
 		}
@@ -613,9 +599,6 @@ func runSigningEnvironment(
 	inspection *signingRunInspection,
 	operation func(context.Context) error,
 ) (receipt signingRunReceipt, resultErr error) {
-	if ctx == nil {
-		return signingRunReceipt{}, fmt.Errorf("signing run context is required")
-	}
 	if operation == nil && deps.RunChild != nil {
 		operation = func(runCtx context.Context) error {
 			return deps.RunChild(runCtx, options.Child)

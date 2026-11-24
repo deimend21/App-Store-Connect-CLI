@@ -150,97 +150,57 @@ func TestRun_InvalidReportFormatWinsOverUnknownFlag(t *testing.T) {
 	}
 }
 
-func TestRun_UnknownFlagBetweenCompleteReportOptionsWritesJUnit(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "result.xml")
+func TestRun_UnknownRootFlagAroundReportOptionsWritesJUnit(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		leading    []string
+		flag       string
+		wantStderr string
+	}{
+		{
+			name:       "between complete report options",
+			leading:    []string{"--report", "junit", "--bogus"},
+			flag:       "--bogus",
+			wantStderr: "Error: unknown flag `--bogus` for `asc`\nFor help:\n  asc --help\n",
+		},
+		{
+			name:       "before spaced boolean and report options",
+			leading:    []string{"--bogus", "--strict-auth", "false", "--report", "junit"},
+			flag:       "--bogus",
+			wantStderr: "Error: unknown flag `--bogus` for `asc`\nFor help:\n  asc --help\n",
+		},
+		{
+			name:       "with value before report options",
+			leading:    []string{"--profiel", "ci", "--report", "junit"},
+			flag:       "--profiel",
+			wantStderr: "Error: unknown flag `--profiel` for `asc`\nTry:\n  --profile\nFor help:\n  asc --help\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetReportFlags(t)
+			reportPath := filepath.Join(t.TempDir(), "result.xml")
+			args := append(append([]string{}, tt.leading...), "--report-file", reportPath, "builds", "list")
 
-	stdout, stderr := captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--report", "junit",
-			"--bogus",
-			"--report-file", reportPath,
-			"builds", "list",
-		}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
+			stdout, stderr := captureCommandOutput(t, func() {
+				if code := Run(args, "1.0.0"); code != ExitUsage {
+					t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
+				}
+			})
 
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	want := "Error: unknown flag `--bogus` for `asc`\nFor help:\n  asc --help\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if !strings.Contains(string(data), "unknown flag `--bogus` for `asc`") {
-		t.Fatalf("report does not identify the unknown flag: %s", data)
-	}
-}
-
-func TestRun_UnknownFlagBeforeSpacedBooleanAndReportOptionsWritesJUnit(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "result.xml")
-
-	stdout, stderr := captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--bogus",
-			"--strict-auth", "false",
-			"--report", "junit",
-			"--report-file", reportPath,
-			"builds", "list",
-		}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	want := "Error: unknown flag `--bogus` for `asc`\nFor help:\n  asc --help\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if !strings.Contains(string(data), "unknown flag `--bogus` for `asc`") {
-		t.Fatalf("report does not identify the unknown flag: %s", data)
-	}
-}
-
-func TestRun_UnknownFlagWithValueBeforeReportOptionsWritesJUnit(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "result.xml")
-
-	stdout, stderr := captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--profiel", "ci",
-			"--report", "junit",
-			"--report-file", reportPath,
-			"builds", "list",
-		}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	want := "Error: unknown flag `--profiel` for `asc`\nTry:\n  --profile\nFor help:\n  asc --help\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if !strings.Contains(string(data), "unknown flag `--profiel` for `asc`") {
-		t.Fatalf("report does not identify the unknown flag: %s", data)
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if stderr != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, tt.wantStderr)
+			}
+			data, err := os.ReadFile(reportPath)
+			if err != nil {
+				t.Fatalf("ReadFile() error: %v", err)
+			}
+			if want := "unknown flag `" + tt.flag + "` for `asc`"; !strings.Contains(string(data), want) {
+				t.Fatalf("report does not identify the unknown flag: %s", data)
+			}
+		})
 	}
 }
 
@@ -336,7 +296,7 @@ func TestRun_ParseErrorWithoutFlagOutputReturnsUsage(t *testing.T) {
 	}
 
 	stdout, stderr := captureCommandOutput(t, func() {
-		if code := Run([]string{"ads", "v5", "geo"}, "1.0.0"); code != ExitUsage {
+		if code := Run([]string{"ads", "geo"}, "1.0.0"); code != ExitUsage {
 			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
 		}
 	})
@@ -404,126 +364,62 @@ func TestRun_BareGroupPrintsHelpToStdoutAndExitsSuccessfully(t *testing.T) {
 	}
 }
 
-func TestRun_BareGroupWritesJUnitReport(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "junit.xml")
+func TestRun_UnknownInputAndBareGroupWriteJUnitReport(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		args        []string
+		wantCode    int
+		wantCase    string
+		wantFailure string
+	}{
+		{name: "bare group", args: []string{"builds"}, wantCode: ExitSuccess, wantCase: "asc builds"},
+		{name: "unknown child", args: []string{"builds", "lsit"}, wantCode: ExitUsage, wantCase: "asc builds", wantFailure: "unknown command `asc builds lsit`"},
+		{name: "unknown flag", args: []string{"builds", "list", "--ap=PRIVATE_VALUE"}, wantCode: ExitUsage, wantCase: "asc builds list", wantFailure: "unknown flag `--ap` for `asc builds list`"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetReportFlags(t)
+			reportPath := filepath.Join(t.TempDir(), "junit.xml")
+			args := append([]string{"--report", "junit", "--report-file", reportPath}, tt.args...)
 
-	captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--report", "junit",
-			"--report-file", reportPath,
-			"builds",
-		}, "1.0.0"); code != ExitSuccess {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
-		}
-	})
+			captureCommandOutput(t, func() {
+				if code := Run(args, "1.0.0"); code != tt.wantCode {
+					t.Fatalf("Run() exit code = %d, want %d", code, tt.wantCode)
+				}
+			})
 
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	var suite struct {
-		Failures  int `xml:"failures,attr"`
-		TestCases []struct {
-			Name string `xml:"name,attr"`
-		} `xml:"testcase"`
-	}
-	if err := xml.Unmarshal(data, &suite); err != nil {
-		t.Fatalf("xml.Unmarshal() error: %v", err)
-	}
-	if suite.Failures != 0 {
-		t.Fatalf("failures = %d, want 0", suite.Failures)
-	}
-	if len(suite.TestCases) != 1 || suite.TestCases[0].Name != "asc builds" {
-		t.Fatalf("unexpected testcase payload: %+v", suite.TestCases)
-	}
-}
-
-func TestRun_UnknownChildWritesJUnitReport(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "junit.xml")
-
-	captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--report", "junit",
-			"--report-file", reportPath,
-			"builds", "lsit",
-		}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	var suite struct {
-		Failures  int `xml:"failures,attr"`
-		TestCases []struct {
-			Name    string `xml:"name,attr"`
-			Failure struct {
-				Message string `xml:"message,attr"`
-			} `xml:"failure"`
-		} `xml:"testcase"`
-	}
-	if err := xml.Unmarshal(data, &suite); err != nil {
-		t.Fatalf("xml.Unmarshal() error: %v", err)
-	}
-	if suite.Failures != 1 {
-		t.Fatalf("failures = %d, want 1", suite.Failures)
-	}
-	if len(suite.TestCases) != 1 || suite.TestCases[0].Name != "asc builds" {
-		t.Fatalf("unexpected testcase payload: %+v", suite.TestCases)
-	}
-	if suite.TestCases[0].Failure.Message != "unknown command `asc builds lsit`" {
-		t.Fatalf("failure message = %q", suite.TestCases[0].Failure.Message)
-	}
-}
-
-func TestRun_UnknownFlagWritesJUnitReport(t *testing.T) {
-	resetReportFlags(t)
-	reportPath := filepath.Join(t.TempDir(), "junit.xml")
-
-	captureCommandOutput(t, func() {
-		if code := Run([]string{
-			"--report", "junit",
-			"--report-file", reportPath,
-			"builds", "list", "--ap=PRIVATE_VALUE",
-		}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-
-	data, err := os.ReadFile(reportPath)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-
-	var suite struct {
-		Failures  int `xml:"failures,attr"`
-		TestCases []struct {
-			Name    string `xml:"name,attr"`
-			Failure struct {
-				Message string `xml:"message,attr"`
-			} `xml:"failure"`
-		} `xml:"testcase"`
-	}
-	if err := xml.Unmarshal(data, &suite); err != nil {
-		t.Fatalf("xml.Unmarshal() error: %v", err)
-	}
-	if suite.Failures != 1 {
-		t.Fatalf("failures = %d, want 1", suite.Failures)
-	}
-	if len(suite.TestCases) != 1 || suite.TestCases[0].Name != "asc builds list" {
-		t.Fatalf("unexpected testcase payload: %+v", suite.TestCases)
-	}
-	if suite.TestCases[0].Failure.Message != "unknown flag `--ap` for `asc builds list`" {
-		t.Fatalf("failure message = %q", suite.TestCases[0].Failure.Message)
-	}
-	if strings.Contains(string(data), "PRIVATE_VALUE") {
-		t.Fatalf("report leaked an inline flag value: %s", data)
+			data, err := os.ReadFile(reportPath)
+			if err != nil {
+				t.Fatalf("ReadFile() error: %v", err)
+			}
+			var suite struct {
+				Failures  int `xml:"failures,attr"`
+				TestCases []struct {
+					Name    string `xml:"name,attr"`
+					Failure *struct {
+						Message string `xml:"message,attr"`
+					} `xml:"failure"`
+				} `xml:"testcase"`
+			}
+			if err := xml.Unmarshal(data, &suite); err != nil {
+				t.Fatalf("xml.Unmarshal() error: %v", err)
+			}
+			wantFailures := 0
+			if tt.wantFailure != "" {
+				wantFailures = 1
+			}
+			if suite.Failures != wantFailures {
+				t.Fatalf("failures = %d, want %d", suite.Failures, wantFailures)
+			}
+			if len(suite.TestCases) != 1 || suite.TestCases[0].Name != tt.wantCase {
+				t.Fatalf("unexpected testcase payload: %+v", suite.TestCases)
+			}
+			if tt.wantFailure != "" && (suite.TestCases[0].Failure == nil || suite.TestCases[0].Failure.Message != tt.wantFailure) {
+				t.Fatalf("failure = %+v, want message %q", suite.TestCases[0].Failure, tt.wantFailure)
+			}
+			if strings.Contains(string(data), "PRIVATE_VALUE") {
+				t.Fatalf("report leaked an inline flag value: %s", data)
+			}
+		})
 	}
 }
 
@@ -542,9 +438,9 @@ func TestRun_UnknownInputReportWriteFailureReturnsExitError(t *testing.T) {
 		},
 		{
 			name:       "allowlisted unknown command",
-			args:       []string{"builds", "get"},
-			wantPrefix: "Error: unknown command `asc builds get`\n",
-			wantChild:  "get",
+			args:       []string{"builds", "show"},
+			wantPrefix: "Error: unknown command `asc builds show`\n",
+			wantChild:  "show",
 		},
 		{
 			name:       "unknown flag",
@@ -1481,6 +1377,8 @@ func TestRun_UnknownFlagReturnsConciseRecovery(t *testing.T) {
 	want := "Error: unknown flag `--ap` for `asc builds list`\n" +
 		"Try:\n" +
 		"  --app\n" +
+		"  --app-fields\n" +
+		"  --app-store-version-fields\n" +
 		"For help:\n" +
 		"  asc builds list --help\n"
 	if stderr != want {
@@ -1491,21 +1389,31 @@ func TestRun_UnknownFlagReturnsConciseRecovery(t *testing.T) {
 	}
 }
 
-func TestRun_MetadataValidateUnsupportedFlagsExplainDirectoryWorkflow(t *testing.T) {
+func TestRun_GroupsBuildsListRecoversGroupsListFlags(t *testing.T) {
 	resetReportFlags(t)
+	t.Setenv("ASC_APP_ID", "")
 
+	const help = "For help:\n  asc testflight groups builds list --help\n"
 	tests := []struct {
-		name            string
-		args            []string
-		unsupportedFlag string
+		name       string
+		args       []string
+		wantStderr string
 	}{
-		{name: "app", args: []string{"metadata", "validate", "--app", "PRIVATE_VALUE"}, unsupportedFlag: "--app"},
-		{name: "spaced version", args: []string{"metadata", "validate", "--version", "PRIVATE_VALUE"}, unsupportedFlag: "--version"},
-		{name: "equals version", args: []string{"metadata", "validate", "--version=PRIVATE_VALUE"}, unsupportedFlag: "--version"},
-		{name: "spaced numeric version", args: []string{"metadata", "validate", "--version", "1"}, unsupportedFlag: "--version"},
-		{name: "equals numeric version", args: []string{"metadata", "validate", "--version=1"}, unsupportedFlag: "--version"},
-		{name: "spaced zero version", args: []string{"metadata", "validate", "--version", "0"}, unsupportedFlag: "--version"},
-		{name: "equals zero version", args: []string{"metadata", "validate", "--version=0"}, unsupportedFlag: "--version"},
+		{
+			name:       "build id",
+			args:       []string{"testflight", "groups", "builds", "list", "--build-id", "BUILD_ID"},
+			wantStderr: "Error: unknown flag `--build-id` for `asc testflight groups builds list`\nTry:\n  asc testflight groups list --build-id BUILD_ID\n" + help,
+		},
+		{
+			name:       "app with empty optional next",
+			args:       []string{"testflight", "groups", "builds", "list", "--app", "APP_ID", "--next="},
+			wantStderr: "Error: unknown flag `--app` for `asc testflight groups builds list`\nTry:\n  asc testflight groups list --app APP_ID --next=\n" + help,
+		},
+		{
+			name:       "group id mixed with a groups list flag",
+			args:       []string{"testflight", "groups", "builds", "list", "--group-id", "GROUP_ID", "--app", "APP_ID"},
+			wantStderr: "Error: unknown flag `--app` for `asc testflight groups builds list`\n" + help,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1514,90 +1422,29 @@ func TestRun_MetadataValidateUnsupportedFlagsExplainDirectoryWorkflow(t *testing
 					t.Fatalf("exit code = %d, want %d", code, ExitUsage)
 				}
 			})
-
 			if stdout != "" {
 				t.Fatalf("stdout = %q, want empty", stdout)
 			}
-			want := "Error: unknown flag `" + test.unsupportedFlag + "` for `asc metadata validate`\n" +
-				"`asc metadata validate` reads from `--dir`; omit `--app` and `--version`. Run `asc metadata pull` first if needed.\n" +
-				"Try:\n" +
-				"  asc metadata validate --dir \"./metadata\"\n" +
-				"  asc metadata pull --app \"APP_ID\" --version \"1.2.3\" --dir \"./metadata\"\n" +
-				"For help:\n" +
-				"  asc metadata validate --help\n"
-			if stderr != want {
-				t.Fatalf("stderr = %q, want %q", stderr, want)
-			}
-			if strings.Contains(stderr, "PRIVATE_VALUE") {
-				t.Fatalf("stderr leaked unsupported flag value: %q", stderr)
+			if stderr != test.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
 			}
 		})
 	}
 }
 
-func TestRun_MetadataValidateBareVersionPreservesGlobalFlagRecovery(t *testing.T) {
+func TestRun_IAPVersionLocalizationsListExplainsProductID(t *testing.T) {
 	resetReportFlags(t)
-
-	for _, test := range []struct {
-		name string
-		args []string
-	}{
-		{name: "bare", args: []string{"metadata", "validate", "--version"}},
-		{name: "equals boolean", args: []string{"metadata", "validate", "--version=false"}},
-		{name: "spaced boolean", args: []string{"metadata", "validate", "--version", "true"}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			stdout, stderr := captureCommandOutput(t, func() {
-				if code := Run(test.args, "1.0.0"); code != ExitUsage {
-					t.Fatalf("exit code = %d, want %d", code, ExitUsage)
-				}
-			})
-
-			if stdout != "" {
-				t.Fatalf("stdout = %q, want empty", stdout)
-			}
-			want := "Error: unknown flag `--version` for `asc metadata validate`\n" +
-				"`--version` is a global flag; the flag and any required valid value must appear before the command name.\n" +
-				"For help:\n" +
-				"  asc --help\n"
-			if stderr != want {
-				t.Fatalf("stderr = %q, want %q", stderr, want)
-			}
-		})
-	}
-}
-
-func TestRun_XcodeCloudStatusHelpOmitsRemovedIDAlias(t *testing.T) {
-	resetReportFlags(t)
-
 	stdout, stderr := captureCommandOutput(t, func() {
-		if code := Run([]string{"xcode-cloud", "status", "--help"}, "1.0.0"); code != ExitSuccess {
-			t.Fatalf("help exit code = %d, want %d", code, ExitSuccess)
+		if code := Run([]string{"iap", "versions", "localizations", "list", "--iap-id", "IAP_ID"}, "1.0.0"); code != ExitUsage {
+			t.Fatalf("exit code = %d, want %d", code, ExitUsage)
 		}
 	})
-	if stderr != "" {
-		t.Fatalf("help stderr = %q, want empty", stderr)
-	}
-	if !strings.Contains(stdout, "--run-id") {
-		t.Fatalf("help does not document --run-id: %q", stdout)
-	}
-	if strings.Contains(stdout, "--id ") || strings.Contains(stdout, "DEPRECATED") {
-		t.Fatalf("help still documents the removed --id alias: %q", stdout)
-	}
-
-	stdout, stderr = captureCommandOutput(t, func() {
-		if code := Run([]string{"xcode-cloud", "status", "--id", "run-1"}, "1.0.0"); code != ExitUsage {
-			t.Fatalf("removed alias exit code = %d, want %d", code, ExitUsage)
-		}
-	})
-	if stdout != "" {
-		t.Fatalf("removed alias stdout = %q, want empty", stdout)
-	}
-	want := "Error: `--id` was removed in 5.0.0; use `--run-id` (see migrate-to-5-0)\n" +
-		"For help:\n" +
-		"  asc xcode-cloud status --help\n"
-	if stderr != want {
-		t.Fatalf("removed alias stderr = %q, want %q", stderr, want)
+	want := "Error: unknown flag `--iap-id` for `asc iap versions localizations list`\n" +
+		"Find the version ID first:\n  asc iap versions list --iap-id IAP_ID --include localizations --paginate\n" +
+		"Then list all localizations for that version:\n  asc iap versions localizations list --version-id VERSION_ID --paginate\n" +
+		"For help:\n  asc iap versions localizations list --help\n"
+	if stdout != "" || stderr != want {
+		t.Fatalf("stdout = %q, stderr = %q, want empty stdout and stderr %q", stdout, stderr, want)
 	}
 }
 
@@ -1651,12 +1498,6 @@ func TestRun_CommonWrongCommandPathsRecoverInOneStep(t *testing.T) {
 			wantCommand: "asc",
 		},
 		{
-			name:        "groups builds list",
-			args:        []string{"testflight", "groups", "builds", "list", "--build-id", "BUILD_ID"},
-			wantStderr:  "Error: unknown command `asc testflight groups builds list`\nTry:\n  asc testflight groups list --build-id BUILD_ID\nFor help:\n  asc testflight groups --help\n",
-			wantCommand: "asc testflight groups",
-		},
-		{
 			name:        "version info help",
 			args:        []string{"versions", "info", "--help"},
 			wantStderr:  "Error: unknown command `asc versions info`\nTry:\n  asc versions view --help\nFor help:\n  asc versions --help\n",
@@ -1667,12 +1508,6 @@ func TestRun_CommonWrongCommandPathsRecoverInOneStep(t *testing.T) {
 			args:        []string{"reviewsubmissions", "list", "-h"},
 			wantStderr:  "Error: unknown command `asc reviewsubmissions list`\nTry:\n  asc review submissions list -h\nFor help:\n  asc --help\n",
 			wantCommand: "asc",
-		},
-		{
-			name:        "groups builds list help",
-			args:        []string{"testflight", "groups", "builds", "list", "--help"},
-			wantStderr:  "Error: unknown command `asc testflight groups builds list`\nTry:\n  asc testflight groups list --help\nFor help:\n  asc testflight groups --help\n",
-			wantCommand: "asc testflight groups",
 		},
 		{
 			name:        "version info with empty optional include",
@@ -1687,12 +1522,6 @@ func TestRun_CommonWrongCommandPathsRecoverInOneStep(t *testing.T) {
 			wantCommand: "asc",
 		},
 		{
-			name:        "groups builds list with empty optional next",
-			args:        []string{"testflight", "groups", "builds", "list", "--app", "APP_ID", "--next="},
-			wantStderr:  "Error: unknown command `asc testflight groups builds list`\nTry:\n  asc testflight groups list --app APP_ID --next=\nFor help:\n  asc testflight groups --help\n",
-			wantCommand: "asc testflight groups",
-		},
-		{
 			name:        "version info with spaced empty optional include",
 			args:        []string{"versions", "info", "--version-id", "VERSION_ID", "--include", ""},
 			wantStderr:  "Error: unknown command `asc versions info`\nTry:\n  asc versions view --version-id VERSION_ID --include ''\nFor help:\n  asc versions --help\n",
@@ -1703,12 +1532,6 @@ func TestRun_CommonWrongCommandPathsRecoverInOneStep(t *testing.T) {
 			args:        []string{"reviewsubmissions", "list", "--app", "APP_ID", "--platform", ""},
 			wantStderr:  "Error: unknown command `asc reviewsubmissions list`\nTry:\n  asc review submissions list --app APP_ID --platform ''\nFor help:\n  asc --help\n",
 			wantCommand: "asc",
-		},
-		{
-			name:        "groups builds list with spaced empty optional next",
-			args:        []string{"testflight", "groups", "builds", "list", "--app", "APP_ID", "--next", ""},
-			wantStderr:  "Error: unknown command `asc testflight groups builds list`\nTry:\n  asc testflight groups list --app APP_ID --next ''\nFor help:\n  asc testflight groups --help\n",
-			wantCommand: "asc testflight groups",
 		},
 	}
 
@@ -2455,91 +2278,6 @@ func TestRun_NoArgsShowsHelpReturnsSuccess(t *testing.T) {
 	}
 }
 
-func TestRun_DisablesAutomaticSkillsUpdateCheckForSubcommand(t *testing.T) {
-	resetReportFlags(t)
-
-	origCheck := maybeScheduleSkillsUpdateCheck
-	t.Cleanup(func() { maybeScheduleSkillsUpdateCheck = origCheck })
-
-	called := make(chan struct{}, 1)
-	maybeScheduleSkillsUpdateCheck = func() {
-		select {
-		case called <- struct{}{}:
-		default:
-		}
-	}
-
-	_, _ = captureCommandOutput(t, func() {
-		code := Run([]string{"completion", "--shell", "bash"}, "1.0.0")
-		if code != ExitSuccess {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
-		}
-	})
-
-	select {
-	case <-called:
-		t.Fatal("automatic skills update check unexpectedly ran")
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
-func TestRun_SkipsSkillsUpdateCheckForRootInvocation(t *testing.T) {
-	resetReportFlags(t)
-
-	origCheck := maybeScheduleSkillsUpdateCheck
-	t.Cleanup(func() { maybeScheduleSkillsUpdateCheck = origCheck })
-
-	called := false
-	maybeScheduleSkillsUpdateCheck = func() {
-		called = true
-	}
-
-	_, _ = captureCommandOutput(t, func() {
-		code := Run([]string{}, "1.0.0")
-		if code != ExitSuccess {
-			t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
-		}
-	})
-
-	if called {
-		t.Fatal("expected skills update check to be skipped for root invocation")
-	}
-}
-
-func TestRun_SkipsSkillsUpdateCheckForHelpAndVersionInvocations(t *testing.T) {
-	origCheck := maybeScheduleSkillsUpdateCheck
-	t.Cleanup(func() { maybeScheduleSkillsUpdateCheck = origCheck })
-
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{name: "root help", args: []string{"--help"}},
-		{name: "subcommand help", args: []string{"completion", "--help"}},
-		{name: "version flag", args: []string{"--version"}},
-		{name: "version command", args: []string{"version"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resetReportFlags(t)
-			called := false
-			maybeScheduleSkillsUpdateCheck = func() {
-				called = true
-			}
-
-			_, _ = captureCommandOutput(t, func() {
-				if code := Run(tt.args, "1.0.0"); code != ExitSuccess {
-					t.Fatalf("Run() exit code = %d, want %d", code, ExitSuccess)
-				}
-			})
-			if called {
-				t.Fatalf("skills update check scheduled for %v", tt.args)
-			}
-		})
-	}
-}
-
 func TestShouldCancelRunContextAfterError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2579,25 +2317,6 @@ func TestShouldCancelRunContextAfterError(t *testing.T) {
 				t.Fatalf("shouldCancelRunContextAfterError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestShouldRunSkillsUpdateCheck(t *testing.T) {
-	for _, commandName := range []string{"asc", "asc completion", "asc install-skills", "asc version"} {
-		t.Run(commandName, func(t *testing.T) {
-			if shouldRunSkillsUpdateCheck(commandName, context.Background(), nil) {
-				t.Fatal("automatic external skills check must remain disabled")
-			}
-		})
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if shouldRunSkillsUpdateCheck("asc web auth login", ctx, context.Canceled) {
-		t.Fatal("automatic external skills check must remain disabled")
-	}
-	if shouldRunSkillsUpdateCheck("asc web auth login", context.Background(), fmt.Errorf("boom")) {
-		t.Fatal("automatic external skills check must remain disabled")
 	}
 }
 

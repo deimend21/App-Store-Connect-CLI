@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func TestScreenshotsUploadAppScopedModeRequiresVersionSelector(t *testing.T) {
@@ -115,6 +116,13 @@ func TestScreenshotsUploadAppScopedModeRejectsInvalidPlatformBeforeAuth(t *testi
 }
 
 func TestRunScreenshotsUploadVersionIDUsesResolvedPlatformWithoutExplicitPlatform(t *testing.T) {
+	for _, selector := range []string{"--version-id", "--version"} {
+		t.Run(selector, func(t *testing.T) { testScreenshotsUploadVersionIDPlatform(t, selector) })
+	}
+}
+
+func testScreenshotsUploadVersionIDPlatform(t *testing.T, selector string) {
+	t.Helper()
 	setupAuth(t)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
@@ -127,24 +135,14 @@ func TestRunScreenshotsUploadVersionIDUsesResolvedPlatformWithoutExplicitPlatfor
 	}
 	writePNG(t, filepath.Join(localeDir, "01-home.png"), 2880, 1800)
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersions/version-mac":
-			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-mac","attributes":{"platform":"MAC_OS","versionString":"2.0.0"},"relationships":{"app":{"data":{"type":"apps","id":"123456789"}}}}}`)
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersions/version-mac/appStoreVersionLocalizations":
-			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-en","attributes":{"locale":"en-US"}}],"links":{}}`)
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersionLocalizations/loc-en/appScreenshotSets":
-			return screenshotsUploadJSONResponse(http.StatusOK, `{"data":[],"links":{}}`)
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/appStoreVersions/version-mac", "include=app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-mac","attributes":{"platform":"MAC_OS","versionString":"2.0.0"},"relationships":{"app":{"data":{"type":"apps","id":"123456789"}}}}}`))
+	reg.Register(asctest.GET("/v1/appStoreVersions/version-mac/appStoreVersionLocalizations", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-en","attributes":{"locale":"en-US"}}],"links":{}}`))
+	reg.Register(asctest.GET("/v1/appStoreVersionLocalizations/loc-en/appScreenshotSets"),
+		asctest.JSON(http.StatusOK, `{"data":[],"links":{}}`))
 
 	var payload struct {
 		VersionID   string `json:"versionId"`
@@ -158,7 +156,7 @@ func TestRunScreenshotsUploadVersionIDUsesResolvedPlatformWithoutExplicitPlatfor
 		code := cmd.Run([]string{
 			"screenshots", "upload",
 			"--app", "123456789",
-			"--version-id", "version-mac",
+			selector, "version-mac",
 			"--path", workDir,
 			"--device-type", "DESKTOP",
 			"--dry-run",

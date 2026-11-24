@@ -2,14 +2,18 @@ package signing
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -32,10 +36,13 @@ func RedactRepoURL(raw string) string {
 	if trimmed == "" {
 		return ""
 	}
-	sanitized := urlsanitize.SanitizeURLForLog(trimmed, urlsanitize.DefaultSignedQueryKeys, urlsanitize.DefaultSensitiveQueryKeys)
-	if sanitized != trimmed {
-		// net/url parsed the remote and replaced any embedded userinfo.
-		return sanitized
+	if parsed, err := url.Parse(trimmed); err == nil && parsed.Opaque == "" {
+		// net/url parsed a hierarchical URL, so the sanitizer sees any
+		// userinfo and sensitive query values. An scp-style remote parses
+		// as an opaque URL whose credentials the sanitizer cannot see,
+		// even when rendering it changes the text (net/url lowercases the
+		// "scheme" that is really the user name).
+		return urlsanitize.SanitizeURLForLog(trimmed, urlsanitize.DefaultSignedQueryKeys, urlsanitize.DefaultSensitiveQueryKeys)
 	}
 	return redactRemoteUserinfo(trimmed)
 }
@@ -54,17 +61,26 @@ func redactRemoteUserinfo(raw string) string {
 	}
 	credentialsEnd := strings.LastIndex(authority, "@")
 	if credentialsEnd < 0 {
-		return raw
+		return withoutQueryOrFragment(raw)
 	}
 	if !hasScheme && !strings.Contains(authority[:credentialsEnd], ":") {
-		return raw
+		return withoutQueryOrFragment(raw)
 	}
 
-	redacted := redactedRepoUserinfo + authority[credentialsEnd:] + remainder
+	redacted := redactedRepoUserinfo + withoutQueryOrFragment(authority[credentialsEnd:]+remainder)
 	if hasScheme {
 		return scheme + "://" + redacted
 	}
 	return redacted
+}
+
+// withoutQueryOrFragment drops a query or fragment, which can carry a token
+// that the fallback above cannot parse and redact by key.
+func withoutQueryOrFragment(raw string) string {
+	if index := strings.IndexAny(raw, "?#"); index >= 0 {
+		return raw[:index]
+	}
+	return raw
 }
 
 // GitStore manages an encrypted git repository of signing assets.
@@ -518,68 +534,6 @@ func (g *GitStore) Cleanup() error {
 	return errors.Join(closeErr, removeErr)
 }
 
-// EnsureInsideDir checks that target stays inside baseDir and does not traverse
-// any symlinked parent directories.
-func EnsureInsideDir(baseDir, target string) error {
-	absBase, err := filepath.Abs(baseDir)
-	if err != nil {
-		return fmt.Errorf("resolve base dir: %w", err)
-	}
-	absTarget, err := filepath.Abs(target)
-	if err != nil {
-		return fmt.Errorf("resolve target path: %w", err)
-	}
-	if !strings.HasPrefix(absTarget, absBase+string(filepath.Separator)) && absTarget != absBase {
-		return fmt.Errorf("path %q escapes base directory %q", target, baseDir)
-	}
-
-	if absTarget == absBase {
-		return nil
-	}
-
-	parent := filepath.Dir(absTarget)
-	relParent, err := filepath.Rel(absBase, parent)
-	if err != nil {
-		return fmt.Errorf("resolve target parent: %w", err)
-	}
-
-	current := absBase
-	for _, component := range strings.Split(relParent, string(filepath.Separator)) {
-		if component == "" || component == "." {
-			continue
-		}
-
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			if os.IsNotExist(err) {
-				break
-			}
-			return fmt.Errorf("inspect path %q: %w", current, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %q uses symlink component %q", target, current)
-		}
-	}
-
-	return nil
-}
-
-// RejectSymlinkIfExists rejects writes through an existing symlink path.
-func RejectSymlinkIfExists(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing to write symlink %q (potential escape)", path)
-	}
-	return nil
-}
-
 // gitConfigProbeError marks a failure of the local Git configuration probe, so
 // callers can tell it apart from a failure of the Git command they asked for.
 type gitConfigProbeError struct {
@@ -776,9 +730,12 @@ func (g *GitStore) gitRun(ctx context.Context, dir string, args ...string) error
 	if err != nil {
 		return err
 	}
-	cmd.Stdout = os.Stderr // progress to stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	output := newRepoRedactingWriter(os.Stderr, g.RepoURL)
+	cmd.Stdout = output // progress to stderr
+	cmd.Stderr = output
+	err = cmd.Run()
+	_ = output.Flush()
+	return err
 }
 
 func (g *GitStore) gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
@@ -788,7 +745,126 @@ func (g *GitStore) gitOutput(ctx context.Context, dir string, args ...string) (s
 	}
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
+	output := newRepoRedactingWriter(os.Stderr, g.RepoURL)
+	cmd.Stderr = output
 	err = cmd.Run()
+	_ = output.Flush()
 	return stdout.String(), err
+}
+
+// repoRedactingWriter hides repository credentials in Git's own output, which
+// can echo the remote with its token. It holds back a partial line so a secret
+// split across writes is still caught.
+type repoRedactingWriter struct {
+	out      io.Writer
+	replacer *strings.Replacer
+	pending  []byte
+}
+
+func newRepoRedactingWriter(out io.Writer, repoURL string) *repoRedactingWriter {
+	raw := strings.TrimSpace(repoURL)
+	pairs := []string{}
+	if raw != "" {
+		pairs = append(pairs, raw, RedactRepoURL(raw))
+	}
+	secrets := repoURLSecrets(raw)
+	slices.SortFunc(secrets, func(a, b string) int { return cmp.Or(len(b)-len(a), strings.Compare(a, b)) })
+	for _, secret := range slices.Compact(secrets) {
+		if len(secret) >= 4 {
+			pairs = append(pairs, secret, redactedRepoUserinfo)
+			continue
+		}
+		// A short credential is replaced only where it sits in the URL, so a
+		// one-letter password does not erase that letter from all output.
+		pairs = append(pairs, ":"+secret+"@", ":"+redactedRepoUserinfo+"@", "//"+secret+"@", "//"+redactedRepoUserinfo+"@")
+		for _, end := range []string{"&", ";", "#", "/", "'", "\"", " ", "\r", "\n"} {
+			pairs = append(pairs, "="+secret+end, "="+redactedRepoUserinfo+end)
+		}
+	}
+	return &repoRedactingWriter{out: out, replacer: strings.NewReplacer(pairs...)}
+}
+
+func (w *repoRedactingWriter) Write(p []byte) (int, error) {
+	w.pending = append(w.pending, p...)
+	end := bytes.LastIndexAny(w.pending, "\r\n") + 1
+	if end == 0 {
+		return len(p), nil
+	}
+	if _, err := io.WriteString(w.out, w.replacer.Replace(string(w.pending[:end]))); err != nil {
+		return 0, err
+	}
+	w.pending = append(w.pending[:0], w.pending[end:]...)
+	return len(p), nil
+}
+
+// Flush writes any final partial line once the command has exited.
+func (w *repoRedactingWriter) Flush() error {
+	if len(w.pending) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(w.out, w.replacer.Replace(string(w.pending)))
+	w.pending = w.pending[:0]
+	return err
+}
+
+// repoURLSecrets returns the credentials embedded in a remote, in raw,
+// decoded, and escaped forms: the userinfo password (or a token used as the
+// user name) and the values of sensitive query keys.
+func repoURLSecrets(raw string) []string {
+	var values []string
+	_, rest, hasScheme := strings.Cut(raw, "://")
+	if !hasScheme {
+		rest = raw
+	}
+	authority := rest
+	if index := strings.IndexAny(rest, "/?#"); index >= 0 {
+		authority = rest[:index]
+	}
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		user, password, hasPassword := strings.Cut(authority[:at], ":")
+		if hasPassword {
+			values = append(values, password)
+		} else if hasScheme {
+			values = append(values, user)
+		}
+	}
+
+	_, query, _ := strings.Cut(raw, "?")
+	query, _, _ = strings.Cut(query, "#")
+	var queryValues []string
+	redactAll := false
+	for _, pair := range strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' }) {
+		key, value, _ := strings.Cut(pair, "=")
+		if decoded, err := url.QueryUnescape(key); err == nil {
+			key = decoded
+		}
+		key = strings.ToLower(key)
+		if _, ok := urlsanitize.DefaultSignedQueryKeys[key]; ok && value != "" {
+			redactAll = true
+		}
+		if _, ok := urlsanitize.DefaultSensitiveQueryKeys[key]; ok {
+			values = append(values, value)
+		}
+		queryValues = append(queryValues, value)
+	}
+	if redactAll {
+		values = append(values, queryValues...)
+	}
+
+	var secrets []string
+	for _, value := range values {
+		forms := []string{value, url.QueryEscape(value), url.PathEscape(value)}
+		if decoded, err := url.PathUnescape(value); err == nil {
+			forms = append(forms, decoded)
+		}
+		if decoded, err := url.QueryUnescape(value); err == nil {
+			forms = append(forms, decoded)
+		}
+		for _, form := range forms {
+			if form != "" {
+				secrets = append(secrets, form)
+			}
+		}
+	}
+	return secrets
 }

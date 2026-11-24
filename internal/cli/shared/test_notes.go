@@ -222,7 +222,7 @@ func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildI
 
 	resp, err := client.GetBetaBuildLocalizations(
 		ctx, buildID,
-		asc.WithBetaBuildLocalizationsLimit(200),
+		asc.Limit[asc.BetaBuildLocalizationsOption](200),
 	)
 	if err != nil {
 		return nil, err
@@ -244,15 +244,16 @@ func UpsertBetaBuildLocalization(ctx context.Context, client *asc.Client, buildI
 		if localizationID == "" {
 			return nil, fmt.Errorf("missing localization ID for locale %q", localeValue)
 		}
-		attrs := asc.BetaBuildLocalizationAttributes{
-			WhatsNew: notesValue,
+		var attrs asc.BetaBuildLocalizationUpdateAttributes
+		if notesValue != "" {
+			attrs.WhatsNew = &notesValue
 		}
 		return client.UpdateBetaBuildLocalization(ctx, localizationID, attrs)
 	}
 
-	attrs := asc.BetaBuildLocalizationAttributes{
-		Locale:   localeValue,
-		WhatsNew: notesValue,
+	attrs := asc.BetaBuildLocalizationCreateAttributes{Locale: localeValue}
+	if notesValue != "" {
+		attrs.WhatsNew = &notesValue
 	}
 	return client.CreateBetaBuildLocalization(ctx, buildID, attrs)
 }
@@ -277,7 +278,7 @@ func ensureBetaAppLocalization(ctx context.Context, client *asc.Client, buildID,
 
 	// Apple requires only the locale and the app relationship here; every
 	// other attribute belongs to the operator's App Store Connect content.
-	attrs := asc.BetaAppLocalizationAttributes{Locale: locale}
+	attrs := asc.BetaAppLocalizationCreateAttributes{Locale: locale}
 	if _, err := client.CreateBetaAppLocalization(ctx, resolvedAppID, attrs); err != nil {
 		createErr := fmt.Errorf("failed to create TestFlight app localization for locale %q: %w", locale, err)
 		if !errors.Is(err, asc.ErrConflict) {
@@ -325,7 +326,7 @@ func hasBetaAppLocalization(ctx context.Context, client *asc.Client, appID, loca
 		ctx,
 		asc.WithBetaAppLocalizationAppIDs([]string{appID}),
 		asc.WithBetaAppLocalizationLocales([]string{locale}),
-		asc.WithBetaAppLocalizationsLimit(200),
+		asc.Limit[asc.BetaAppLocalizationsOption](200),
 	)
 	if err != nil {
 		return false, fmt.Errorf("failed to look up TestFlight app localization %q for app %q: %w", locale, appID, err)

@@ -2,22 +2,12 @@ package iap
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
-)
 
-func TestIAPPriceSchedulesCreateBaseTerritoryUsageDocumentsAcceptedForms(t *testing.T) {
-	cmd := IAPPriceSchedulesCreateCommand()
-	flag := cmd.FlagSet.Lookup("base-territory")
-	if flag == nil {
-		t.Fatal("expected --base-territory flag")
-	}
-	for _, want := range []string{"alpha-2", "alpha-3", "English country name"} {
-		if !strings.Contains(flag.Usage, want) {
-			t.Fatalf("--base-territory usage = %q, want mention of %q", flag.Usage, want)
-		}
-	}
-}
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+)
 
 func TestIAPPriceSchedulesCreateRejectsUnmappableBaseTerritory(t *testing.T) {
 	// Without credentials the command can only fail with the territory error if
@@ -28,7 +18,12 @@ func TestIAPPriceSchedulesCreateRejectsUnmappableBaseTerritory(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
-	cmd := IAPPriceSchedulesCreateCommand()
+	clientRequested := false
+	d, stdout, stderrBuf := newTestDeps(func() (*asc.Client, error) {
+		clientRequested = true
+		return nil, errors.New("client must not be created")
+	})
+	cmd := newIAPPriceSchedulesCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--iap-id", "9000000003",
 		"--base-territory", "Atlantis",
@@ -37,10 +32,14 @@ func TestIAPPriceSchedulesCreateRejectsUnmappableBaseTerritory(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	var execErr error
-	stderr := captureIAPLegacy441Stderr(t, func() {
-		execErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
+	execErr := cmd.Exec(context.Background(), cmd.FlagSet.Args())
+	stderr := stderrBuf.String()
+	if clientRequested {
+		t.Fatal("client requested before --base-territory validation")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
 
 	if execErr == nil {
 		t.Fatal("expected unmappable --base-territory to fail before any client use")

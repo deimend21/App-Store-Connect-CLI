@@ -1,15 +1,11 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"flag"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -46,7 +42,7 @@ func TestAdsPlatformAppCampaignReportRequest(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			installDefaultTransport(t, adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			transport := adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				if req.Method != http.MethodPost || req.URL.Host != "api.ads.apple.com" || req.URL.Path != test.path || req.URL.RawQuery != "" {
 					t.Fatalf("request = %s %s", req.Method, req.URL.String())
 				}
@@ -60,18 +56,13 @@ func TestAdsPlatformAppCampaignReportRequest(t *testing.T) {
 				if !reflect.DeepEqual(body, expectedBody) {
 					t.Fatalf("request body = %#v, want %#v", body, expectedBody)
 				}
-				return adsJSONResponse(200, `{"result":{"row":[{"campaignId":"123"}]},"pagination":{"totalResults":1}}`), nil
-			}))
-
-			root := RootCommand("dev")
-			if err := root.Parse([]string{"ads", "reports", "apps", test.command, "--file", payloadPath, "--output", "json"}); err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Run(context.Background()); err != nil {
-					t.Fatalf("run error: %v", err)
-				}
+				return adsJSONResponse(`{"result":{"row":[{"campaignId":"123"}]},"pagination":{"totalResults":1}}`), nil
 			})
+
+			stdout, stderr, err := runRootWithHTTPTransport(t, nil, transport, "ads", "reports", "apps", test.command, "--file", payloadPath, "--output", "json")
+			if err != nil {
+				t.Fatalf("run error: %v", err)
+			}
 			if stderr != "" {
 				t.Fatalf("stderr = %q", stderr)
 			}
@@ -103,7 +94,7 @@ func TestAdsPlatformSearchTermPopularityUsesRuntimeSortKey(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	installDefaultTransport(t, adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	transport := adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodPost || req.URL.Host != "api.ads.apple.com" || req.URL.Path != "/v1/insights/apps/search-term-popularity/query" {
 			t.Fatalf("request = %s %s", req.Method, req.URL.String())
 		}
@@ -119,18 +110,13 @@ func TestAdsPlatformSearchTermPopularityUsesRuntimeSortKey(t *testing.T) {
 		if _, ok := body.Sorting[0]["order"]; ok {
 			t.Fatalf("sorting sent documentation-only order key: %#v", body.Sorting)
 		}
-		return adsJSONResponse(200, `{"result":[],"pagination":{"totalResults":0}}`), nil
-	}))
-
-	root := RootCommand("dev")
-	if err := root.Parse([]string{"ads", "insights", "search-term-popularity", "find", "--file", payloadPath, "--output", "json"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
+		return adsJSONResponse(`{"result":[],"pagination":{"totalResults":0}}`), nil
 	})
+
+	stdout, stderr, err := runRootWithHTTPTransport(t, nil, transport, "ads", "insights", "search-term-popularity", "find", "--file", payloadPath, "--output", "json")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q", stderr)
 	}
@@ -147,7 +133,7 @@ func TestAdsPlatformChangeHistoryDetailRequest(t *testing.T) {
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
 
 	requests := 0
-	installDefaultTransport(t, adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	transport := adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requests++
 		if req.Method != http.MethodGet || req.URL.Path != "/v1/change-history/Campaign.444555666.txn_abc123def456" {
 			t.Fatalf("request = %s %s", req.Method, req.URL.String())
@@ -157,24 +143,19 @@ func TestAdsPlatformChangeHistoryDetailRequest(t *testing.T) {
 		}
 		switch got := req.URL.Query().Get("offset"); got {
 		case "0":
-			return adsJSONResponse(200, `{"dataType":"ChangeDetail","pagination":{"totalCount":3,"offset":0,"pageSize":2},"result":[{"detailId":"Campaign.444555666.txn_abc123def456","details":[{"transactionId":"txn_abc123def456","changes":[{"field":"name"},{"field":"status"}]}]}]}`), nil
+			return adsJSONResponse(`{"dataType":"ChangeDetail","pagination":{"totalCount":3,"offset":0,"pageSize":2},"result":[{"detailId":"Campaign.444555666.txn_abc123def456","details":[{"transactionId":"txn_abc123def456","changes":[{"field":"name"},{"field":"status"}]}]}]}`), nil
 		case "2":
-			return adsJSONResponse(200, `{"dataType":"ChangeDetail","pagination":{"totalCount":3,"offset":2,"pageSize":2},"result":[{"detailId":"Campaign.444555666.txn_abc123def456","details":[{"transactionId":"txn_abc123def456","changes":[{"field":"dailyBudget"}]}]}]}`), nil
+			return adsJSONResponse(`{"dataType":"ChangeDetail","pagination":{"totalCount":3,"offset":2,"pageSize":2},"result":[{"detailId":"Campaign.444555666.txn_abc123def456","details":[{"transactionId":"txn_abc123def456","changes":[{"field":"dailyBudget"}]}]}]}`), nil
 		default:
 			t.Fatalf("offset = %q", got)
 		}
 		return nil, nil
-	}))
-
-	root := RootCommand("dev")
-	if err := root.Parse([]string{"ads", "change-history", "view", "--detail-id", "Campaign.444555666.txn_abc123def456", "--limit", "2", "--paginate", "--output", "json"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
 	})
+
+	stdout, stderr, err := runRootWithHTTPTransport(t, nil, transport, "ads", "change-history", "view", "--detail-id", "Campaign.444555666.txn_abc123def456", "--limit", "2", "--paginate", "--output", "json")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 	if stderr != "" {
 		t.Fatalf("stderr = %q", stderr)
 	}
@@ -193,53 +174,5 @@ func TestAdsPlatformChangeHistoryDetailRequest(t *testing.T) {
 	}
 	if len(response.Result) != 1 || len(response.Result[0].Details) != 1 || len(response.Result[0].Details[0].Changes) != 3 {
 		t.Fatalf("stdout did not aggregate nested changes: %s", stdout)
-	}
-}
-
-func TestAdsPlatformRecommendationApplyRequiresConfirmBeforeFileAuthOrNetwork(t *testing.T) {
-	isolateAdsGuideEnv(t)
-	t.Setenv("ASC_ADS_BYPASS_KEYCHAIN", "1")
-	t.Setenv("ASC_ADS_ACCESS_TOKEN", "")
-	t.Setenv("ASC_ADS_AD_ACCOUNT_ID", "")
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
-	installDefaultTransport(t, adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected network request: %s %s", req.Method, req.URL.String())
-		return nil, nil
-	}))
-
-	root := RootCommand("dev")
-	if err := root.Parse([]string{"ads", "recommendations", "daily-budgets", "apply", "--file", filepath.Join(t.TempDir(), "missing.json")}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		runErr = root.Run(context.Background())
-	})
-	if !errors.Is(runErr, flag.ErrHelp) || !strings.Contains(stderr, "--confirm is required") {
-		t.Fatalf("run error = %v stderr = %q, want confirm usage error", runErr, stderr)
-	}
-}
-
-func TestAdsPlatformReportRequiresFileBeforeAuthOrNetwork(t *testing.T) {
-	isolateAdsGuideEnv(t)
-	t.Setenv("ASC_ADS_BYPASS_KEYCHAIN", "1")
-	t.Setenv("ASC_ADS_ACCESS_TOKEN", "")
-	t.Setenv("ASC_ADS_AD_ACCOUNT_ID", "")
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
-	installDefaultTransport(t, adsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected network request: %s %s", req.Method, req.URL.String())
-		return nil, nil
-	}))
-
-	root := RootCommand("dev")
-	if err := root.Parse([]string{"ads", "insights", "impression-share", "find"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	var runErr error
-	_, stderr := captureOutput(t, func() {
-		runErr = root.Run(context.Background())
-	})
-	if !errors.Is(runErr, flag.ErrHelp) || !strings.Contains(stderr, "--file is required") {
-		t.Fatalf("run error = %v stderr = %q, want file usage error", runErr, stderr)
 	}
 }

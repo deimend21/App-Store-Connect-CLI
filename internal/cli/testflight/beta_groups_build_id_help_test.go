@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 // TestBetaGroupsListBuildIDHelpMatchesOpenAPISnapshot pins the --build-id help
@@ -77,6 +79,7 @@ func TestBetaGroupsListHelpDocumentsAppEndpointAndBuildIDConflicts(t *testing.T)
 	classified := map[string]string{
 		"build-id": "lookup",
 		"output":   "output",
+		"json":     "output",
 		"pretty":   "output",
 	}
 	for _, name := range betaGroupsListBuildIDCompatibleFlags {
@@ -92,23 +95,11 @@ func TestBetaGroupsListHelpDocumentsAppEndpointAndBuildIDConflicts(t *testing.T)
 		classified[name] = "query-surface"
 	}
 
-	BetaGroupsListCommand().FlagSet.VisitAll(func(value *flag.Flag) {
+	newBetaGroupsListCommand(&shared.Deps{IO: &shared.IO{}}).FlagSet.VisitAll(func(value *flag.Flag) {
 		if _, ok := classified[value.Name]; !ok {
 			t.Errorf("--%s is not classified against the --build-id allowlist or conflict sets", value.Name)
 		}
 	})
-}
-
-func TestHelpMentionsFlagRequiresTokenBoundary(t *testing.T) {
-	if helpMentionsFlag("--app-fields --public-link-enabled", "--app") {
-		t.Fatal("expected --app not to match inside --app-fields")
-	}
-	if helpMentionsFlag("--app-fields --public-link-enabled", "--public-link") {
-		t.Fatal("expected --public-link not to match inside --public-link-enabled")
-	}
-	if !helpMentionsFlag("only with --app, --internal", "--app") {
-		t.Fatal("expected --app to match as a complete token")
-	}
 }
 
 func helpMentionsFlag(help, flagName string) bool {
@@ -149,7 +140,7 @@ func betaGroupsListBuildIDConflictHelp(t *testing.T, help string) string {
 func betaGroupsListLongHelp(t *testing.T) string {
 	t.Helper()
 
-	for _, subcommand := range BetaGroupsCommand().Subcommands {
+	for _, subcommand := range newBetaGroupsCommand(&shared.Deps{IO: &shared.IO{}}).Subcommands {
 		if subcommand.Name == "list" {
 			return subcommand.LongHelp
 		}

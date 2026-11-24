@@ -175,10 +175,10 @@ func TestPrintTableAndMarkdown_RepresentativeResponses(t *testing.T) {
 		{
 			name: "feedback with screenshots",
 			data: &FeedbackResponse{
-				Data: []Resource[FeedbackAttributes]{
+				Data: []Resource[BetaFeedbackScreenshotSubmissionAttributes]{
 					{
 						ID: "1",
-						Attributes: FeedbackAttributes{
+						Attributes: BetaFeedbackScreenshotSubmissionAttributes{
 							CreatedDate: "2026-01-20T00:00:00Z",
 							Email:       "tester@example.com",
 							Comment:     "Looks good",
@@ -255,10 +255,10 @@ func TestPrintTableAndMarkdown_RepresentativeResponses(t *testing.T) {
 
 func TestPrintTableAndMarkdown_StripsControlChars(t *testing.T) {
 	resp := &FeedbackResponse{
-		Data: []Resource[FeedbackAttributes]{
+		Data: []Resource[BetaFeedbackScreenshotSubmissionAttributes]{
 			{
 				ID: "1",
-				Attributes: FeedbackAttributes{
+				Attributes: BetaFeedbackScreenshotSubmissionAttributes{
 					CreatedDate: "2026-01-20T00:00:00Z",
 					Email:       "test\x1b[2J@example.com",
 					Comment:     "ok\x1b[31mRED\x1b[0m",
@@ -344,10 +344,10 @@ func TestPrintTableAndMarkdown_UnregisteredTypeFallsBackToJSON(t *testing.T) {
 
 func TestPrintPrettyJSON_Indentation(t *testing.T) {
 	resp := &ReviewsResponse{
-		Data: []Resource[ReviewAttributes]{
+		Data: []Resource[CustomerReviewAttributes]{
 			{
 				ID: "1",
-				Attributes: ReviewAttributes{
+				Attributes: CustomerReviewAttributes{
 					CreatedDate: "2026-01-20T00:00:00Z",
 					Rating:      5,
 					Title:       "Great app",
@@ -480,6 +480,20 @@ func TestPrintTable_ExperimentTreatmentLocalizationUploadResultUsesExperimentLoc
 			{FileName: "shot.png", AssetID: "SHOT_123", State: "COMPLETE"},
 		},
 	}, "Localization ID", "TLOC_123", "SET_123", "APP_IPHONE_65", "shot.png", "SHOT_123")
+}
+
+func TestPrintTable_ExperimentTreatmentLocalizationPreviewUploadResultShowsFailures(t *testing.T) {
+	assertRenderedNonJSONContains(t, PrintTable, &ExperimentTreatmentLocalizationPreviewUploadResult{
+		ExperimentTreatmentLocalizationID: "TLOC_123",
+		SetID:                             "SET_123",
+		PreviewType:                       "IPHONE_65",
+		Results: []AssetUploadResultItem{
+			{FileName: "preview.mov", AssetID: "PREVIEW_123", State: "COMPLETE"},
+		},
+		Failures: []AssetUploadFailureItem{
+			{FileName: "broken.mov", Error: "upload refused"},
+		},
+	}, "Localization ID", "TLOC_123", "SET_123", "IPHONE_65", "preview.mov", "PREVIEW_123", "broken.mov", "upload refused")
 }
 
 func TestPrintTable_SkippedAssetUploadResultShowsSkippedState(t *testing.T) {

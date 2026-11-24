@@ -27,6 +27,8 @@ const (
 	NotaryBaseURL = "https://appstoreconnect.apple.com"
 	// notarySubmissionsPath is the submissions endpoint path.
 	notarySubmissionsPath = "/notary/v2/submissions"
+	// notaryLogMaxBytes bounds a developer log held in memory.
+	notaryLogMaxBytes = 64 << 20
 	// notaryS3Region is the AWS region for the notary S3 bucket.
 	notaryS3Region = "us-west-2"
 	// notaryS3MaxSingleUploadBytes is the max size for a single PutObject upload.
@@ -174,8 +176,15 @@ func (c *Client) resolveNotaryBaseURL() string {
 
 // newNotaryRequest creates a new HTTP request targeting the Notary API.
 func (c *Client) newNotaryRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	if c.enterprise {
+		return nil, fmt.Errorf("notarization: %w", ErrEnterpriseProgramAPIUnsupported)
+	}
 	if err := validateAPIPath(path); err != nil {
 		return nil, err
+	}
+	if c.bearer != nil {
+		// A notary token has its own scope; only the private key can sign one.
+		return nil, ErrNotaryNeedsPrivateKey
 	}
 
 	token, err := GenerateNotaryJWT(c.keyID, c.issuerID, c.privateKey)
@@ -308,6 +317,75 @@ func (c *Client) GetNotarizationLogs(ctx context.Context, submissionID string) (
 	return &response, nil
 }
 
+// DownloadNotarizationLog fetches the developer log JSON from the presigned URL
+// in a logs response. The request carries no credentials and follows no
+// redirects.
+func (c *Client) DownloadNotarizationLog(ctx context.Context, logURL string) ([]byte, error) {
+	if err := validateNotaryLogURL(logURL); err != nil {
+		return nil, fmt.Errorf("notarization log download: %w", err)
+	}
+
+	resp, err := c.doStreamNoAuth(ctx, logURL, "application/json")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, notaryLogMaxBytes+1))
+	if err != nil {
+		return nil, newSanitizedNoAuthStreamError("notarization log download", logURL, err)
+	}
+	if len(data) > notaryLogMaxBytes {
+		return nil, fmt.Errorf("notarization log download: log exceeds the %d-byte limit", notaryLogMaxBytes)
+	}
+	if !json.Valid(data) {
+		return nil, errors.New("notarization log download: response is not valid JSON")
+	}
+	return data, nil
+}
+
+// validateNotaryLogURL requires HTTPS on an Apple host, or a signed URL on an
+// AWS host. Its errors never include the URL's query, which is a capability.
+func validateNotaryLogURL(logURL string) error {
+	if strings.TrimSpace(logURL) == "" {
+		return errors.New("empty developer log URL")
+	}
+	parsedURL, err := url.Parse(logURL)
+	if err != nil {
+		// url.Error repeats the whole URL, so the cause is dropped.
+		return errors.New("invalid developer log URL")
+	}
+	if parsedURL.Scheme != "https" {
+		return fmt.Errorf("rejected developer log URL with insecure scheme %q (expected https)", parsedURL.Scheme)
+	}
+	host := strings.ToLower(parsedURL.Hostname())
+	if parsedURL.User != nil {
+		return fmt.Errorf("rejected developer log URL for host %q with embedded credentials", host)
+	}
+	if port := parsedURL.Port(); port != "" && port != "443" {
+		return fmt.Errorf("rejected developer log URL for host %q on port %q", host, port)
+	}
+	if isAllowedAnalyticsHost(host) {
+		return nil
+	}
+	if isAllowedNotaryLogAWSHost(host) {
+		if !hasSignedQuery(parsedURL.Query()) {
+			return fmt.Errorf("rejected developer log URL from AWS host %q without signed query", host)
+		}
+		return nil
+	}
+	return fmt.Errorf("rejected developer log URL from untrusted host %q", host)
+}
+
+func isAllowedNotaryLogAWSHost(host string) bool {
+	for _, allowed := range []string{"amazonaws.com", "cloudfront.net"} {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
+}
+
 // ListNotarizations retrieves previous notarization submissions.
 func (c *Client) ListNotarizations(ctx context.Context) (*NotarySubmissionsListResponse, error) {
 	data, err := c.doNotary(ctx, "GET", notarySubmissionsPath, nil)
@@ -321,49 +399,6 @@ func (c *Client) ListNotarizations(ctx context.Context) (*NotarySubmissionsListR
 	}
 
 	return &response, nil
-}
-
-// ComputeFileSHA256 computes the SHA-256 hex digest of an opened file and
-// rewinds it so the same descriptor can be uploaded.
-func ComputeFileSHA256(ctx context.Context, file io.ReadSeeker) (string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-
-	h := sha256.New()
-	buffer := make([]byte, 64*1024)
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-
-		n, err := file.Read(buffer)
-		if n > 0 {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return "", ctxErr
-			}
-			if _, writeErr := h.Write(buffer[:n]); writeErr != nil {
-				return "", fmt.Errorf("hash file: %w", writeErr)
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return "", fmt.Errorf("read file: %w", err)
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", fmt.Errorf("rewind file: %w", err)
-	}
-
-	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // UploadToS3 uploads file data to the S3 bucket using AWS Signature V4 authentication.

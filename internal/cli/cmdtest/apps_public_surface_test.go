@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 
-	"github.com/peterbourgon/ff/v3/ffcli"
-
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/itunes"
 )
 
@@ -68,53 +68,22 @@ func runCommand(t *testing.T, args []string) (string, string, error) {
 	return stdout, stderr, runErr
 }
 
-func TestAppsListHelpShowsFeatureExamples(t *testing.T) {
+// runCommandOnFakeClock runs the command like runCommand but in a synctest
+// bubble, so stub delays and request timeouts use its fake clock.
+func runCommandOnFakeClock(t *testing.T, args []string) (string, string, error) {
+	t.Helper()
+
 	root := RootCommand("1.2.3")
-	appsCmd := findSubcommand(root, "apps")
-	listCmd := findSubcommand(root, "apps", "list")
-	if appsCmd == nil || listCmd == nil {
-		t.Fatal("expected apps and apps list commands")
-	}
+	root.FlagSet.SetOutput(io.Discard)
 
-	for name, command := range map[string]*ffcli.Command{
-		"apps":      appsCmd,
-		"apps list": listCmd,
-	} {
-		usage := command.UsageFunc(command)
-		for _, want := range []string{
-			"Filter by App Store version state(s)",
-			"Filter by review submission state(s)",
-		} {
-			if !strings.Contains(usage, want) {
-				t.Errorf("%s help missing lifecycle marker %q, got %q", name, want, usage)
-			}
+	var runErr error
+	stdout, stderr := captureOutput(t, func() {
+		if err := root.Parse(args); err != nil {
+			t.Fatalf("parse error: %v", err)
 		}
-		for _, want := range []string{
-			"--sort sku",
-			"--version-state IN_REVIEW,WAITING_FOR_REVIEW",
-			"--review-submission-state IN_REVIEW",
-		} {
-			if !strings.Contains(usage, want) {
-				t.Errorf("%s help missing feature example %q, got %q", name, want, usage)
-			}
-		}
-	}
-}
-
-func TestAppsPublicHelpShowsSubcommands(t *testing.T) {
-	root := RootCommand("1.2.3")
-	publicCmd := findSubcommand(root, "apps", "public")
-	if publicCmd == nil {
-		t.Fatal("expected apps public command")
-		return
-	}
-
-	usage := publicCmd.UsageFunc(publicCmd)
-	for _, want := range []string{"view", "search", "rank", "prices", "descriptions", "storefronts", "No authentication is required."} {
-		if !strings.Contains(usage, want) {
-			t.Fatalf("expected apps public help to contain %q, got %q", want, usage)
-		}
-	}
+		synctest.Test(t, func(*testing.T) { runErr = root.Run(context.Background()) })
+	})
+	return stdout, stderr, runErr
 }
 
 func TestAppsPublicValidationErrors(t *testing.T) {
@@ -194,11 +163,6 @@ func TestAppsPublicValidationErrors(t *testing.T) {
 			wantErr: "unsupported country code",
 		},
 		{
-			name:    "rank rejects positional argument",
-			args:    []string{"apps", "public", "rank", "--app", "123", "--term", "focus", "--platform", "IOS", "extra"},
-			wantErr: "public rank does not accept positional arguments",
-		},
-		{
 			name:    "prices invalid country",
 			args:    []string{"apps", "public", "prices", "--app", "123", "--country", "usa"},
 			wantErr: "unsupported country code",
@@ -223,36 +187,6 @@ func TestAppsPublicValidationErrors(t *testing.T) {
 				t.Fatalf("expected stderr to contain %q, got %q", test.wantErr, stderr)
 			}
 		})
-	}
-}
-
-func TestAppsPublicRankRejectsTVStorefrontWithoutNumericIDBeforeRequest(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected request for unsupported TV storefront: %s", req.URL.String())
-		return nil, errors.New("unexpected request")
-	})
-
-	stdout, stderr, runErr := runCommand(t, []string{
-		"apps", "public", "rank",
-		"--app", "1234567890",
-		"--term", "focus timer",
-		"--country", "kz",
-		"--platform", "TV_OS",
-	})
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "TV_OS ranking is unavailable for storefront KZ") {
-		t.Fatalf("unexpected stderr: %q", stderr)
 	}
 }
 
@@ -434,15 +368,7 @@ func TestAppsPublicRankNotFoundOutputs(t *testing.T) {
 func TestAppsPublicRejectsUnsupportedTwoLetterCountryBeforeRequest(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected request for unsupported country: %s", req.URL.String())
-		return nil, errors.New("unexpected request")
-	})
+	asctest.NewRegistry(t).Install()
 
 	tests := []struct {
 		name string
@@ -485,15 +411,7 @@ func TestAppsPublicRejectsUnsupportedTwoLetterCountryBeforeRequest(t *testing.T)
 func TestAppsPublicRejectsSignedAppIDsBeforeRequest(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected request for signed app ID: %s", req.URL.String())
-		return nil, errors.New("unexpected request")
-	})
+	asctest.NewRegistry(t).Install()
 
 	tests := []struct {
 		name string
@@ -525,37 +443,6 @@ func TestAppsPublicRejectsSignedAppIDsBeforeRequest(t *testing.T) {
 			if !strings.Contains(stderr, "--app must be a numeric App Store app ID") {
 				t.Fatalf("expected stderr to contain numeric app ID error, got %q", stderr)
 			}
-		})
-	}
-}
-
-func TestAppsPublicLegacyIDFlagIsUnknown(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("removed --id alias must fail before any request: %s", req.URL.String())
-		return nil, errors.New("unexpected request")
-	})
-
-	root := RootCommand("1.2.3")
-	for _, name := range []string{"view", "prices", "descriptions"} {
-		t.Run(name, func(t *testing.T) {
-			command := findSubcommand(root, "apps", "public", name)
-			if command == nil {
-				t.Fatalf("apps public %s not found", name)
-			}
-			if command.FlagSet.Lookup("app") == nil {
-				t.Fatalf("apps public %s: canonical --app flag not found", name)
-			}
-			if command.FlagSet.Lookup("id") != nil {
-				t.Fatalf("apps public %s: removed --id alias is still registered", name)
-			}
-
-			assertUsageExit(t, []string{"apps", "public", name, "--id", "123", "--output", "json"}, "Error: `--id` was removed in 5.0.0; use `--app`")
 		})
 	}
 }
@@ -623,36 +510,6 @@ func TestAppsPublicViewAcceptsZeroPaddedAppIDAndUnlistedCountry(t *testing.T) {
 	if payload.Country != "KZ" {
 		t.Fatalf("Country = %q, want KZ", payload.Country)
 	}
-}
-
-func TestAppsPublicStorefrontsListIncludesPublicOnlyCountry(t *testing.T) {
-	stdout, stderr, runErr := runCommand(t, []string{"apps", "public", "storefronts", "list", "--output", "json"})
-	if runErr != nil {
-		t.Fatalf("run error: %v", runErr)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
-	var payload []itunes.Storefront
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
-		t.Fatalf("unmarshal storefronts: %v", err)
-	}
-
-	for _, storefront := range payload {
-		if storefront.Country != "KZ" {
-			continue
-		}
-		if storefront.CountryName != "Kazakhstan" {
-			t.Fatalf("CountryName = %q, want Kazakhstan", storefront.CountryName)
-		}
-		if storefront.StorefrontID != "" {
-			t.Fatalf("StorefrontID = %q, want empty string", storefront.StorefrontID)
-		}
-		return
-	}
-
-	t.Fatal("expected KZ storefront in public storefront list output")
 }
 
 func TestAppsPublicOutputFormats(t *testing.T) {

@@ -8,16 +8,26 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	webcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/web"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/uploadlock"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
-var testConfigPath string
+var (
+	testConfigPath string
+	testTempDir    string
+)
+
+// testTempDirVariable names the folder of the test binary that started this
+// one. Helper processes re-run the binary and exit from inside a test, which
+// skips the cleanup at the end of TestMain, so their folder goes inside it.
+const testTempDirVariable = "ASC_CMDTEST_TEMP_DIR"
 
 func TestMain(m *testing.M) {
-	tempDir, err := os.MkdirTemp("", "asc-cmdtest-*")
+	tempDir, err := os.MkdirTemp(os.Getenv(testTempDirVariable), "asc-cmdtest-*")
 	if err != nil {
 		panic(err)
 	}
+	testTempDir = tempDir
 	testConfigPath = filepath.Join(tempDir, "config.json")
 	testStdin, err := os.Open(os.DevNull)
 	if err != nil {
@@ -28,8 +38,11 @@ func TestMain(m *testing.M) {
 	restoreControllingTTY := webcli.DisableControllingTTYForTesting()
 	// The core web package tests the default and rate-limit behavior.
 	restorePacing := webcore.DisableRequestPacingForTesting()
-	restoreAssetLibraryPoll := asc.SetAssetLibraryProcessingPollIntervalForTest(time.Millisecond)
+	restoreAssetLibraryPoll := asc.SetMediaPollIntervalsForTest(time.Millisecond, time.Millisecond)
+	// The upload lock lives under the OS account's home, not HOME.
+	restoreUploadLockDir := uploadlock.SetDirForTest(filepath.Join(tempDir, "upload-lock"))
 
+	_ = os.Setenv(testTempDirVariable, tempDir)
 	_ = os.Setenv("ASC_CONFIG_PATH", testConfigPath)
 	_ = os.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	_ = os.Setenv("ASC_MAX_RETRIES", "0")
@@ -43,6 +56,7 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
+	restoreUploadLockDir()
 	restoreAssetLibraryPoll()
 	restorePacing()
 	restoreControllingTTY()

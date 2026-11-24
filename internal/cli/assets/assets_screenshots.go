@@ -5,13 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/assetlibrary"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -59,6 +59,9 @@ type ScreenshotSetUploadOptions[T any] struct {
 	Path           string
 	DeviceType     string
 	Replace        bool
+	// RequireConfirm checks --confirm, which Replace requires. It runs after
+	// the required flags and before any file is read.
+	RequireConfirm func() error
 	// InspectCommand is the owner-specific read-only command shown when the
 	// target screenshot set is full or has ambiguous checksum matches.
 	InspectCommand string
@@ -76,6 +79,7 @@ type ScreenshotSetUploadOptions[T any] struct {
 }
 
 type screenshotUploadConfig[T any] struct {
+	Deps           *shared.Deps
 	Client         *asc.Client
 	LocalizationID string
 	DisplayType    string
@@ -107,16 +111,20 @@ type screenshotUploadCommandOptions struct {
 	Confirm               bool
 	DryRun                bool
 	MaxScreenshots        int
+	AssetLibrary          bool
+	PlacementGroup        string
 }
 
 type screenshotUploadDependencies struct {
-	GetClient        func() (*asc.Client, error)
-	RequestContext   func(context.Context) (context.Context, context.CancelFunc)
 	UploadScreenshot func(context.Context, *asc.Client, string, string, []string, bool, bool, bool) (asc.AppScreenshotUploadResult, error)
 	ExecuteUpload    func(context.Context, screenshotUploadConfig[asc.AppScreenshotUploadResult], string) (asc.AppScreenshotUploadResult, error)
+	// AcquireUploadLock waits for other asc uploads on this machine; nil
+	// uploads without waiting.
+	AcquireUploadLock func(context.Context) (func(), error)
 }
 
 type screenshotUploadFanoutConfig struct {
+	Deps         *shared.Deps
 	Client       *asc.Client
 	AppID        string
 	Version      string
@@ -193,6 +201,28 @@ func resolveScreenshotUploadExecutor(
 	return executeAppScreenshotUpload
 }
 
+func normalizeScreenshotVersionSelector(version, versionID string) (string, string, error) {
+	if version == "" || shared.IsAppStoreVersionString(version) {
+		return version, versionID, nil
+	}
+	id, err := shared.ResourceIDFromValue(version, "appStoreVersions")
+	return "", id, err
+}
+
+// screenshotVersionSelectorError preserves the flag that supplied an ID before
+// normalization routes it through the legacy version-ID resolver.
+func screenshotVersionSelectorError(err error, version string) error {
+	version = strings.TrimSpace(version)
+	if version == "" || shared.IsAppStoreVersionString(version) {
+		return err
+	}
+	diagnostic, ok := shared.DiagnosticFromError(err)
+	if !ok || diagnostic.Parameter != "--version-id" {
+		return err
+	}
+	return shared.WithDiagnostic(err, diagnostic.Code, "--version")
+}
+
 func resolveAppScopedScreenshotPlatform(version, platformValue string) (string, error) {
 	trimmedPlatform := strings.TrimSpace(platformValue)
 	if trimmedPlatform != "" {
@@ -232,24 +262,26 @@ func hasAppScreenshotFanoutUploadResultOutput(result asc.AppScreenshotFanoutUplo
 }
 
 // ExecuteScreenshotSetUpload validates flags/files and runs the shared
-// screenshot upload/sync flow for a localization-backed screenshot set.
-func ExecuteScreenshotSetUpload[T any](ctx context.Context, opts ScreenshotSetUploadOptions[T]) (T, error) {
+// screenshot upload/sync flow for a localization-backed screenshot set, on d.
+func ExecuteScreenshotSetUpload[T any](ctx context.Context, d *shared.Deps, opts ScreenshotSetUploadOptions[T]) (T, error) {
 	var zero T
 
 	trimmedLocalizationID := strings.TrimSpace(opts.LocalizationID)
 	if trimmedLocalizationID == "" {
-		fmt.Fprintln(os.Stderr, "Error: --localization-id is required")
-		return zero, shared.MissingRequiredUsageError("--localization-id")
+		return zero, d.RequiredFlag("--localization-id")
 	}
 	trimmedPath := strings.TrimSpace(opts.Path)
 	if trimmedPath == "" {
-		fmt.Fprintln(os.Stderr, "Error: --path is required")
-		return zero, shared.MissingRequiredUsageError("--path")
+		return zero, d.RequiredFlag("--path")
 	}
 	trimmedDeviceType := strings.TrimSpace(opts.DeviceType)
 	if trimmedDeviceType == "" {
-		fmt.Fprintln(os.Stderr, "Error: --device-type is required")
-		return zero, shared.MissingRequiredUsageError("--device-type")
+		return zero, d.RequiredFlag("--device-type")
+	}
+	if opts.Replace {
+		if err := opts.RequireConfirm(); err != nil {
+			return zero, err
+		}
 	}
 	if opts.ClientFactory == nil {
 		return zero, fmt.Errorf("client factory is required")
@@ -261,7 +293,7 @@ func ExecuteScreenshotSetUpload[T any](ctx context.Context, opts ScreenshotSetUp
 	displayType, err := normalizeScreenshotDisplayType(trimmedDeviceType)
 	if err != nil {
 		if opts.InvalidDeviceTypeIsUsage {
-			return zero, shared.UsageError(err.Error())
+			return zero, d.UsageError(err.Error())
 		}
 		return zero, invalidDeviceTypeError(err)
 	}
@@ -280,6 +312,7 @@ func ExecuteScreenshotSetUpload[T any](ctx context.Context, opts ScreenshotSetUp
 	}
 
 	return uploadScreenshotsWithConfig(ctx, screenshotUploadConfig[T]{
+		Deps:           d,
 		Client:         client,
 		LocalizationID: trimmedLocalizationID,
 		DisplayType:    apiDisplayType,
@@ -296,21 +329,26 @@ func ExecuteScreenshotSetUpload[T any](ctx context.Context, opts ScreenshotSetUp
 	})
 }
 
-// AssetsScreenshotsListCommand returns the screenshots list subcommand.
-func AssetsScreenshotsListCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
+// NewAssetsScreenshotsListCommand returns the screenshots list subcommand.
+func NewAssetsScreenshotsListCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("list", flag.ExitOnError)
 
 	localizationID := shared.BindResourceIDFlag(fs, "version-localization", "appStoreVersionLocalizations", "App Store version localization ID")
+	shared.BindFlagAlias(fs, "localization-id", "version-localization")
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID env)")
-	version := fs.String("version", "", "App Store version string (requires --app)")
+	version := fs.String("version", "", "App Store version ID or numeric version string (strings require --app or ASC_APP_ID)")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
-	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS with --version; with --version-id requires --app or ASC_APP_ID)")
+	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS with version strings; with version IDs requires --app or ASC_APP_ID)")
 	locale := fs.String("locale", "", "Localization locale (optional with --version or --version-id; omit to list every localization of the version)")
-	output := shared.BindOutputFlags(fs)
+	setID := shared.BindResourceIDFlag(fs, "set-id", "appScreenshotSets", "App screenshot set ID; prints Apple's appScreenshots response unmodified")
+	fields := fs.String("fields", "", "With --set-id: appScreenshots fields, comma-separated: "+strings.Join(screenshotSetListFields, ", "))
+	limit := fs.Int("limit", 0, "With --set-id: maximum results per page (1-200; 0 uses server default)")
+	paginate := fs.Bool("paginate", false, "With --set-id: fetch all pages and aggregate the collection")
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "list",
-		ShortUsage: "asc screenshots list (--version-localization \"VERSION_LOCALIZATION_ID\" | --version-id \"VERSION_ID\" [--locale \"LOCALE\"] | --app \"APP_ID\" --version \"VERSION\" [--locale \"LOCALE\"])",
+		ShortUsage: "asc screenshots list (--version-localization \"VERSION_LOCALIZATION_ID\" | --version \"VERSION_ID\" [--locale \"LOCALE\"] | --app \"APP_ID\" --version \"VERSION\" [--locale \"LOCALE\"] | --set-id \"SET_ID\" [--fields FIELDS] [--limit N] [--paginate])",
 		ShortHelp:  "List screenshots for a localization.",
 		LongHelp: `List screenshots for a localization.
 
@@ -325,16 +363,31 @@ array with one entry per locale and leaves the top-level "versionLocalizationId"
 and "sets" keys empty, and table output gains a leading Locale column. Pass
 --locale to scope the listing to one localization.
 
+--set-id lists the screenshots of one screenshot set in the set's order and
+prints Apple's GET /v1/appScreenshotSets/{id}/appScreenshots response
+unmodified, including assetDeliveryState warnings and uploadOperations.
+--fields, --limit, and --paginate apply only to --set-id.
+
 Examples:
   asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
-  asc screenshots list --version-id "VERSION_ID" --locale "en-US"
+  asc screenshots list --version "VERSION_ID" --locale "en-US"
   asc screenshots list --app "123456789" --version "1.2.3" --locale "en-US"
-  asc screenshots list --app "123456789" --version "1.2.3"`,
+  asc screenshots list --app "123456789" --version "1.2.3"
+  asc screenshots list --set-id "SET_ID" --fields "fileName,assetDeliveryState" --paginate`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := shared.RejectPositionalArgs(args); err != nil {
+			if err := d.ValidatePaginationFlags(ctx, fs, "screenshots list", 200); err != nil {
 				return err
+			}
+			if strings.TrimSpace(*setID) != "" {
+				if strings.TrimSpace(*localizationID) != "" || strings.TrimSpace(*appID) != "" || strings.TrimSpace(*version) != "" || strings.TrimSpace(*versionID) != "" || strings.TrimSpace(*platform) != "" || strings.TrimSpace(*locale) != "" {
+					return d.UsageError("screenshots list: --set-id cannot be combined with --version-localization, --app, --version, --version-id, --platform, or --locale")
+				}
+				return executeScreenshotSetListCommand(ctx, d, strings.TrimSpace(*setID), *fields, *limit, *paginate, output)
+			}
+			if strings.TrimSpace(*fields) != "" || *limit != 0 || *paginate {
+				return d.UsageError("screenshots list: --fields, --limit, and --paginate require --set-id")
 			}
 
 			result, err := executeScreenshotListCommand(ctx, screenshotListCommandOptions{
@@ -344,14 +397,14 @@ Examples:
 				VersionID:             *versionID,
 				Platform:              *platform,
 				Locale:                *locale,
-			}, screenshotListDependencies{})
+			}, d)
 			if err != nil {
 				if errors.Is(err, flag.ErrHelp) {
 					return err
 				}
 				return fmt.Errorf("screenshots list: %w", err)
 			}
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return d.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -365,19 +418,7 @@ type screenshotListCommandOptions struct {
 	Locale                string
 }
 
-type screenshotListDependencies struct {
-	GetClient      func() (*asc.Client, error)
-	RequestContext func(context.Context) (context.Context, context.CancelFunc)
-}
-
-func executeScreenshotListCommand(ctx context.Context, opts screenshotListCommandOptions, deps screenshotListDependencies) (*asc.AppScreenshotListResult, error) {
-	if deps.GetClient == nil {
-		deps.GetClient = shared.GetASCClient
-	}
-	if deps.RequestContext == nil {
-		deps.RequestContext = shared.ContextWithTimeout
-	}
-
+func executeScreenshotListCommand(ctx context.Context, opts screenshotListCommandOptions, d *shared.Deps) (*asc.AppScreenshotListResult, error) {
 	locID := strings.TrimSpace(opts.VersionLocalizationID)
 	appValue := strings.TrimSpace(opts.AppID)
 	versionValue := strings.TrimSpace(opts.Version)
@@ -388,39 +429,48 @@ func executeScreenshotListCommand(ctx context.Context, opts screenshotListComman
 	versionModeRequested := appValue != "" || versionValue != "" || versionIDValue != "" || platformValue != "" || localeValue != ""
 
 	if locID == "" && !versionModeRequested {
-		fmt.Fprintln(os.Stderr, "Error: choose a localization selector: --version-localization VERSION_LOCALIZATION_ID; --version-id VERSION_ID with optional --locale LOCALE; or (--app APP_ID or ASC_APP_ID) with --version VERSION and optional --locale LOCALE")
+		fmt.Fprintln(d.IO.ErrOut, "Error: choose a localization selector: --version-localization VERSION_LOCALIZATION_ID; --version-id VERSION_ID with optional --locale LOCALE; or (--app APP_ID or ASC_APP_ID) with --version VERSION and optional --locale LOCALE")
 		return nil, shared.MissingRequiredUsageError("")
 	}
 	if locID != "" && versionModeRequested {
-		fmt.Fprintln(os.Stderr, "Error: --version-localization cannot be combined with --app, --version, --version-id, --platform, or --locale")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --version-localization cannot be combined with --app, --version, --version-id, --platform, or --locale")
 		return nil, flag.ErrHelp
 	}
 	if versionValue != "" && versionIDValue != "" {
-		fmt.Fprintln(os.Stderr, "Error: --version and --version-id are mutually exclusive")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --version and --version-id are mutually exclusive")
 		return nil, flag.ErrHelp
+	}
+
+	versionValue, versionIDValue, err := normalizeScreenshotVersionSelector(versionValue, versionIDValue)
+	if err != nil {
+		return nil, d.UsageError(err.Error())
 	}
 
 	if locID == "" {
 		if versionValue == "" && versionIDValue == "" {
-			fmt.Fprintln(os.Stderr, "Error: --version or --version-id is required")
+			fmt.Fprintln(d.IO.ErrOut, "Error: --version or --version-id is required")
 			return nil, shared.MissingRequiredUsageError("")
 		}
 		if versionValue != "" || (versionIDValue != "" && platformValue != "") {
-			appValue = shared.ResolveAppID(appValue)
+			appValue = d.ResolveAppID(appValue)
 		}
 		if versionValue != "" {
 			if appValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --app is required with --version (or set ASC_APP_ID)")
+				fmt.Fprintln(d.IO.ErrOut, "Error: --app is required with --version (or set ASC_APP_ID)")
 				return nil, shared.MissingRequiredUsageError("--app")
 			}
 		}
 		if platformValue != "" && versionValue == "" && appValue == "" {
-			return nil, shared.UsageError("--platform with --version-id requires --app or ASC_APP_ID so ownership and platform can be verified")
+			versionFlag := "--version-id"
+			if strings.TrimSpace(opts.Version) != "" {
+				versionFlag = "--version"
+			}
+			return nil, d.UsageErrorf("--platform with %s requires --app or ASC_APP_ID so ownership and platform can be verified", versionFlag)
 		}
 		if platformValue != "" {
 			parsedPlatform, platformErr := shared.NormalizeAppStoreVersionPlatform(platformValue)
 			if platformErr != nil {
-				return nil, shared.UsageError(platformErr.Error())
+				return nil, d.UsageError(platformErr.Error())
 			}
 			normalizedPlatform = parsedPlatform
 		} else if versionValue != "" {
@@ -430,13 +480,13 @@ func executeScreenshotListCommand(ctx context.Context, opts screenshotListComman
 		if localeValue != "" {
 			canonicalLocale, err := shared.CanonicalizeAppStoreLocalizationLocale(localeValue)
 			if err != nil {
-				return nil, shared.UsageError(err.Error())
+				return nil, d.UsageError(err.Error())
 			}
 			localeValue = canonicalLocale
 		}
 	}
 
-	client, err := deps.GetClient()
+	client, err := d.Client()
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +494,7 @@ func executeScreenshotListCommand(ctx context.Context, opts screenshotListComman
 	if locID == "" {
 		resolvedVersionID := versionIDValue
 		if versionValue != "" || appValue != "" {
-			requestCtx, cancel := deps.RequestContext(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			resolvedAppID, resolveErr := shared.ResolveAppIDWithLookup(requestCtx, client, appValue)
 			if resolveErr == nil {
 				if versionValue != "" {
@@ -457,17 +507,17 @@ func executeScreenshotListCommand(ctx context.Context, opts screenshotListComman
 			}
 			cancel()
 			if resolveErr != nil {
-				return nil, resolveErr
+				return nil, screenshotVersionSelectorError(resolveErr, opts.Version)
 			}
 		}
 
-		localizations, listErr := fetchAllScreenshotVersionLocalizations(ctx, client, resolvedVersionID, deps.RequestContext)
+		localizations, listErr := fetchAllScreenshotVersionLocalizations(ctx, client, resolvedVersionID, d.Timeout)
 		if listErr != nil {
 			return nil, fmt.Errorf("failed to fetch version localizations: %w", listErr)
 		}
 
 		if localeValue == "" {
-			return fetchScreenshotListForAllLocalizations(ctx, client, resolvedVersionID, localizations, deps.RequestContext)
+			return fetchScreenshotListForAllLocalizations(ctx, d, client, resolvedVersionID, localizations, d.Timeout)
 		}
 
 		for _, item := range localizations {
@@ -481,7 +531,7 @@ func executeScreenshotListCommand(ctx context.Context, opts screenshotListComman
 		}
 	}
 
-	result, err := fetchScreenshotList(ctx, client, locID, deps.RequestContext)
+	result, err := fetchScreenshotList(ctx, client, locID, d.Timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -530,6 +580,7 @@ func screenshotVersionLocalizationLocaleError(
 // localization of a version, in locale order, when no --locale is selected.
 func fetchScreenshotListForAllLocalizations(
 	ctx context.Context,
+	d *shared.Deps,
 	client *asc.Client,
 	versionID string,
 	localizations []asc.Resource[asc.AppStoreVersionLocalizationAttributes],
@@ -550,7 +601,7 @@ func fetchScreenshotListForAllLocalizations(
 	})
 
 	fmt.Fprintf(
-		os.Stderr,
+		d.IO.ErrOut,
 		"Note: --locale not set; listing screenshots across all %d localizations of App Store version %s. Pass --locale to scope the listing to one localization.\n",
 		len(ordered),
 		versionID,
@@ -582,7 +633,7 @@ func fetchAllScreenshotVersionLocalizations(
 	requestContext func(context.Context) (context.Context, context.CancelFunc),
 ) ([]asc.Resource[asc.AppStoreVersionLocalizationAttributes], error) {
 	requestCtx, cancel := requestContext(ctx)
-	firstPage, err := client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+	firstPage, err := client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	cancel()
 	if err != nil {
 		return nil, err
@@ -593,7 +644,7 @@ func fetchAllScreenshotVersionLocalizations(
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		nextCtx, nextCancel := requestContext(pageCtx)
-		nextPage, nextErr := client.GetAppStoreVersionLocalizations(nextCtx, versionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+		nextPage, nextErr := client.GetAppStoreVersionLocalizations(nextCtx, versionID, asc.NextURL[asc.AppStoreVersionLocalizationsOption](nextURL))
 		nextCancel()
 		if nextErr != nil {
 			return nil, nextErr
@@ -631,13 +682,13 @@ func fetchScreenshotList(
 	return &asc.AppScreenshotListResult{VersionLocalizationID: localizationID, Sets: sets}, nil
 }
 
-// AssetsScreenshotsSizesCommand returns the screenshots sizes subcommand.
-func AssetsScreenshotsSizesCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("sizes", flag.ExitOnError)
+// NewAssetsScreenshotsSizesCommand returns the screenshots sizes subcommand.
+func NewAssetsScreenshotsSizesCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("sizes", flag.ExitOnError)
 
 	displayType := fs.String("display-type", "", "Filter by screenshot display type (e.g., APP_IPHONE_65)")
 	all := fs.Bool("all", false, "List all supported screenshot display types")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "sizes",
@@ -648,17 +699,21 @@ func AssetsScreenshotsSizesCommand() *ffcli.Command {
 By default this command focuses on common iOS submission slots:
 APP_IPHONE_65 and APP_IPAD_PRO_3GEN_129.
 
+Starting April 2027, App Store submissions of apps built with the iOS 27.1 SDK
+or later also need iPhone Duo screenshots (APP_IPHONE_DUO). List its sizes with
+--display-type "APP_IPHONE_DUO".
+
 Examples:
   asc screenshots sizes
   asc screenshots sizes --all
   asc screenshots sizes --display-type "APP_IPHONE_65"
   asc screenshots sizes --output table`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			filter := strings.TrimSpace(*displayType)
 			if filter != "" && *all {
-				return shared.UsageError("--display-type and --all are mutually exclusive")
+				return d.UsageError("--display-type and --all are mutually exclusive")
 			}
 
 			result := asc.ScreenshotSizesResult{}
@@ -666,7 +721,7 @@ Examples:
 			if filter != "" {
 				normalized, err := normalizeScreenshotDisplayType(filter)
 				if err != nil {
-					return shared.UsageError(err.Error())
+					return d.UsageError(err.Error())
 				}
 				entry, ok := asc.ScreenshotSizeEntryForDisplayType(normalized)
 				if !ok {
@@ -679,31 +734,35 @@ Examples:
 				result.Sizes = focusedScreenshotSizeCatalog()
 			}
 
-			return shared.PrintOutput(&result, *output.Output, *output.Pretty)
+			return d.PrintOutput(&result, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// AssetsScreenshotsUploadCommand returns the screenshots upload subcommand.
-func AssetsScreenshotsUploadCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("upload", flag.ExitOnError)
+// NewAssetsScreenshotsUploadCommand returns the screenshots upload subcommand.
+func NewAssetsScreenshotsUploadCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("upload", flag.ExitOnError)
 
 	localizationID := shared.BindResourceIDFlag(fs, "version-localization", "appStoreVersionLocalizations", "App Store version localization ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
-	version := fs.String("version", "", "App Store version string for app-scoped fan-out uploads")
+	version := fs.String("version", "", "App Store version ID or numeric version string for app-scoped uploads")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID for app-scoped fan-out uploads")
-	platform := fs.String("platform", "", "Platform for app-scoped fan-out uploads: IOS, MAC_OS, TV_OS, VISION_OS (default: IOS)")
+	platform := fs.String("platform", "", "Platform for app-scoped uploads: IOS, MAC_OS, TV_OS, VISION_OS (defaults to IOS for version strings; IDs use their actual platform)")
 	locale := fs.String("locale", "", "Upload one locale in app-scoped mode (requires --app with --version or --version-id); --path then points at that locale's screenshots")
 	path := fs.String("path", "", "Path to screenshot file or directory")
-	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65 or IPAD_PRO_3GEN_129)")
+	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65, IPAD_PRO_3GEN_129, or IPHONE_DUO)")
 	resume := fs.String("resume", "", "Resume a previous upload from a failure artifact")
 	skipExisting := fs.Bool("skip-existing", false, "Skip files whose MD5 checksum already exists in the target screenshot set")
 	replace := fs.Bool("replace", false, "Delete all existing screenshots from the target set before uploading (requires --confirm)")
 	confirm := fs.Bool("confirm", false, "Confirm the deletions performed by --replace (required with --replace)")
 	dryRun := fs.Bool("dry-run", false, "Show what would be uploaded, skipped, or deleted without making changes")
 	maxScreenshots := fs.Int("max-screenshots", 0, "Upload only the first N sorted screenshots per set; must be 10 or less")
-	concurrency := fs.Int("concurrency", defaultScreenshotUploadConcurrency, "Parallel screenshot uploads within a set (1-8)")
-	output := shared.BindOutputFlags(fs)
+	concurrency := fs.Int("concurrency", defaultScreenshotUploadConcurrency, "Parallel screenshot uploads within a set (1-10)")
+	assetLibrary := fs.Bool("asset-library", false, "Upload to the Asset Library and place on the localization instead of using a screenshot set (requires --version-localization)")
+	placementGroup := fs.String("placement-group", "", "Placement group to use with --asset-library (defaults to the group Apple publishes for --device-type)")
+	pollInterval := shared.BindMediaPollIntervalFlag(fs)
+	noWait := fs.Bool("no-wait", false, "Return once each file is uploaded and committed instead of waiting for App Store Connect processing; check later with asc screenshots list")
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "upload",
@@ -718,7 +777,9 @@ With --locale, --path points directly at that locale's screenshot file or
 directory (scanned like --version-localization uploads, not as a tree of
 locale directories). The version must already have a localization for the
 locale; otherwise the command fails and lists the version's locales. --replace
-only affects that locale's screenshot set for --device-type.
+only affects that locale's screenshot set for --device-type. In a --path
+directory, the .png, .jpg, and .jpeg files are uploaded; other files, such as
+the HTML a mockup was rendered from, are skipped with a warning on stderr.
 
 Without --locale, --app with --version/--version-id fans out one run across
 locale directories under --path. In fan-out mode, the immediate children of
@@ -737,14 +798,53 @@ localization resource ID, shown in the ID column of:
   asc localizations list --app "APP_ID" --version "1.2.3" --locale "en-US"
 It is not the locale code such as en-US.
 
+Before reserving anything, including with --dry-run, screenshot-set uploads run
+the same local checks as asc screenshots validate and stop on any error. Files
+are uploaded only when every file passes. Without --no-wait the command exits
+zero only when every file is COMPLETE in App Store Connect or skipped; otherwise
+it exits non-zero, prints the receipt, and writes a failure artifact for --resume.
+
 --replace deletes every existing screenshot in each target set before uploading
 and therefore requires --confirm. Use --replace --dry-run to preview the
-deletions without --confirm.
+deletions without --confirm. Like asc screenshots delete, --replace keeps each
+deleted screenshot's Asset Library image, under the same ID as the
+"would-delete" assetId. Delete a leftover image that nothing else places with
+asc asset-library images delete --id ASSET_ID --confirm, or remove the old
+screenshots first with asc screenshots delete --prune-library.
+
+--device-type IPHONE_DUO uploads iPhone Duo screenshots like any other device
+type, in every mode above, including --locale and --replace. App Store Connect
+keeps them in an APP_IPHONE_DUO screenshot set, so --asset-library is not
+needed for Duo.
+
+--asset-library uses Apple's Asset Library instead of the deprecated screenshot
+sets; screenshot sets stay the default. It requires --version-localization.
+Sorted files are validated, uploaded one at a time, placed in the placement
+group Apple publishes for --device-type, then ordered after the group's existing
+placements. Existing placements are kept. If upload or placement fails, the
+command exits non-zero and prints a receipt with each file's asset and placement
+ID. Nothing is deleted automatically; inspect the placements before retrying.
+Use --dry-run to see the library, group and capacity without changing anything.
+
+--no-wait returns once each file is uploaded and committed (UPLOAD_COMPLETE)
+instead of polling every file until App Store Connect finishes processing it.
+Each file still gets one state check, so a delivery that has already FAILED is
+reported. Processing polls cost App Store Connect requests from the key's
+hourly limit; large multi-locale uploads can exhaust it and stall on 429s.
+Check the final state later with asc screenshots list. --no-wait cannot be
+combined with --asset-library.
+
+Only one asc upload runs at a time on a machine. While another screenshots or
+video-previews upload is running, this command waits up to 30 minutes before
+it sends any request; ASC_UPLOAD_LOCK=0 skips the wait.
 
 Examples:
   asc screenshots upload --app "123456789" --version "1.2.3" --locale "en-US" --path "./screenshots/en-US" --device-type "IPHONE_65"
+  asc screenshots upload --app "123456789" --version "1.2.3" --locale "en-US" --path "./screenshots/duo" --device-type "IPHONE_DUO" --replace --confirm
+  asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/duo" --device-type "IPHONE_DUO" --asset-library --dry-run
+  asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/duo" --device-type "IPHONE_DUO" --asset-library
   asc screenshots upload --app "123456789" --version "1.2.3" --locale "en-US" --path "./screenshots/en-US" --device-type "IPHONE_65" --replace --confirm
-  asc screenshots upload --app "123456789" --version-id "VERSION_ID" --locale "de-DE" --path "./screenshots/de-DE" --device-type "IPHONE_65" --dry-run
+  asc screenshots upload --app "123456789" --version "VERSION_ID" --locale "de-DE" --path "./screenshots/de-DE" --device-type "IPHONE_65" --dry-run
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots" --device-type "IPHONE_65"
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots" --device-type "IPHONE_65" --skip-existing
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots" --device-type "IPHONE_65" --replace --confirm
@@ -754,19 +854,34 @@ Examples:
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots" --device-type "IPAD_PRO_3GEN_129"
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/en-US.png" --device-type "IPHONE_65"
   asc screenshots upload --app "123456789" --version "1.2.3" --path "./screenshots" --device-type "IPHONE_65"
-  asc screenshots upload --app "123456789" --version-id "VERSION_ID" --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129" --dry-run
+  asc screenshots upload --app "123456789" --version "VERSION_ID" --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129" --dry-run
+  asc screenshots upload --app "123456789" --version "1.2.3" --path "./screenshots" --device-type "IPHONE_65" --replace --confirm --no-wait
   asc screenshots upload --resume ".asc/reports/screenshots-upload/failures-123.json"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *concurrency < 1 || *concurrency > 8 {
-				return shared.UsageError("screenshots upload: --concurrency must be between 1 and 8")
+			ctx, pollErr := pollInterval.ApplyWith(ctx, d)
+			if pollErr != nil {
+				return pollErr
+			}
+			if *concurrency < 1 || *concurrency > maxScreenshotUploadConcurrency {
+				return d.UsageError(fmt.Sprintf("screenshots upload: --concurrency must be between 1 and %d", maxScreenshotUploadConcurrency))
+			}
+			if *assetLibrary && flagWasSet(fs, "concurrency") {
+				return d.UsageError("--asset-library cannot be combined with --concurrency; library uploads run one at a time to keep file order")
+			}
+			if *assetLibrary && *noWait {
+				return d.UsageError("--asset-library cannot be combined with --no-wait; library uploads wait for processing before placing each file")
 			}
 			ctx = withScreenshotUploadConcurrency(ctx, *concurrency)
+			ctx = withScreenshotNoWait(ctx, *noWait)
 			resumePath := strings.TrimSpace(*resume)
 			if resumePath != "" {
+				if *assetLibrary || strings.TrimSpace(*placementGroup) != "" {
+					return d.UsageError("--resume cannot be combined with --asset-library or --placement-group")
+				}
 				if strings.TrimSpace(*locale) != "" {
-					return shared.UsageError("--resume cannot be combined with --locale; the failure artifact already records the localization")
+					return d.UsageError("--resume cannot be combined with --locale; the failure artifact already records the localization")
 				}
 				if strings.TrimSpace(*localizationID) != "" ||
 					strings.TrimSpace(*appID) != "" ||
@@ -775,29 +890,29 @@ Examples:
 					strings.TrimSpace(*platform) != "" ||
 					strings.TrimSpace(*path) != "" ||
 					strings.TrimSpace(*deviceType) != "" {
-					return shared.UsageError("--resume cannot be combined with --version-localization, --app, --version, --version-id, --platform, --path, or --device-type")
+					return d.UsageError("--resume cannot be combined with --version-localization, --app, --version, --version-id, --platform, --path, or --device-type")
 				}
 				if *skipExisting || *replace || *confirm || *dryRun || *maxScreenshots != 0 {
-					return shared.UsageError("--resume cannot be combined with --skip-existing, --replace, --confirm, --dry-run, or --max-screenshots")
+					return d.UsageError("--resume cannot be combined with --skip-existing, --replace, --confirm, --dry-run, or --max-screenshots")
 				}
 
-				client, err := shared.GetASCClient()
+				client, err := d.Client()
 				if err != nil {
 					return fmt.Errorf("screenshots upload: %w", err)
 				}
 
 				defer client.CloseUploadConnections()
 
-				result, err := resumeAppScreenshotUpload(ctx, client, resumePath)
+				result, err := resumeAppScreenshotUpload(ctx, d, client, resumePath, acquireAssetUploadLock(d))
 				if hasAppScreenshotUploadResultOutput(result) {
-					if printErr := shared.PrintOutput(&result, *output.Output, *output.Pretty); printErr != nil {
+					if printErr := d.PrintOutput(&result, *output.Output, *output.Pretty); printErr != nil {
 						return printErr
 					}
 				}
 				return err
 			}
 
-			result, err := executeScreenshotUploadCommand(ctx, screenshotUploadCommandOptions{
+			result, err := executeScreenshotUploadCommand(ctx, d, screenshotUploadCommandOptions{
 				VersionLocalizationID: *localizationID,
 				AppID:                 *appID,
 				Version:               *version,
@@ -811,11 +926,11 @@ Examples:
 				Confirm:               *confirm,
 				DryRun:                *dryRun,
 				MaxScreenshots:        *maxScreenshots,
+				AssetLibrary:          *assetLibrary,
+				PlacementGroup:        strings.TrimSpace(*placementGroup),
 			}, screenshotUploadDependencies{
-				GetClient:        shared.GetASCClient,
-				RequestContext:   shared.ContextWithTimeout,
-				UploadScreenshot: uploadScreenshots,
-				ExecuteUpload:    executeAppScreenshotUpload,
+				ExecuteUpload:     executeAppScreenshotUpload,
+				AcquireUploadLock: acquireAssetUploadLock(d),
 			})
 			if result != nil {
 				shouldPrint := err == nil
@@ -828,9 +943,11 @@ Examples:
 					if hasAppScreenshotFanoutUploadResultOutput(*typed) {
 						shouldPrint = true
 					}
+				case *asc.AssetLibraryLocalizationUploadResult:
+					shouldPrint = true
 				}
 				if shouldPrint {
-					if printErr := shared.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil {
+					if printErr := d.PrintOutput(result, *output.Output, *output.Pretty); printErr != nil {
 						return printErr
 					}
 				}
@@ -846,14 +963,14 @@ Examples:
 	}
 }
 
-func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCommandOptions, deps screenshotUploadDependencies) (any, error) {
-	if deps.GetClient == nil {
-		deps.GetClient = shared.GetASCClient
-	}
-	if deps.RequestContext == nil {
-		deps.RequestContext = shared.ContextWithTimeout
-	}
+func executeScreenshotUploadCommand(ctx context.Context, d *shared.Deps, opts screenshotUploadCommandOptions, deps screenshotUploadDependencies) (any, error) {
 	deps.ExecuteUpload = resolveScreenshotUploadExecutor(deps.ExecuteUpload, deps.UploadScreenshot)
+	lockUploads := func() (func(), error) {
+		if opts.DryRun || deps.AcquireUploadLock == nil {
+			return func() {}, nil
+		}
+		return deps.AcquireUploadLock(ctx)
+	}
 
 	locID := strings.TrimSpace(opts.VersionLocalizationID)
 	appFlagValue := strings.TrimSpace(opts.AppID)
@@ -863,110 +980,147 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 	localeValue := strings.TrimSpace(opts.Locale)
 	appModeRequested := appFlagValue != "" || versionValue != "" || versionIDValue != "" || platformValue != ""
 
+	if err := validateLibraryUploadFlags(d, opts.AssetLibrary, opts.PlacementGroup, opts.SkipExisting, opts.Replace); err != nil {
+		return nil, err
+	}
+	if opts.AssetLibrary && locID == "" {
+		return nil, d.UsageError("--asset-library requires --version-localization")
+	}
+
 	if localeValue != "" {
 		if locID != "" {
-			return nil, shared.UsageError("--locale cannot be combined with --version-localization; --version-localization already selects one localization")
+			return nil, d.UsageError("--locale cannot be combined with --version-localization; --version-localization already selects one localization")
 		}
 		if !appModeRequested {
-			return nil, shared.UsageError("--locale requires --app with --version or --version-id (or set ASC_APP_ID)")
+			return nil, d.UsageError("--locale requires --app with --version or --version-id (or set ASC_APP_ID)")
 		}
 		if strings.Contains(localeValue, ",") {
-			return nil, shared.UsageError("--locale accepts exactly one locale; to upload several locales, omit --locale and point --path at a directory of locale subdirectories")
+			return nil, d.UsageError("--locale accepts exactly one locale; to upload several locales, omit --locale and point --path at a directory of locale subdirectories")
 		}
 		canonicalLocale, err := shared.CanonicalizeAppStoreLocalizationLocale(localeValue)
 		if err != nil {
-			return nil, shared.UsageError(fmt.Sprintf("--locale: %v", err))
+			return nil, d.UsageError(fmt.Sprintf("--locale: %v", err))
 		}
 		localeValue = canonicalLocale
 	}
 
 	if locID == "" {
 		if !appModeRequested {
-			fmt.Fprintln(os.Stderr, "Error: choose an upload mode: --version-localization VERSION_LOCALIZATION_ID; (--app APP_ID or ASC_APP_ID) with --version VERSION or --version-id VERSION_ID; or --resume ARTIFACT_PATH")
+			fmt.Fprintln(d.IO.ErrOut, "Error: choose an upload mode: --version-localization VERSION_LOCALIZATION_ID; (--app APP_ID or ASC_APP_ID) with --version VERSION or --version-id VERSION_ID; or --resume ARTIFACT_PATH")
 			return nil, shared.MissingRequiredUsageError("")
 		}
 	} else if appModeRequested {
-		fmt.Fprintln(os.Stderr, "Error: --version-localization cannot be combined with --app, --version, --version-id, or --platform")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --version-localization cannot be combined with --app, --version, --version-id, or --platform")
 		return nil, flag.ErrHelp
 	}
 
 	if locID == "" {
-		resolvedAppValue := shared.ResolveAppID(appFlagValue)
+		resolvedAppValue := d.ResolveAppID(appFlagValue)
 		if resolvedAppValue == "" {
-			fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+			fmt.Fprintln(d.IO.ErrOut, "Error: --app is required (or set ASC_APP_ID)")
 			return nil, shared.MissingRequiredUsageError("--app")
 		}
 		if versionValue == "" && versionIDValue == "" {
-			fmt.Fprintln(os.Stderr, "Error: --version or --version-id is required with --app")
+			fmt.Fprintln(d.IO.ErrOut, "Error: --version or --version-id is required with --app")
 			return nil, shared.MissingRequiredUsageError("")
 		}
 		if versionValue != "" && versionIDValue != "" {
-			fmt.Fprintln(os.Stderr, "Error: --version and --version-id are mutually exclusive")
+			fmt.Fprintln(d.IO.ErrOut, "Error: --version and --version-id are mutually exclusive")
 			return nil, flag.ErrHelp
 		}
 		appFlagValue = resolvedAppValue
 	}
 
+	versionValue, versionIDValue, err := normalizeScreenshotVersionSelector(versionValue, versionIDValue)
+	if err != nil {
+		return nil, d.UsageError(err.Error())
+	}
+
 	pathValue := strings.TrimSpace(opts.Path)
 	if pathValue == "" {
-		fmt.Fprintln(os.Stderr, "Error: --path is required")
-		return nil, shared.MissingRequiredUsageError("--path")
+		return nil, d.RequiredFlag("--path")
 	}
 	deviceValue := strings.TrimSpace(opts.DeviceType)
 	if deviceValue == "" {
-		fmt.Fprintln(os.Stderr, "Error: --device-type is required")
-		return nil, shared.MissingRequiredUsageError("--device-type")
+		return nil, d.RequiredFlag("--device-type")
 	}
 	if opts.SkipExisting && opts.Replace {
-		fmt.Fprintln(os.Stderr, "Error: --skip-existing and --replace are mutually exclusive")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --skip-existing and --replace are mutually exclusive")
 		return nil, flag.ErrHelp
 	}
 	if opts.Replace && !opts.DryRun && !opts.Confirm {
-		fmt.Fprintln(os.Stderr, "Error: --confirm is required to delete existing screenshots with --replace")
+		fmt.Fprintln(d.IO.ErrOut, "Error: --confirm is required to delete existing screenshots with --replace")
 		return nil, shared.MissingRequiredUsageError("--confirm")
 	}
 	if opts.Confirm && !opts.Replace {
-		return nil, shared.UsageError("--confirm only applies to --replace")
+		return nil, d.UsageError("--confirm only applies to --replace")
 	}
 	if opts.MaxScreenshots < 0 {
-		return nil, shared.UsageError("--max-screenshots must be zero or greater")
+		return nil, d.UsageError("--max-screenshots must be zero or greater")
 	}
 	if opts.MaxScreenshots > appScreenshotSetMaxScreenshots {
-		return nil, shared.UsageError(fmt.Sprintf("--max-screenshots cannot exceed %d; App Store screenshot sets allow at most %d images", appScreenshotSetMaxScreenshots, appScreenshotSetMaxScreenshots))
+		return nil, d.UsageError(fmt.Sprintf("--max-screenshots cannot exceed %d; App Store screenshot sets allow at most %d images", appScreenshotSetMaxScreenshots, appScreenshotSetMaxScreenshots))
 	}
 
 	displayType, err := normalizeScreenshotDisplayType(deviceValue)
 	if err != nil {
-		return nil, shared.UsageError(err.Error())
+		return nil, d.UsageError(err.Error())
 	}
 	apiDisplayType := asc.CanonicalScreenshotDisplayTypeForAPI(displayType)
+	if apiDisplayType != displayType && !opts.AssetLibrary {
+		fmt.Fprintf(d.IO.ErrOut, "Note: --device-type %s uploads to the %s screenshot set; App Store Connect has no separate %s set and stores those screenshots there.\n", deviceValue, apiDisplayType, displayType)
+	}
 
 	if locID != "" {
-		files, err := collectScreenshotUploadFiles(pathValue, opts.MaxScreenshots)
+		files, skipped, err := collectScreenshotUploadFiles(d.OSPath(pathValue), opts.MaxScreenshots)
 		if err != nil {
 			return nil, mediaPathValidationError(err)
 		}
-		if err := validateScreenshotDimensions(files, apiDisplayType); err != nil {
-			return nil, mediaPathValidationError(err)
+		warnSkippedScreenshotFiles(d.IO.ErrOut, pathValue, skipped)
+		if !opts.AssetLibrary {
+			if err := validateScreenshotDimensions(files, apiDisplayType); err != nil {
+				return nil, mediaPathValidationError(err)
+			}
 		}
-		client, err := deps.GetClient()
+		client, err := d.Client()
 		if err != nil {
 			return nil, err
 		}
 		defer client.CloseUploadConnections()
+		release, err := lockUploads()
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+
+		if opts.AssetLibrary {
+			placementType := "APP_SCREENSHOT"
+			if strings.HasPrefix(apiDisplayType, "IMESSAGE_") {
+				placementType = "IMESSAGE_APP_SCREENSHOT"
+			}
+			result, err := assetlibrary.UploadToLocalizationWith(ctx, d, client, assetlibrary.LocalizationUpload{
+				Command: "screenshots upload", LocalizationID: locID, PlacementType: placementType, Slot: apiDisplayType,
+				PlacementGroup: opts.PlacementGroup, Files: files, DryRun: opts.DryRun,
+			})
+			if result == nil {
+				return nil, err
+			}
+			return result, err
+		}
 
 		result, err := deps.ExecuteUpload(ctx, screenshotUploadConfig[asc.AppScreenshotUploadResult]{
+			Deps:           d,
 			Client:         client,
 			LocalizationID: locID,
 			DisplayType:    apiDisplayType,
-			RootPath:       pathValue,
+			RootPath:       d.OSPath(pathValue),
 			Files:          files,
 			SkipExisting:   opts.SkipExisting,
 			Replace:        opts.Replace,
 			DryRun:         opts.DryRun,
 			MaxScreenshots: opts.MaxScreenshots,
-			RequestContext: deps.RequestContext,
-			UploadContext:  contextWithAssetUploadTimeout,
+			RequestContext: d.Timeout,
+			UploadContext:  assetUploadContext(d),
 			Access:         appStoreVersionScreenshotSetAccess,
 		}, "")
 		return &result, err
@@ -974,20 +1128,21 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 
 	normalizedPlatform, err := resolveAppScopedScreenshotPlatform(versionValue, platformValue)
 	if err != nil {
-		return nil, shared.UsageError(err.Error())
+		return nil, d.UsageError(err.Error())
 	}
 
 	var localeAssets []screenshotLocaleAssetFiles
 	if localeValue != "" {
 		// With --locale, --path holds that locale's screenshots directly and is
 		// scanned like --version-localization uploads, not as a fan-out tree.
-		files, err := collectScreenshotUploadFiles(pathValue, opts.MaxScreenshots)
+		files, skipped, err := collectScreenshotUploadFiles(d.OSPath(pathValue), opts.MaxScreenshots)
 		if err != nil {
 			return nil, mediaPathValidationError(err)
 		}
+		warnSkippedScreenshotFiles(d.IO.ErrOut, pathValue, skipped)
 		localeAssets = []screenshotLocaleAssetFiles{{Locale: localeValue, Files: files}}
 	} else {
-		localeAssets, err = collectLocaleAssetFilesWithLimit(pathValue, apiDisplayType, opts.MaxScreenshots)
+		localeAssets, err = collectLocaleAssetFilesWithLimit(d.OSPath(pathValue), apiDisplayType, opts.MaxScreenshots)
 		if err != nil {
 			return nil, shared.NewValidationError(err)
 		}
@@ -1000,14 +1155,19 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 		return nil, mediaPathValidationError(err)
 	}
 
-	client, err := deps.GetClient()
+	client, err := d.Client()
 	if err != nil {
 		return nil, err
 	}
 
 	defer client.CloseUploadConnections()
+	release, err := lockUploads()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
-	requestCtx, cancel := deps.RequestContext(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	defer cancel()
 
 	resolvedAppID, err := shared.ResolveAppIDWithLookup(requestCtx, client, appFlagValue)
@@ -1016,16 +1176,17 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 	}
 	resolvedVersionID, resolvedVersion, resolvedPlatform, err := resolveScreenshotPlanVersion(requestCtx, client, resolvedAppID, versionValue, versionIDValue, normalizedPlatform)
 	if err != nil {
-		return nil, err
+		return nil, screenshotVersionSelectorError(err, opts.Version)
 	}
 
 	result, err := uploadScreenshotsFanout(ctx, screenshotUploadFanoutConfig{
+		Deps:                  d,
 		Client:                client,
 		AppID:                 resolvedAppID,
 		Version:               resolvedVersion,
 		VersionID:             resolvedVersionID,
 		Platform:              resolvedPlatform,
-		RootPath:              pathValue,
+		RootPath:              d.OSPath(pathValue),
 		LocaleAssets:          localeAssets,
 		LocaleAssetsCanonical: true,
 		SingleLocale:          localeValue != "",
@@ -1034,7 +1195,7 @@ func executeScreenshotUploadCommand(ctx context.Context, opts screenshotUploadCo
 		Replace:               opts.Replace,
 		DryRun:                opts.DryRun,
 		MaxScreenshots:        opts.MaxScreenshots,
-		RequestContext:        deps.RequestContext,
+		RequestContext:        d.Timeout,
 		UploadScreenshot:      deps.UploadScreenshot,
 		ExecuteUpload:         deps.ExecuteUpload,
 	})

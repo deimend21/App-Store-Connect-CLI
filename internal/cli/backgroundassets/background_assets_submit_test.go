@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type fakeSubmitClient struct {
@@ -146,7 +147,7 @@ func TestRollbackBackgroundAssetReviewSubmissionUsesFreshContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := rollbackBackgroundAssetReviewSubmission(ctx, client, "sub-1", "validate before adding items", errors.New("invalid receipt"))
+	err := rollbackBackgroundAssetReviewSubmission(ctx, newBackgroundAssetsTestDeps(nil), client, "sub-1", "validate before adding items", errors.New("invalid receipt"))
 	if err == nil || !strings.Contains(err.Error(), "rolled back the submission") {
 		t.Fatalf("expected rollback error, got %v", err)
 	}
@@ -169,7 +170,7 @@ func TestBackgroundAssetSubmitRequestContextRespectsCallerDeadline(t *testing.T)
 		t.Fatal("caller context should have a deadline")
 	}
 
-	requestCtx, cancelRequest := backgroundAssetSubmitRequestContext(parent)
+	requestCtx, cancelRequest := backgroundAssetSubmitRequestContext(parent, newBackgroundAssetsTestDeps(nil))
 	defer cancelRequest()
 	requestDeadline, ok := requestCtx.Deadline()
 	if !ok {
@@ -186,7 +187,7 @@ func TestRollbackBackgroundAssetReviewSubmissionRetainsBothFailures(t *testing.T
 	cancelErr := errors.New("cancel unavailable")
 	client.cancelErr = cancelErr
 
-	err := rollbackBackgroundAssetReviewSubmission(context.Background(), client, "sub-1", "create review submission", cause)
+	err := rollbackBackgroundAssetReviewSubmission(context.Background(), newBackgroundAssetsTestDeps(nil), client, "sub-1", "create review submission", cause)
 	if err == nil || !strings.Contains(err.Error(), "rollback also failed") || !strings.Contains(err.Error(), "sub-1") {
 		t.Fatalf("rollback error = %v, want leaked submission detail", err)
 	}
@@ -195,9 +196,41 @@ func TestRollbackBackgroundAssetReviewSubmissionRetainsBothFailures(t *testing.T
 	}
 }
 
+func TestRollbackBackgroundAssetReviewSubmissionKeepsDraftWhenCancelIsRefused(t *testing.T) {
+	client := newFakeSubmitClient()
+	cause := errors.New("invalid create response")
+	// App Store Connect refuses to cancel an unsubmitted draft (READY_FOR_REVIEW).
+	cancelErr := errors.New("Resource state is invalid.: Resource is not in cancellable state")
+	client.cancelErr = cancelErr
+
+	err := rollbackBackgroundAssetReviewSubmission(context.Background(), newBackgroundAssetsTestDeps(nil), client, "sub-1", "create review submission", cause)
+	if err == nil || !strings.Contains(err.Error(), `submission "sub-1" failed; App Store Connect refused to cancel it, so it was kept`) {
+		t.Fatalf("rollback error = %v, want kept submission detail", err)
+	}
+	if strings.Contains(err.Error(), "leaked") {
+		t.Fatalf("rollback error = %v, want a refused draft cancel not reported as leaked", err)
+	}
+	if !errors.Is(err, cause) || !errors.Is(err, cancelErr) {
+		t.Fatalf("rollback error = %v, want both original and cancellation causes", err)
+	}
+	hinted, ok := errors.AsType[*shared.HintedError](err)
+	if !ok {
+		t.Fatalf("rollback error = %T, want a hinted error", err)
+	}
+	for _, want := range []string{
+		"asc review submissions-get --id sub-1 --include items",
+		"--review-submission-id sub-1",
+		"asc review submissions-submit --id sub-1 --confirm",
+	} {
+		if !strings.Contains(hinted.Hint, want) {
+			t.Fatalf("hint = %q, want it to contain %q", hinted.Hint, want)
+		}
+	}
+}
+
 func TestResolveBackgroundAssetSubmitItems_All(t *testing.T) {
 	client := newFakeSubmitClient()
-	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{appID: "APP", all: true})
+	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{appID: "APP", all: true})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +255,7 @@ func TestResolveBackgroundAssetSubmitItems_All(t *testing.T) {
 
 func TestResolveBackgroundAssetSubmitItems_ExplicitVersionIDs(t *testing.T) {
 	client := newFakeSubmitClient()
-	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:              "APP",
 		explicitVersionIDs: []string{"vid-1", " vid-2 ", "", "vid-1"},
 	})
@@ -239,7 +272,7 @@ func TestResolveBackgroundAssetSubmitItems_ExplicitVersionIDs(t *testing.T) {
 
 func TestResolveBackgroundAssetSubmitItems_AssetPackIdentifierMissing(t *testing.T) {
 	client := newFakeSubmitClient()
-	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:                "APP",
 		assetPackIdentifiers: []string{"stamps.us", "stamps.fr"},
 	})
@@ -257,7 +290,7 @@ func TestResolveBackgroundAssetSubmitItems_NoCompleteVersion(t *testing.T) {
 			Attributes: asc.BackgroundAssetVersionAttributes{State: "AWAITING_UPLOAD", Version: "1"},
 		},
 	}
-	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:                "APP",
 		assetPackIdentifiers: []string{"stamps.de"},
 	})
@@ -268,7 +301,7 @@ func TestResolveBackgroundAssetSubmitItems_NoCompleteVersion(t *testing.T) {
 
 func TestResolveBackgroundAssetSubmitItems_FilterByID(t *testing.T) {
 	client := newFakeSubmitClient()
-	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:              "APP",
 		backgroundAssetIDs: []string{"asset-2"},
 	})
@@ -294,7 +327,7 @@ func TestResolveBackgroundAssetSubmitItems_PlatformFilter(t *testing.T) {
 			Attributes: asc.BackgroundAssetVersionAttributes{State: "COMPLETE", Version: "2", CreatedDate: "2026-02-01T00:00:00Z", Platforms: []asc.Platform{asc.PlatformIOS}},
 		},
 	}
-	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	items, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:              "APP",
 		platform:           "IOS",
 		backgroundAssetIDs: []string{"asset-1"},
@@ -338,7 +371,7 @@ func TestFetchAlreadyAttachedBackgroundAssetVersions(t *testing.T) {
 			},
 		},
 	}
-	attached, err := fetchAlreadyAttachedBackgroundAssetVersions(context.Background(), client, "sub-1")
+	attached, err := fetchAlreadyAttachedBackgroundAssetVersions(context.Background(), newBackgroundAssetsTestDeps(nil), client, "sub-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -365,7 +398,7 @@ func TestResolveBackgroundAssetSubmitItems_PlatformMismatchProducesError(t *test
 			Attributes: asc.BackgroundAssetVersionAttributes{State: "COMPLETE", Version: "1", Platforms: []asc.Platform{asc.PlatformMacOS}},
 		},
 	}
-	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{client: client}, backgroundAssetSubmitSelection{
+	_, err := resolveBackgroundAssetSubmitItems(context.Background(), backgroundAssetSubmitResolver{d: newBackgroundAssetsTestDeps(nil), client: client}, backgroundAssetSubmitSelection{
 		appID:              "APP",
 		platform:           "IOS",
 		backgroundAssetIDs: []string{"asset-1"},

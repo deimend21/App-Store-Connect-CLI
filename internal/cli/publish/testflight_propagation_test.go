@@ -30,7 +30,7 @@ func (f *postUploadBuildDistributionFake) AddBetaGroupsToBuildWithNotify(_ conte
 	return asc.BuildBetaGroupsNotificationActionNone, f.addErrors[index]
 }
 
-func (f *postUploadBuildDistributionFake) GetBuild(_ context.Context, buildID string) (*asc.BuildResponse, error) {
+func (f *postUploadBuildDistributionFake) GetBuild(_ context.Context, buildID string, _ ...asc.BuildOption) (*asc.BuildResponse, error) {
 	f.getCalls++
 	if len(f.getErrors) > 0 {
 		index := min(f.getCalls-1, len(f.getErrors)-1)
@@ -350,7 +350,12 @@ func TestAddUploadedBuildBetaGroupsPreservesCancellationAndDeadline(t *testing.T
 				"build-1",
 				postUploadBuildGroups(),
 				shared.AddBuildBetaGroupsOptions{},
-				postUploadBuildPropagationRetryPolicy{Backoffs: []time.Duration{time.Minute}},
+				postUploadBuildPropagationRetryPolicy{
+					Backoffs: []time.Duration{time.Minute},
+					Wait: func(ctx context.Context, delay time.Duration) error {
+						return waitForPostUploadBuildPropagation(ctx, time.After, delay)
+					},
+				},
 			)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("expected %v, got %v", tt.want, err)

@@ -3,6 +3,8 @@ package cmdtest
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,12 +12,15 @@ import (
 	"testing"
 
 	cmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 	authsvc "github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
 	authcmd "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/auth"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
 )
 
-func TestAuthStatusOutputJSON(t *testing.T) {
+func writeDefaultAuthConfig(t *testing.T) {
+	t.Helper()
+
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "config.json")
 	keyPath := filepath.Join(tempDir, "AuthKey.p8")
@@ -44,100 +49,56 @@ func TestAuthStatusOutputJSON(t *testing.T) {
 	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
 	t.Setenv("ASC_PRIVATE_KEY", "")
 	t.Setenv("ASC_PRIVATE_KEY_B64", "")
-
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"auth", "status", "--output", "json"}, "1.0.0")
-	})
-	if code != cmd.ExitSuccess {
-		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitSuccess, stderr)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
-	var payload struct {
-		StorageBackend string `json:"storageBackend"`
-		Credentials    []struct {
-			Name      string `json:"name"`
-			KeyID     string `json:"keyId"`
-			IsDefault bool   `json:"isDefault"`
-			StoredIn  string `json:"storedIn"`
-		} `json:"credentials"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
-		t.Fatalf("failed to unmarshal auth status json: %v; stdout=%q", err, stdout)
-	}
-	if payload.StorageBackend != "Config File" {
-		t.Fatalf("expected storage backend %q, got %q", "Config File", payload.StorageBackend)
-	}
-	if len(payload.Credentials) != 1 {
-		t.Fatalf("expected one credential, got %d", len(payload.Credentials))
-	}
-	if payload.Credentials[0].Name != "default" || payload.Credentials[0].KeyID != "KEY123" || !payload.Credentials[0].IsDefault {
-		t.Fatalf("unexpected credential payload: %+v", payload.Credentials[0])
-	}
 }
 
-func TestAuthStatusDefaultOutputRespectsASCDefaultOutputJSON(t *testing.T) {
-	resetDefaultOutput(t)
-	t.Setenv("ASC_DEFAULT_OUTPUT", "json")
-
-	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "config.json")
-	keyPath := filepath.Join(tempDir, "AuthKey.p8")
-	writeECDSAPEM(t, keyPath)
-
-	cfg := &config.Config{
-		DefaultKeyName: "default",
-		Keys: []config.Credential{
-			{
-				Name:           "default",
-				KeyID:          "KEY123",
-				IssuerID:       "ISS456",
-				PrivateKeyPath: keyPath,
-			},
-		},
-	}
-	if err := config.SaveAt(configPath, cfg); err != nil {
-		t.Fatalf("SaveAt() error: %v", err)
+func TestAuthStatusOutputJSON(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		defaultOutput string
+	}{
+		{name: "explicit output flag", args: []string{"auth", "status", "--output", "json"}},
+		{name: "ASC_DEFAULT_OUTPUT", args: []string{"auth", "status"}, defaultOutput: "json"},
 	}
 
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-	t.Setenv("ASC_CONFIG_PATH", configPath)
-	t.Setenv("ASC_PROFILE", "")
-	t.Setenv("ASC_KEY_ID", "")
-	t.Setenv("ASC_ISSUER_ID", "")
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY", "")
-	t.Setenv("ASC_PRIVATE_KEY_B64", "")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resetDefaultOutput(t)
+			t.Setenv("ASC_DEFAULT_OUTPUT", test.defaultOutput)
+			writeDefaultAuthConfig(t)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"auth", "status"}, "1.0.0")
-	})
-	if code != cmd.ExitSuccess {
-		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitSuccess, stderr)
-	}
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+			var code int
+			stdout, stderr := captureOutput(t, func() {
+				code = cmd.Run(test.args, "1.0.0")
+			})
+			if code != cmd.ExitSuccess {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitSuccess, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
 
-	var payload struct {
-		StorageBackend string `json:"storageBackend"`
-		Credentials    []struct {
-			Name  string `json:"name"`
-			KeyID string `json:"keyId"`
-		} `json:"credentials"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
-		t.Fatalf("failed to unmarshal auth status json: %v; stdout=%q", err, stdout)
-	}
-	if payload.StorageBackend != "Config File" {
-		t.Fatalf("expected storage backend %q, got %q", "Config File", payload.StorageBackend)
-	}
-	if len(payload.Credentials) != 1 || payload.Credentials[0].Name != "default" {
-		t.Fatalf("unexpected credentials payload: %+v", payload.Credentials)
+			var payload struct {
+				StorageBackend string `json:"storageBackend"`
+				Credentials    []struct {
+					Name      string `json:"name"`
+					KeyID     string `json:"keyId"`
+					IsDefault bool   `json:"isDefault"`
+				} `json:"credentials"`
+			}
+			if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+				t.Fatalf("failed to unmarshal auth status json: %v; stdout=%q", err, stdout)
+			}
+			if payload.StorageBackend != "Config File" {
+				t.Fatalf("expected storage backend %q, got %q", "Config File", payload.StorageBackend)
+			}
+			if len(payload.Credentials) != 1 {
+				t.Fatalf("expected one credential, got %d", len(payload.Credentials))
+			}
+			if payload.Credentials[0].Name != "default" || payload.Credentials[0].KeyID != "KEY123" || !payload.Credentials[0].IsDefault {
+				t.Fatalf("unexpected credential payload: %+v", payload.Credentials[0])
+			}
+		})
 	}
 }
 
@@ -164,10 +125,7 @@ func TestAuthStatusShowsEnvironmentPrecedenceWithoutValidatingPrivateKey(t *test
 
 	const wantNote = "Complete environment credential fields take precedence when no profile is selected; stored credential lookup is skipped."
 
-	var jsonCode int
-	jsonOutput, jsonStderr := captureOutput(t, func() {
-		jsonCode = cmd.Run([]string{"auth", "status", "--output", "json"}, "1.0.0")
-	})
+	jsonOutput, jsonStderr, jsonCode := runWithDeps(t, nil, "auth", "status", "--output", "json")
 	if jsonCode != cmd.ExitSuccess || jsonStderr != "" {
 		t.Fatalf("json status: exit=%d stderr=%q", jsonCode, jsonStderr)
 	}
@@ -183,10 +141,7 @@ func TestAuthStatusShowsEnvironmentPrecedenceWithoutValidatingPrivateKey(t *test
 		t.Fatalf("unexpected environment status payload: %+v", payload)
 	}
 
-	var tableCode int
-	tableOutput, tableStderr := captureOutput(t, func() {
-		tableCode = cmd.Run([]string{"auth", "status", "--output", "table"}, "1.0.0")
-	})
+	tableOutput, tableStderr, tableCode := runWithDeps(t, nil, "auth", "status", "--output", "table")
 	if tableCode != cmd.ExitSuccess || tableStderr != "" {
 		t.Fatalf("table status: exit=%d stderr=%q", tableCode, tableStderr)
 	}
@@ -240,7 +195,7 @@ func TestAuthStatusDoesNotMarkInvalidBase64EnvironmentActive(t *testing.T) {
 	}
 }
 
-func TestAuthStatusDoesNotMarkUnmaterializableInlineEnvironmentActive(t *testing.T) {
+func TestAuthStatusMarksInlineEnvironmentActiveWithoutTempDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("TMPDIR does not control os.TempDir on Windows")
 	}
@@ -277,7 +232,13 @@ func TestAuthStatusDoesNotMarkUnmaterializableInlineEnvironmentActive(t *testing
 	t.Setenv("ASC_ISSUER_ID", "12345678-abcd-1234-abcd-123456789012")
 	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
 	t.Setenv("ASC_PRIVATE_KEY", "")
-	t.Setenv("ASC_PRIVATE_KEY_B64", base64.StdEncoding.EncodeToString([]byte("inline-key-"+tempDir)))
+	keyPath := filepath.Join(tempDir, "AuthKey.p8")
+	writeECDSAPEM(t, keyPath)
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ASC_PRIVATE_KEY_B64", base64.StdEncoding.EncodeToString(key))
 
 	var code int
 	stdout, stderr := captureOutput(t, func() {
@@ -298,8 +259,8 @@ func TestAuthStatusDoesNotMarkUnmaterializableInlineEnvironmentActive(t *testing
 	if !payload.EnvironmentCredentialsComplete {
 		t.Fatalf("expected syntactically complete environment credentials, got %+v", payload)
 	}
-	if payload.EnvironmentNote != "" {
-		t.Fatalf("unmaterializable inline key must not be reported as active: %+v", payload)
+	if !strings.Contains(payload.EnvironmentNote, "stored credential lookup is skipped") {
+		t.Fatalf("inline environment key should be active without a temp directory: %+v", payload)
 	}
 
 	tableOutput, tableStderr := captureOutput(t, func() {
@@ -310,8 +271,8 @@ func TestAuthStatusDoesNotMarkUnmaterializableInlineEnvironmentActive(t *testing
 	if code != cmd.ExitSuccess || tableStderr != "" {
 		t.Fatalf("table status: exit=%d stderr=%q", code, tableStderr)
 	}
-	if !strings.Contains(tableOutput, "Run 'asc auth login'") {
-		t.Fatalf("expected inactive environment source to retain login guidance: %q", tableOutput)
+	if !strings.Contains(tableOutput, "No stored credentials found.") || strings.Contains(tableOutput, "Run 'asc auth login'") {
+		t.Fatalf("expected active inline credentials without login guidance: %q", tableOutput)
 	}
 }
 
@@ -368,18 +329,22 @@ func TestAuthStatusTableNotesConfigPrecedenceOverEnv(t *testing.T) {
 	}
 }
 
-func TestAuthStatusOutputInvalidReturnsExitUsage(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+func TestAuthOutputInvalidReturnsExitUsage(t *testing.T) {
+	for _, command := range []string{"status", "issuer-id"} {
+		t.Run(command, func(t *testing.T) {
+			t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
 
-	_, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"auth", "status", "--output", "yaml"}, "1.0.0")
-		if code != cmd.ExitUsage {
-			t.Fatalf("exit code = %d, want %d", code, cmd.ExitUsage)
-		}
-	})
-	if !strings.Contains(stderr, `(got "yaml")`) {
-		t.Fatalf("expected stderr to contain unsupported format error, got %q", stderr)
+			_, stderr := captureOutput(t, func() {
+				code := cmd.Run([]string{"auth", command, "--output", "yaml"}, "1.0.0")
+				if code != cmd.ExitUsage {
+					t.Fatalf("exit code = %d, want %d", code, cmd.ExitUsage)
+				}
+			})
+			if !strings.Contains(stderr, `(got "yaml")`) {
+				t.Fatalf("expected stderr to contain unsupported format error, got %q", stderr)
+			}
+		})
 	}
 }
 
@@ -415,7 +380,7 @@ func TestAuthStatusInvalidEnvKeyTypeMarksEnvironmentIncomplete(t *testing.T) {
 	if payload.EnvironmentCredentialsComplete {
 		t.Fatalf("expected environmentCredentialsComplete=false, got true; stdout=%q", stdout)
 	}
-	if !strings.Contains(payload.EnvironmentNote, "ASC_KEY_TYPE must be one of: team, individual") {
+	if !strings.Contains(payload.EnvironmentNote, "ASC_KEY_TYPE must be one of: team, individual, enterprise") {
 		t.Fatalf("expected invalid key type environment note, got %q", payload.EnvironmentNote)
 	}
 }
@@ -472,5 +437,94 @@ func TestAuthStatusInvalidBypassWarningPrintedOnce(t *testing.T) {
 	}
 	if payload.StorageBackend == "" {
 		t.Fatalf("expected storage backend in auth status output, got empty payload: %q", stdout)
+	}
+}
+
+func TestAuthStatusValidateFailsAStoredKeyBlockedByAnAgreement(t *testing.T) {
+	writeDefaultAuthConfig(t)
+	t.Setenv("ASC_BEARER_TOKEN", "")
+	t.Setenv("ASC_BEARER_TOKEN_COMMAND", "")
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/apps", "limit=1"), asctest.JSON(http.StatusForbidden, `{"errors":[{"status":"403","code":"FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED","title":"A required agreement is missing or has expired","detail":"This request requires an in-effect agreement that has not been signed or has expired."}]}`))
+
+	var code int
+	stdout, stderr := captureOutput(t, func() {
+		code = cmd.Run([]string{"auth", "status", "--validate", "--output", "json"}, "1.0.0")
+	})
+
+	if code != cmd.ExitError {
+		t.Fatalf("exit code = %d, want %d; stderr: %s", code, cmd.ExitError, stderr)
+	}
+	var payload struct {
+		Credentials []struct {
+			Validation      string `json:"validation"`
+			ValidationError string `json:"validationError"`
+		} `json:"credentials"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("stdout is not JSON: %v; stdout: %q", err, stdout)
+	}
+	if len(payload.Credentials) != 1 || payload.Credentials[0].Validation != "failed" || !strings.Contains(payload.Credentials[0].ValidationError, "An Account Holder must accept it") {
+		t.Fatalf("credentials = %+v, want the key reported failed with the agreement remediation", payload.Credentials)
+	}
+}
+
+// keychainListFailure stands in for the marked error the auth package returns
+// when the system keychain refuses this process, for example in a sandbox.
+type keychainListFailure struct{}
+
+func (keychainListFailure) Error() string {
+	return "Failed to query keychain: User interaction is not allowed. (-25308)"
+}
+
+func (keychainListFailure) Is(target error) bool { return target == authsvc.ErrKeychainReadFailed }
+
+func TestAuthStatusReportsUnreadableKeychainAsAuthFailure(t *testing.T) {
+	const wantStderr = "Error: auth status: cannot read the system keychain: Failed to query keychain: User interaction is not allowed. (-25308)\n" +
+		"Hint: This process cannot read the system keychain, for example inside an agent sandbox. Run `asc auth status` where the keychain is reachable. ASC_BYPASS_KEYCHAIN=1 lists only config-file and environment credentials: profiles stored in the keychain are not shown then, so an empty list does not mean none are stored.\n"
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "summaries", args: []string{"auth", "status"}},
+		{name: "validate", args: []string{"auth", "status", "--validate"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fail := func() ([]authsvc.Credential, error) { return nil, keychainListFailure{} }
+			t.Cleanup(authcmd.SetListCredentialSummaries(fail))
+			t.Cleanup(authcmd.SetListStoredCredentials(fail))
+			t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+
+			stdout, stderr, code := runWithDeps(t, nil, test.args...)
+			if code != cmd.ExitAuth {
+				t.Fatalf("exit = %d, want %d; stderr=%q", code, cmd.ExitAuth, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if stderr != wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, wantStderr)
+			}
+		})
+	}
+}
+
+// A corrupt keychain entry is not a sandbox refusal: auth status must name the
+// profile and how to replace it instead of blaming keychain access.
+func TestAuthStatusReportsCorruptKeychainEntry(t *testing.T) {
+	const wantStderr = "Error: auth status: failed to list credentials: invalid keychain entry \"asc:credential:broken\": unexpected end of JSON input\n" +
+		"Hint: The keychain entry for profile \"broken\" is not valid. Remove it with `asc auth logout --name \"broken\" --confirm` and store the key again with `asc auth login`.\n"
+	fail := func() ([]authsvc.Credential, error) {
+		return nil, &authsvc.InvalidKeychainEntryError{Key: "asc:credential:broken", Name: "broken", Err: errors.New("unexpected end of JSON input")}
+	}
+	t.Cleanup(authcmd.SetListCredentialSummaries(fail))
+	t.Cleanup(authcmd.SetListStoredCredentials(fail))
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+
+	stdout, stderr, code := runWithDeps(t, nil, "auth", "status", "--validate")
+	if code != cmd.ExitError || stdout != "" || stderr != wantStderr {
+		t.Fatalf("exit=%d stdout=%q stderr=%q, want exit %d and %q", code, stdout, stderr, cmd.ExitError, wantStderr)
 	}
 }

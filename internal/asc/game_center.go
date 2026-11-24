@@ -11,9 +11,6 @@ type GameCenterDetailAttributes struct {
 	MultiplayerTurnBasedSessionEnabled bool `json:"multiplayerTurnBasedSessionEnabled,omitempty"`
 }
 
-// GameCenterDetailResponse is the response from Game Center detail endpoints.
-type GameCenterDetailResponse = SingleResponse[GameCenterDetailAttributes]
-
 // Valid leaderboard formatters.
 var ValidLeaderboardFormatters = []string{
 	"INTEGER",
@@ -46,6 +43,12 @@ var ValidScoreSortTypes = []string{
 var ValidSubmissionTypes = []string{
 	"BEST_SCORE",
 	"MOST_RECENT_SCORE",
+}
+
+// Valid leaderboard visibilities.
+var ValidLeaderboardVisibilities = []string{
+	"SHOW_FOR_ALL",
+	"HIDE_FOR_ALL",
 }
 
 // GameCenterVersionState represents the state of a Game Center version.

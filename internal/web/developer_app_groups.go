@@ -299,7 +299,7 @@ func (c *Client) ListDeveloperAppGroups(ctx context.Context, options DeveloperAp
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint())
 	}
 	result, err := c.listDeveloperAppGroupPages(ctx, teamID, options.Paginate, options.Paginate)
 	if err != nil {
@@ -404,7 +404,7 @@ func (c *Client) DeleteDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint())
 	}
 
 	groups, err := c.listDeveloperAppGroupPages(ctx, teamID, true, true)
@@ -755,7 +755,7 @@ func (c *Client) CreateDeveloperAppGroup(ctx context.Context, request DeveloperA
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
+		return nil, fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint())
 	}
 
 	body, err := c.doDeveloperPortalLegacyFormRequest(ctx, developerAppGroupsCreatePath, url.Values{
@@ -799,7 +799,7 @@ func (c *Client) rejectDeveloperAppGroupIdentifier(ctx context.Context, groupID 
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
 		if requireLookup {
-			return fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
+			return fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint())
 		}
 		return nil
 	}
@@ -1035,7 +1035,7 @@ func (c *Client) verifyDeveloperAppGroups(ctx context.Context, bundleID string, 
 func (c *Client) primeDeveloperAppGroupCSRF(ctx context.Context) error {
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint)
+		return fmt.Errorf("%w; %s", ErrDeveloperPortalTeamNotSelected, developerPortalAuthHint())
 	}
 	c.clearDeveloperCSRFTokens()
 	body, err := c.doDeveloperPortalLegacyFormRequest(readonly.WithReadIntent(ctx), developerAppGroupsListPath, url.Values{
@@ -1056,7 +1056,7 @@ func (c *Client) primeDeveloperAppGroupCSRF(ctx context.Context) error {
 	}
 	csrf, csrfTS := c.developerCSRFTokens()
 	if csrf == "" || csrfTS == "" {
-		return fmt.Errorf("missing Developer Portal CSRF headers after App Groups lookup; %s", developerPortalAuthHint)
+		return fmt.Errorf("missing Developer Portal CSRF headers after App Groups lookup; %s", developerPortalAuthHint())
 	}
 	return nil
 }
@@ -1122,14 +1122,10 @@ func validateDeveloperPortalLegacyResponse(response developerPortalLegacyRespons
 // references that any destructive Bundle ID mutation has to PATCH back.
 //
 // Every App Group mutation replaces the complete bundleIdCapabilities
-// relationship, so a graph that cannot be read must abort before any write
-// rather than be rewritten as "no other capabilities". The Bundle ID detail
-// request explicitly selects bundleIdCapabilities and asks for the maximum
-// supported included count. A missing or links-only relationship therefore
-// cannot prove which capabilities belong to the Bundle ID and must abort. The
-// included array alone is not a completeness boundary: it has no independent
-// pagination metadata and a replacement PATCH built from a truncated array
-// could silently detach unrelated capabilities.
+// relationship, so a missing, links-only, or possibly truncated graph aborts
+// before any write rather than be rewritten as "no other capabilities". The
+// included array alone is not a completeness boundary: it has no pagination
+// metadata of its own.
 func developerBundleIDCapabilityReferencesForReplacement(current developerBundleIDResponse) ([]developerResource, error) {
 	rawRelationship, hasRelationship := current.Data.Relationships["bundleIdCapabilities"]
 	if !hasRelationship || developerRelationshipUnresolved(rawRelationship) {

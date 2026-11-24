@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +71,62 @@ func TestArchiveMissingXcodebuild(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "xcodebuild not available") {
 		t.Fatalf("expected xcodebuild error, got %v", err)
+	}
+}
+
+func TestArchiveRejectsExistingResultBundleBeforeStartingProcess(t *testing.T) {
+	projectPath := createBuildTestContainer(t)
+	resultBundlePath := filepath.Join(t.TempDir(), "Existing.xcresult")
+	if err := os.MkdirAll(resultBundlePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll() result bundle error = %v", err)
+	}
+
+	restore := overrideTestEnvironment(t)
+	runtimeGOOS = "darwin"
+	lookPathFn = func(string) (string, error) {
+		t.Fatal("xcodebuild lookup must not run for an existing result bundle path")
+		return "", nil
+	}
+	t.Cleanup(restore)
+
+	_, err := Archive(context.Background(), ArchiveOptions{
+		ProjectPath:      projectPath,
+		Scheme:           "Demo",
+		ResultBundlePath: resultBundlePath,
+		ArchivePath:      filepath.Join(t.TempDir(), "Demo.xcarchive"),
+	})
+	if err == nil || !strings.Contains(err.Error(), "--result-bundle-path already exists") {
+		t.Fatalf("Archive() error = %v, want existing result bundle error", err)
+	}
+}
+
+func TestArchiveCommandUsesTypedBuildOptions(t *testing.T) {
+	opts := ArchiveOptions{
+		WorkspacePath:    "Demo App.xcworkspace",
+		Scheme:           "Demo App",
+		Configuration:    "Release",
+		Destination:      "generic/platform=iOS",
+		DerivedDataPath:  "/tmp/Derived Data/Demo",
+		ResultBundlePath: "/tmp/Results/Demo.xcresult",
+		ArchivePath:      "/tmp/Demo.xcarchive",
+		Clean:            true,
+		NoCodeSigning:    true,
+		XcodebuildArgs:   []string{"-quiet"},
+	}
+
+	want := []string{
+		"-workspace", "Demo App.xcworkspace",
+		"-scheme", "Demo App",
+		"-configuration", "Release",
+		"-destination", "generic/platform=iOS",
+		"-derivedDataPath", "/tmp/Derived Data/Demo",
+		"-resultBundlePath", "/tmp/Results/Demo.xcresult",
+		"-quiet",
+		"CODE_SIGNING_ALLOWED=NO",
+		"clean", "archive", "-archivePath", "/tmp/Demo.xcarchive",
+	}
+	if got := buildArchiveCommand(opts); !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildArchiveCommand() = %#v\nwant %#v", got, want)
 	}
 }
 
@@ -136,6 +194,98 @@ func TestArchiveNormalizesTrailingSeparatorArchivePath(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "|-archivePath|"+archivePath) {
 		t.Fatalf("expected normalized archive path in invocation, got %q", string(logData))
+	}
+}
+
+func TestArchiveOverwritePreservesExistingArchiveUntilReplacementSucceeds(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		fail, fallback bool
+	}{
+		{name: "build failure", fail: true},
+		{name: "native swap"},
+		{name: "backup fallback", fallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.fail && !tc.fallback && runtime.GOOS != "darwin" {
+				t.Skip("native archive swap requires macOS")
+			}
+			if tc.fallback {
+				previous := swapArchiveDirectoriesFn
+				swapArchiveDirectoriesFn = func(_, _ *os.File, _ string) error { return errArchiveSwapUnsupported }
+				t.Cleanup(func() { swapArchiveDirectoriesFn = previous })
+			}
+			tempDir := t.TempDir()
+			projectPath := filepath.Join(tempDir, "Demo.xcodeproj")
+			if err := os.Mkdir(projectPath, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			archivePath := filepath.Join(tempDir, "Demo.xcarchive")
+			if err := writeArchiveInfoPlist(archivePath); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(archivePath, "previous")
+			if err := os.WriteFile(marker, []byte("previous archive"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Cleanup(overrideTestEnvironment(t))
+			runtimeGOOS = "darwin"
+			lookPathFn = func(string) (string, error) { return "/usr/bin/xcodebuild", nil }
+			commandContextFn = helperCommandContext(t, filepath.Join(tempDir, "commands.log"))
+			if tc.fail {
+				t.Setenv("ASC_XCODE_HELPER_ARCHIVE_FAIL", "1")
+			}
+
+			result, err := Archive(context.Background(), ArchiveOptions{
+				ProjectPath: projectPath,
+				Scheme:      "Demo",
+				ArchivePath: archivePath,
+				Overwrite:   true,
+			})
+			if tc.fail {
+				if err == nil || !strings.Contains(err.Error(), "requested archive failure") {
+					t.Fatalf("expected xcodebuild archive failure, got %v", err)
+				}
+				if contents, err := os.ReadFile(marker); err != nil || string(contents) != "previous archive" {
+					t.Fatalf("archive overwrite failed to preserve prior contents: %v", err)
+				}
+			} else {
+				if err != nil || result.ArchivePath != archivePath || result.BundleID != "com.example.demo" {
+					t.Fatalf("replacement result = %+v, error = %v", result, err)
+				}
+				if _, err := os.Stat(marker); !os.IsNotExist(err) {
+					t.Fatalf("prior archive still present after replacement: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(archivePath, "Info.plist")); err != nil {
+					t.Fatalf("replacement missing at destination: %v", err)
+				}
+			}
+			if stages, err := filepath.Glob(filepath.Join(tempDir, ".asc-archive-stage-*")); err != nil || len(stages) != 0 {
+				t.Fatalf("archive staging left behind: %v, %v", stages, err)
+			}
+		})
+	}
+}
+
+func TestArchiveBackupRestoresOriginalOnPublicationFailure(t *testing.T) {
+	destination := filepath.Join(t.TempDir(), "Demo.xcarchive")
+	if err := writeArchiveInfoPlist(destination); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := stageArchiveReplacement(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.cleanup(nil)
+
+	// The staged archive disappeared before publication.
+	if err := replacement.publishWithBackup(); !os.IsNotExist(err) {
+		t.Fatalf("expected publication to fail with missing staged archive, got %v", err)
+	}
+	info, err := readArchiveBundleInfo(destination)
+	if err != nil || info.BundleID != "com.example.demo" {
+		t.Fatalf("prior archive was not restored: info=%+v err=%v", info, err)
 	}
 }
 
@@ -1176,15 +1326,30 @@ func TestExportWritesIPAAtExactPathAndReturnsMetadata(t *testing.T) {
 	t.Cleanup(restore)
 
 	ipaPath := filepath.Join(tempDir, "artifacts", "Demo.ipa")
+	exportDir := filepath.Join(tempDir, "export-outputs")
 	result, err := Export(context.Background(), ExportOptions{
 		ArchivePath:    archivePath,
 		ExportOptions:  exportOptionsPath,
 		IPAPath:        ipaPath,
+		ExportDir:      exportDir,
 		Overwrite:      false,
 		XcodebuildArgs: []string{"-allowProvisioningUpdates"},
 	})
 	if err != nil {
 		t.Fatalf("Export() error: %v", err)
+	}
+
+	wantFiles := []string{"DistributionSummary.plist", "manifest.plist"}
+	if result.ExportDir != exportDir || !reflect.DeepEqual(result.ExportFiles, wantFiles) {
+		t.Fatalf("export dir = %q files = %q, want %q %q", result.ExportDir, result.ExportFiles, exportDir, wantFiles)
+	}
+	for _, name := range wantFiles {
+		if data, err := os.ReadFile(filepath.Join(exportDir, name)); err != nil || string(data) != name {
+			t.Fatalf("kept %s = %q, %v", name, data, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(exportDir, "Exported.ipa")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("IPA must not be copied into --export-dir, stat err = %v", err)
 	}
 
 	if result.ArchivePath != archivePath {
@@ -2627,6 +2792,10 @@ func TestXcodeHelperProcess(t *testing.T) {
 	}
 
 	if len(commandArgs) >= 1 && commandName == "xcodebuild" && helperContainsArg(commandArgs[1:], "archive") {
+		if os.Getenv("ASC_XCODE_HELPER_ARCHIVE_FAIL") == "1" {
+			fmt.Fprintln(os.Stderr, "requested archive failure")
+			os.Exit(1)
+		}
 		archivePath, err := valueAfter(commandArgs[1:], "-archivePath")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -2766,6 +2935,12 @@ func TestXcodeHelperProcess(t *testing.T) {
 		if err := writeTestIPA(filepath.Join(exportPath, "Exported.ipa")); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
+		}
+		for _, name := range []string{"DistributionSummary.plist", "manifest.plist"} {
+			if err := os.WriteFile(filepath.Join(exportPath, name), []byte(name), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(2)
+			}
 		}
 		os.Exit(0)
 	}

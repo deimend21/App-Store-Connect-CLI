@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -87,9 +88,9 @@ func captureOutput(t *testing.T, fn func()) (string, string) {
 func TestSigningFetchValidationErrors(t *testing.T) {
 	// Flag validation must fail before any client is built; an unusable client
 	// keeps the test hermetic if that ever regresses.
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+	clientFactory := func() (*asc.Client, error) {
 		return nil, errors.New("App Store Connect client must not be created during flag validation")
-	}))
+	}
 
 	tests := []struct {
 		name    string
@@ -109,28 +110,45 @@ func TestSigningFetchValidationErrors(t *testing.T) {
 		{
 			name:    "missing device for development profile",
 			args:    []string{"signing", "fetch", "--bundle-id", "com.example.app", "--profile-type", "IOS_APP_DEVELOPMENT", "--create-missing"},
-			wantErr: "Error: --device is required for development profiles",
+			wantErr: "Error: --device or --all-devices is required for development and ad hoc profiles",
+		},
+		{
+			name:    "all devices with device",
+			args:    []string{"signing", "fetch", "--bundle-id", "com.example.app", "--profile-type", "IOS_APP_ADHOC", "--create-missing", "--all-devices", "--device", "DEVICE1"},
+			wantErr: "Error: --all-devices and --device are mutually exclusive",
+		},
+		{
+			name:    "all devices without create missing",
+			args:    []string{"signing", "fetch", "--bundle-id", "com.example.app", "--profile-type", "IOS_APP_ADHOC", "--all-devices"},
+			wantErr: "Error: --all-devices requires --create-missing because devices are only applied to profiles this command creates",
+		},
+		{
+			name:    "all devices on a profile type without devices",
+			args:    []string{"signing", "fetch", "--bundle-id", "com.example.app", "--profile-type", "IOS_APP_STORE", "--create-missing", "--all-devices"},
+			wantErr: "Error: --all-devices requires a development or ad hoc profile type; IOS_APP_STORE profiles have no device list",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cmd := SigningFetchCommand()
+			d, depsStdout, depsStderr := newSigningTestDeps()
+			d.Client = clientFactory
+			cmd := newSigningFetchCommand(d)
 			cmd.FlagSet.SetOutput(io.Discard)
 
-			stdout, stderr := captureOutput(t, func() {
-				args := test.args
-				if len(args) >= 2 && args[0] == "signing" && args[1] == "fetch" {
-					args = args[2:]
-				}
-				if err := cmd.Parse(args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				err := cmd.Run(context.Background())
-				if !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %v", err)
-				}
-			})
+			args := test.args
+			if len(args) >= 2 && args[0] == "signing" && args[1] == "fetch" {
+				args = args[2:]
+			}
+			if err := cmd.Parse(args); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
+			err := cmd.Run(context.Background())
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected ErrHelp, got %v", err)
+			}
+			stdout := depsStdout.String()
+			stderr := depsStderr.String()
 
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
@@ -144,12 +162,14 @@ func TestSigningFetchValidationErrors(t *testing.T) {
 
 func TestSigningFetchRejectsDeviceWithoutCreateMissing(t *testing.T) {
 	clientCalls := 0
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+	clientFactory := func() (*asc.Client, error) {
 		clientCalls++
 		return nil, errors.New("client must not be created")
-	}))
+	}
 
-	cmd := SigningFetchCommand()
+	d, depsStdout, depsStderr := newSigningTestDeps()
+	d.Client = clientFactory
+	cmd := newSigningFetchCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.Parse([]string{
 		"--bundle-id", "com.example.app",
@@ -159,10 +179,9 @@ func TestSigningFetchRejectsDeviceWithoutCreateMissing(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Run(context.Background())
-	})
+	runErr := cmd.Run(context.Background())
+	stdout := depsStdout.String()
+	stderr := depsStderr.String()
 
 	if runErr == nil || runErr.Error() != deviceWithoutCreateMissingError {
 		t.Fatalf("error = %v, want %q", runErr, deviceWithoutCreateMissingError)
@@ -232,36 +251,6 @@ func TestSigningFetchWriteFiles_NoOverwrite(t *testing.T) {
 	}
 }
 
-func TestSigningFetchHelpPairsDeviceWithCreateMissing(t *testing.T) {
-	cmd := SigningFetchCommand()
-
-	deviceFlag := cmd.FlagSet.Lookup("device")
-	if deviceFlag == nil {
-		t.Fatal("expected --device flag")
-	}
-	if !strings.Contains(deviceFlag.Usage, "--create-missing") {
-		t.Fatalf("--device usage = %q, want it to name --create-missing", deviceFlag.Usage)
-	}
-	if strings.Contains(deviceFlag.Usage, "deprecated") || strings.Contains(deviceFlag.Usage, "5.0.0") {
-		t.Fatalf("--device usage = %q, must not describe a finished transition", deviceFlag.Usage)
-	}
-	if !strings.Contains(cmd.LongHelp, "--device without --create-missing is rejected") {
-		t.Fatalf("long help must state that --device requires --create-missing, got %q", cmd.LongHelp)
-	}
-	if strings.Contains(cmd.LongHelp, "5.0.0") || strings.Contains(cmd.LongHelp, "deprecation") {
-		t.Fatalf("long help must not describe a finished transition, got %q", cmd.LongHelp)
-	}
-
-	for _, line := range strings.Split(cmd.LongHelp, "\n") {
-		if !strings.Contains(line, "--device") {
-			continue
-		}
-		if !strings.Contains(line, "--create-missing") {
-			t.Fatalf("example uses --device without --create-missing: %q", line)
-		}
-	}
-}
-
 func TestSigningFetchFormatUsesSharedOutputDefault(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -277,7 +266,8 @@ func TestSigningFetchFormatUsesSharedOutputDefault(t *testing.T) {
 			t.Cleanup(shared.ResetDefaultOutputFormat)
 			t.Setenv("ASC_DEFAULT_OUTPUT", tt.defaultValue)
 
-			cmd := SigningFetchCommand()
+			d, _, _ := newSigningTestDeps()
+			cmd := newSigningFetchCommand(d)
 			formatFlag := cmd.FlagSet.Lookup("format")
 			if formatFlag == nil {
 				t.Fatal("expected --format flag")
@@ -404,10 +394,10 @@ func TestFindActiveProfilesUseBundleIDRelationship(t *testing.T) {
 		context.Background(),
 		client,
 		"bundle-main",
-		"IOS_APP_STORE",
+		"IOS_APP_STORE", time.Now,
 	)
 	if err != nil {
-		t.Fatalf("findActiveProfiles() error: %v", err)
+		t.Fatalf("findActiveProfiles(, time.Now) error: %v", err)
 	}
 	if len(profiles) != 1 || profiles[0].ID != "profile-main" {
 		t.Fatalf("expected exact bundle profile, got %#v", profiles)
@@ -441,7 +431,7 @@ func TestSigningFetchPaginationRejectsRepeatedNextURL(t *testing.T) {
 			path:     "/v1/bundleIds/bundle-main/profiles",
 			response: `{"data":[],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds/bundle-main/profiles?cursor=repeat"}}`,
 			fetch: func(ctx context.Context, client *asc.Client) error {
-				_, err := findActiveProfiles(ctx, client, "bundle-main", "IOS_APP_STORE")
+				_, err := findActiveProfiles(ctx, client, "bundle-main", "IOS_APP_STORE", time.Now)
 				return err
 			},
 			wantSecond: "https://api.appstoreconnect.apple.com/v1/bundleIds/bundle-main/profiles?cursor=repeat",
@@ -451,7 +441,7 @@ func TestSigningFetchPaginationRejectsRepeatedNextURL(t *testing.T) {
 			path:     "/v1/profiles/profile-main/certificates",
 			response: `{"data":[],"links":{"next":"https://api.appstoreconnect.apple.com/v1/profiles/profile-main/certificates?cursor=repeat"}}`,
 			fetch: func(ctx context.Context, client *asc.Client) error {
-				_, err := findProfileCertificates(ctx, client, "profile-main", "")
+				_, err := findProfileCertificates(ctx, client, "profile-main", "", time.Now)
 				return err
 			},
 			wantSecond: "https://api.appstoreconnect.apple.com/v1/profiles/profile-main/certificates?cursor=repeat",
@@ -517,7 +507,7 @@ func TestSigningFetchPaginationFollowsDistinctNextURLs(t *testing.T) {
 			first:  `{"data":[{"type":"profiles","id":"profile-1","attributes":{"profileType":"IOS_APP_STORE","profileState":"ACTIVE"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds/bundle-main/profiles?cursor=page-2"}}`,
 			second: `{"data":[{"type":"profiles","id":"profile-2","attributes":{"profileType":"IOS_APP_STORE","profileState":"ACTIVE"}}],"links":{}}`,
 			fetch: func(ctx context.Context, client *asc.Client) (int, error) {
-				response, err := findActiveProfiles(ctx, client, "bundle-main", "IOS_APP_STORE")
+				response, err := findActiveProfiles(ctx, client, "bundle-main", "IOS_APP_STORE", time.Now)
 				return len(response), err
 			},
 			wantSecond: "https://api.appstoreconnect.apple.com/v1/bundleIds/bundle-main/profiles?cursor=page-2",
@@ -528,7 +518,7 @@ func TestSigningFetchPaginationFollowsDistinctNextURLs(t *testing.T) {
 			first:  `{"data":[{"type":"certificates","id":"cert-1","attributes":{"certificateType":"IOS_DISTRIBUTION"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/profiles/profile-main/certificates?cursor=page-2"}}`,
 			second: `{"data":[{"type":"certificates","id":"cert-2","attributes":{"certificateType":"IOS_DISTRIBUTION"}}],"links":{}}`,
 			fetch: func(ctx context.Context, client *asc.Client) (int, error) {
-				response, err := findProfileCertificates(ctx, client, "profile-main", "")
+				response, err := findProfileCertificates(ctx, client, "profile-main", "", time.Now)
 				if err != nil {
 					return 0, err
 				}
@@ -618,6 +608,7 @@ func TestResolveSigningAssetsUsesOnlyExistingProfileCertificates(t *testing.T) {
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -688,6 +679,7 @@ func TestResolveSigningAssetsFiltersExistingProfileCertificatesByRequestedType(t
 				context.Background(),
 				client,
 				signingAssetsOptions{
+					Now:                time.Now,
 					BundleIDResourceID: "bundle-main",
 					BundleIdentifier:   "com.example.signing.profile",
 					ProfileType:        "IOS_APP_STORE",
@@ -738,6 +730,7 @@ func TestResolveSigningAssetsSkipsUnusableExistingProfileCertificates(t *testing
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -791,6 +784,7 @@ func TestResolveSigningAssetsTreatsProfileWithOnlyUnusableCertificatesAsNoMatch(
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -805,6 +799,7 @@ func TestResolveSigningAssetsTreatsProfileWithOnlyUnusableCertificatesAsNoMatch(
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -838,6 +833,7 @@ func TestResolveSigningAssetsRejectsUnknownCertificateTypesBeforeLookup(t *testi
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -857,13 +853,13 @@ func TestResolveSigningCertificateTypesIncludesCompatibleCertificatesForIOSAndTV
 		profileType string
 		want        string
 	}{
-		{profileType: "IOS_APP_DEVELOPMENT", want: "IOS_DEVELOPMENT,DEVELOPMENT"},
-		{profileType: "IOS_APP_STORE", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
-		{profileType: "IOS_APP_ADHOC", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
+		{profileType: "IOS_APP_DEVELOPMENT", want: "DEVELOPMENT,IOS_DEVELOPMENT"},
+		{profileType: "IOS_APP_STORE", want: "DISTRIBUTION,IOS_DISTRIBUTION"},
+		{profileType: "IOS_APP_ADHOC", want: "DISTRIBUTION,IOS_DISTRIBUTION"},
 		{profileType: "IOS_APP_INHOUSE", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
-		{profileType: "TVOS_APP_DEVELOPMENT", want: "IOS_DEVELOPMENT,DEVELOPMENT"},
-		{profileType: "TVOS_APP_STORE", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
-		{profileType: "TVOS_APP_ADHOC", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
+		{profileType: "TVOS_APP_DEVELOPMENT", want: "DEVELOPMENT,IOS_DEVELOPMENT"},
+		{profileType: "TVOS_APP_STORE", want: "DISTRIBUTION,IOS_DISTRIBUTION"},
+		{profileType: "TVOS_APP_ADHOC", want: "DISTRIBUTION,IOS_DISTRIBUTION"},
 		{profileType: "TVOS_APP_INHOUSE", want: "IOS_DISTRIBUTION,DISTRIBUTION"},
 	}
 
@@ -937,6 +933,7 @@ func TestResolveSigningAssetsChecksEveryActiveProfileForInferredCertificateType(
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -980,6 +977,7 @@ func TestResolveSigningAssetsCreatesWhenActiveProfilesLackRequestedCertificate(t
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -1046,13 +1044,14 @@ func TestResolveSigningAssetsDoesNotRecreateAfterCreatedProfileUUIDMismatch(t *t
 	t.Cleanup(server.Close)
 	client := newSigningFetchServerTestClient(t, server)
 	options := signingAssetsOptions{
+		Now:                time.Now,
 		BundleIDResourceID: "bundle-main",
 		BundleIdentifier:   "com.example.app",
 		ProfileType:        "IOS_APP_ADHOC",
 		CertificateType:    "IOS_DISTRIBUTION",
 		DeviceIDs:          []string{"DEVICE1"},
 		CreateMissing:      true,
-		CertificateFilter:  identityCertificateFilter(identity),
+		CertificateFilter:  identityCertificateFilter(identity, time.Now),
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1120,6 +1119,7 @@ func TestResolveSigningAssetsCreatesSingleCertificateProfileWithNewestEligibleCe
 				context.Background(),
 				client,
 				signingAssetsOptions{
+					Now:                time.Now,
 					BundleIDResourceID: "bundle-main",
 					BundleIdentifier:   "com.example.signing.profile",
 					ProfileType:        tt.profileType,
@@ -1151,8 +1151,8 @@ func TestResolveSigningAssetsPreservesEligibleDevelopmentCertificates(t *testing
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/bundleIds/bundle-main/profiles":
 			signingFetchWriteJSON(t, w, http.StatusOK, `{"data":[]}`)
 		case req.Method == http.MethodGet && req.URL.Path == "/v1/certificates":
-			if got := req.URL.Query().Get("filter[certificateType]"); got != "IOS_DEVELOPMENT,DEVELOPMENT" {
-				t.Errorf("certificate type filter = %q, want IOS_DEVELOPMENT,DEVELOPMENT", got)
+			if got := req.URL.Query().Get("filter[certificateType]"); got != "DEVELOPMENT,IOS_DEVELOPMENT" {
+				t.Errorf("certificate type filter = %q, want DEVELOPMENT,IOS_DEVELOPMENT", got)
 			}
 			signingFetchWriteJSON(t, w, http.StatusOK, `{
 				"data":[
@@ -1182,6 +1182,7 @@ func TestResolveSigningAssetsPreservesEligibleDevelopmentCertificates(t *testing
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_DEVELOPMENT",
@@ -1232,6 +1233,7 @@ func TestResolveSigningAssetsRejectsProfileCreationWhenAllCertificatesAreIneligi
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -1336,13 +1338,14 @@ func TestResolveSigningAssetsPreflightsBeforeCreatingProfile(t *testing.T) {
 		context.Background(),
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
 			CreateMissing:      true,
 			BeforeCreate: func(plan profileCreatePlan) error {
 				events = append(events, "repository preflight")
-				if plan.ProfileName != profileCreateName("IOS_APP_STORE", time.Now()) {
+				if plan.ProfileName != profileCreateNameForTarget("IOS_APP_STORE", "com.example.signing.profile", time.Now()) {
 					t.Errorf("preflight profile name = %q, want the name used to create the profile", plan.ProfileName)
 				}
 				if got := extractIDs(plan.Certificates); len(got) != 1 || got[0] != "cert-1" {
@@ -1394,6 +1397,7 @@ func TestResolveSigningAssetsRefreshesCreateTimeoutAfterPreflight(t *testing.T) 
 		requestCtx,
 		client,
 		signingAssetsOptions{
+			Now:                time.Now,
 			BundleIDResourceID: "bundle-main",
 			BundleIdentifier:   "com.example.signing.profile",
 			ProfileType:        "IOS_APP_STORE",
@@ -1542,6 +1546,79 @@ func TestResolveSigningCertificateTypesCanonicalizesSeparators(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("resolveSigningCertificateTypes() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSigningAssetsWalksActiveProfilesByLatestExpiry(t *testing.T) {
+	profile := func(id, expiration string) string {
+		return fmt.Sprintf(`{"type":"profiles","id":%q,"attributes":{"profileType":"IOS_APP_INHOUSE","profileState":"ACTIVE","expirationDate":%q}}`, id, expiration)
+	}
+	firstPage := strings.Join([]string{
+		profile("profile-renewing", "2096-11-29T12:00:00.000+00:00"),
+		profile("profile-no-expiry", ""),
+		profile("profile-successor-b", "2097-10-30T12:00:00.000+00:00"),
+	}, ",")
+	secondPage := profile("profile-successor-a", "2097-10-30T11:00:00-01:00")
+
+	tests := []struct {
+		name        string
+		matching    string
+		wantLookups []string
+	}{
+		{
+			name:        "successor replaces the older profile listed first",
+			matching:    "profile-successor-a",
+			wantLookups: []string{"profile-successor-a"},
+		},
+		{
+			name:        "profiles without the certificate are skipped latest first",
+			matching:    "profile-no-expiry",
+			wantLookups: []string{"profile-successor-a", "profile-successor-b", "profile-renewing", "profile-no-expiry"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lookups := []string{}
+			client := newSigningFetchTestClient(t, func(req *http.Request) *http.Response {
+				switch {
+				case req.URL.Path == "/v1/bundleIds/bundle-main/profiles" && req.URL.Query().Get("cursor") == "":
+					return signingFetchJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[%s],"links":{"next":"https://api.appstoreconnect.apple.com/v1/bundleIds/bundle-main/profiles?cursor=2"}}`, firstPage))
+				case req.URL.Path == "/v1/bundleIds/bundle-main/profiles":
+					return signingFetchJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[%s]}`, secondPage))
+				case strings.HasSuffix(req.URL.Path, "/certificates"):
+					id := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/v1/profiles/"), "/certificates")
+					lookups = append(lookups, id)
+					if id != test.matching {
+						return signingFetchJSONResponse(http.StatusOK, `{"data":[]}`)
+					}
+					return signingFetchJSONResponse(http.StatusOK, `{"data":[{"type":"certificates","id":"cert-enterprise","attributes":{"certificateType":"IOS_DISTRIBUTION"}}]}`)
+				default:
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+					return signingFetchJSONResponse(http.StatusInternalServerError, `{}`)
+				}
+			})
+
+			selected, _, created, err := resolveSigningAssets(
+				context.Background(),
+				client,
+				signingAssetsOptions{
+					Now:                time.Now,
+					BundleIDResourceID: "bundle-main",
+					BundleIdentifier:   "com.example.app",
+					ProfileType:        "IOS_APP_INHOUSE",
+				},
+			)
+			if err != nil {
+				t.Fatalf("resolveSigningAssets() error: %v", err)
+			}
+			if created || selected.Data.ID != test.matching {
+				t.Fatalf("expected %s, got created=%v profile=%#v", test.matching, created, selected)
+			}
+			if !reflect.DeepEqual(lookups, test.wantLookups) {
+				t.Fatalf("certificate lookups = %v, want %v", lookups, test.wantLookups)
 			}
 		})
 	}

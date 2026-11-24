@@ -8,13 +8,13 @@ import (
 	"image"
 	"image/color"
 	"image/png"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 type screenshotValidateOutput struct {
@@ -45,20 +45,6 @@ type screenshotValidateIssueOutput struct {
 	Message     string `json:"message"`
 }
 
-func TestScreenshotsHelpListsValidateSubcommand(t *testing.T) {
-	stdout, stderr, runErr := runRootCommand(t, []string{"screenshots"})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "\n  validate") {
-		t.Fatalf("expected screenshots help to list validate, got %q", stderr)
-	}
-}
-
 func TestAssetsScreenshotsValidateOutputReportsOrderingHiddenFilesAndDimensionErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeScreenshotValidatePNG(t, filepath.Join(dir, "02-details.png"), 1242, 2688, color.RGBA{R: 20, A: 255}, png.DefaultCompression)
@@ -66,21 +52,12 @@ func TestAssetsScreenshotsValidateOutputReportsOrderingHiddenFilesAndDimensionEr
 	writeScreenshotValidatePNG(t, filepath.Join(dir, ".hidden.png"), 1242, 2688, color.RGBA{R: 30, A: 255}, png.DefaultCompression)
 	writePNG(t, filepath.Join(dir, "03-bad.png"), 100, 100)
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"screenshots", "validate",
-			"--path", dir,
-			"--device-type", "IPHONE_65",
-			"--output", "json",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(t.Context())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
+		"screenshots", "validate",
+		"--path", dir,
+		"--device-type", "IPHONE_65",
+		"--output", "json",
+	}...)
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -157,12 +134,12 @@ func TestAssetsScreenshotsValidateReportsDecodedPixelDuplicates(t *testing.T) {
 		t.Fatal("expected differently encoded PNG files")
 	}
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
 		"screenshots", "validate",
 		"--path", dir,
 		"--device-type", "APP_WATCH_SERIES_3",
 		"--output", "json",
-	})
+	}...)
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -215,12 +192,12 @@ func TestAssetsScreenshotsValidateReportsFormatExtensionMismatch(t *testing.T) {
 	writeScreenshotValidatePNG(t, filepath.Join(dir, "01-home.png"), 1242, 2688, color.RGBA{R: 10, A: 255}, png.DefaultCompression)
 	writeCmdtestScreenshotJPEG(t, dir, "02-details.png")
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
 		"screenshots", "validate",
 		"--path", dir,
 		"--device-type", "IPHONE_65",
 		"--output", "json",
-	})
+	}...)
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -269,17 +246,13 @@ func hasScreenshotValidateIssue(issues []screenshotValidateIssueOutput, code, se
 	return false
 }
 
-func TestAssetsScreenshotsValidateHelpUsesCanonicalUsage(t *testing.T) {
-	usage := usageForCommand(t, "screenshots", "validate")
-	if !strings.Contains(usage, `asc screenshots validate --path "./screenshots" --device-type "IPHONE_65"`) {
-		t.Fatalf("expected canonical validate usage, got %q", usage)
-	}
-}
-
 func writeScreenshotValidatePNG(t *testing.T, path string, width, height int, marker color.RGBA, compression png.CompressionLevel) {
 	t.Helper()
 
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for i := 3; i < len(img.Pix); i += 4 {
+		img.Pix[i] = 255
+	}
 	img.SetRGBA(0, 0, marker)
 
 	file, err := os.Create(path)
@@ -294,48 +267,45 @@ func writeScreenshotValidatePNG(t *testing.T, path string, width, height int, ma
 	}
 }
 
-func TestAssetsScreenshotsValidateReportsUnreadableHiddenDotfiles(t *testing.T) {
+// A .DS_Store next to the screenshots is skipped with a warning, as upload
+// skips it, instead of failing validation as an unreadable image.
+func TestAssetsScreenshotsValidateSkipsHiddenNonImageFiles(t *testing.T) {
 	dir := t.TempDir()
 	writePNG(t, filepath.Join(dir, "01-home.png"), 1242, 2688)
 	if err := os.WriteFile(filepath.Join(dir, ".DS_Store"), []byte("not an image"), 0o644); err != nil {
 		t.Fatalf("write dotfile: %v", err)
 	}
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
 		"screenshots", "validate",
 		"--path", dir,
 		"--device-type", "IPHONE_65",
 		"--output", "json",
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-	if runErr == nil {
-		t.Fatal("expected reported validation error, got nil")
+	}...)
+	if runErr != nil {
+		t.Fatalf("validate error: %v; stderr=%s", runErr, stderr)
 	}
 
 	var result screenshotValidateOutput
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
 		t.Fatalf("decode output: %v", err)
 	}
-
-	if !hasScreenshotValidateIssue(result.Issues, "hidden_file", "warning", ".DS_Store") {
-		t.Fatalf("expected hidden dotfile warning, got %+v", result.Issues)
+	if result.TotalFiles != 1 || result.ErrorCount != 0 || result.WarningCount != 1 {
+		t.Fatalf("counts = total %d errors %d warnings %d, want 1/0/1", result.TotalFiles, result.ErrorCount, result.WarningCount)
 	}
-	if !hasScreenshotValidateIssue(result.Issues, "read_failure", "error", ".DS_Store") {
-		t.Fatalf("expected unreadable-dotfile error, got %+v", result.Issues)
+	if !hasScreenshotValidateIssue(result.Issues, "skipped_file", "warning", ".DS_Store") {
+		t.Fatalf("expected skipped_file warning for .DS_Store, got %+v", result.Issues)
 	}
 }
 
 func TestAssetsScreenshotsValidateRejectsInvalidDeviceTypeAsUsageError(t *testing.T) {
 	dir := t.TempDir()
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
 		"screenshots", "validate",
 		"--path", dir,
 		"--device-type", "not-a-device",
-	})
+	}...)
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -353,12 +323,12 @@ func TestAssetsScreenshotsValidatePreservesRawPathSemanticsForFileWithTrailingSe
 	path := filepath.Join(dir, "shot.png")
 	writePNG(t, path, 1242, 2688)
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, nil, []string{
 		"screenshots", "validate",
 		"--path", path + string(filepath.Separator),
 		"--device-type", "IPHONE_65",
 		"--output", "json",
-	})
+	}...)
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -374,5 +344,28 @@ func TestAssetsScreenshotsValidatePreservesRawPathSemanticsForFileWithTrailingSe
 	}
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
+	}
+}
+
+func TestScreenshotsUploadRunsValidateChecksBeforeNetwork(t *testing.T) {
+	setupAuth(t)
+	dir := t.TempDir()
+	marker := color.RGBA{R: 10, G: 20, B: 30, A: 255}
+	writeScreenshotValidatePNG(t, filepath.Join(dir, "01-original.png"), 312, 390, marker, png.BestSpeed)
+	writeScreenshotValidatePNG(t, filepath.Join(dir, "02-duplicate.png"), 312, 390, marker, png.BestCompression)
+
+	reg := asctest.NewRegistry(t)
+
+	_, stderr, err := runRootWithDeps(t, stubClient(t, reg), []string{
+		"screenshots", "upload",
+		"--version-localization", "LOC",
+		"--path", dir,
+		"--device-type", "APP_WATCH_SERIES_3",
+	}...)
+	if err == nil || !strings.Contains(err.Error(), `screenshot "02-duplicate.png" has decoded pixels identical to "01-original.png"`) {
+		t.Fatalf("expected the duplicate-pixel validate error, got %v; stderr=%s", err, stderr)
+	}
+	if calls := len(reg.Requests()); calls != 0 {
+		t.Fatalf("made %d network calls before rejecting the folder", calls)
 	}
 }

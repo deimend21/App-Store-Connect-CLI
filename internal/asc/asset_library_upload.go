@@ -4,13 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 )
-
-var assetLibraryProcessingPollInterval = 2 * time.Second
 
 type assetLibraryImageUploadResponse struct {
 	Data struct {
@@ -20,6 +18,7 @@ type assetLibraryImageUploadResponse struct {
 			State            string            `json:"state"`
 			SpecID           string            `json:"specId"`
 			UploadOperations []UploadOperation `json:"uploadOperations"`
+			StateDetails     []ErrorDetail     `json:"stateDetails"`
 			ImageAsset       *struct {
 				Width  int `json:"width"`
 				Height int `json:"height"`
@@ -28,17 +27,17 @@ type assetLibraryImageUploadResponse struct {
 	} `json:"data"`
 }
 
-// UploadAssetLibraryImage reserves, uploads, commits, and waits for an image.
-// A partial result retains the reserved ID when a later operation fails.
-// The caller validates the image and owns the overall upload timeout.
-func (c *Client) UploadAssetLibraryImage(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, requestContext RequestContextFunc) (AssetLibraryImageUploadResult, error) {
-	return c.UploadAssetLibraryImageWithCategory(ctx, libraryID, fileName, file, fileSize, "CREATIVE_ASSETS", "", requestContext)
+func (r assetLibraryImageUploadResponse) ready() bool {
+	attrs := r.Data.Attributes
+	return attrs.State == "PREPARE_FOR_SUBMISSION" && attrs.ImageAsset != nil && attrs.ImageAsset.Width > 0 && attrs.ImageAsset.Height > 0
 }
 
 // UploadAssetLibraryImageWithCategory uploads an independently managed image.
 // An empty referenceName leaves Apple's default reference name in place.
-func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, category, referenceName string, requestContext RequestContextFunc) (AssetLibraryImageUploadResult, error) {
-	result := AssetLibraryImageUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize, ReferenceName: referenceName, Category: category}
+// Transient failures tolerated during the processing wait are reported on
+// stderr when no progress observer is attached; nil means the process stderr.
+func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, stderr io.Writer, libraryID, fileName string, file *os.File, fileSize int64, category, referenceName string, requestContext RequestContextFunc) (result AssetLibraryImageUploadResult, uploadErr error) {
+	result = AssetLibraryImageUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize, ReferenceName: referenceName, Category: category}
 	if category != "CREATIVE_ASSETS" && category != "APP_SCREENSHOTS_AND_PREVIEWS" {
 		return result, fmt.Errorf("unsupported asset category %q", category)
 	}
@@ -69,8 +68,20 @@ func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, librar
 	if err != nil {
 		return result, err
 	}
+	stageCtx, stage := startImageUploadStage(ctx, "reserve")
+	defer func() {
+		status := "completed"
+		if uploadErr != nil {
+			status = "failed"
+		}
+		result.Diagnostics = append(result.Diagnostics, stage.emit(status, uploadErr))
+	}()
+	nextStage := func(name string) {
+		result.Diagnostics = append(result.Diagnostics, stage.emit("completed", nil))
+		stageCtx, stage = startImageUploadStage(ctx, name)
+	}
 	request := func(method, path string, body []byte) ([]byte, error) {
-		requestCtx, cancel := requestContextFor(ctx, requestContext)
+		requestCtx, cancel := requestContextFor(stageCtx, requestContext)
 		defer cancel()
 		return c.RawRequest(requestCtx, method, path, body)
 	}
@@ -83,12 +94,13 @@ func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, librar
 	result.ImageID = reserved.Data.ID
 	result.State = reserved.Data.Attributes.State
 	if decodeErr != nil {
-		return result, fmt.Errorf("parse image reservation: %w", decodeErr)
+		return result, fmt.Errorf("%w: %w", errImageUploadInvalidResponse, decodeErr)
 	}
 	if result.ImageID == "" || reserved.Data.Type != "appAssetLibraryImages" {
-		return result, fmt.Errorf("image reservation missing image resource identity")
+		return result, fmt.Errorf("%w: missing image resource identity", errImageUploadInvalidResponse)
 	}
-	if err := UploadAssetFromFile(ctx, file, fileSize, reserved.Data.Attributes.UploadOperations); err != nil {
+	nextStage("upload")
+	if err := UploadAssetFromFile(stageCtx, file, fileSize, reserved.Data.Attributes.UploadOperations); err != nil {
 		return result, fmt.Errorf("upload image %s: %w", result.ImageID, err)
 	}
 	path := "/v1/appAssetLibraryImages/" + url.PathEscape(result.ImageID)
@@ -106,33 +118,85 @@ func (c *Client) UploadAssetLibraryImageWithCategory(ctx context.Context, librar
 	if err != nil {
 		return result, err
 	}
-	if _, err := request("PATCH", path, body); err != nil {
-		return result, fmt.Errorf("commit image %s: %w", result.ImageID, err)
+	nextStage("commit")
+	raw, err = request("PATCH", path, body)
+	var commitErr error
+	if err != nil {
+		commitErr = fmt.Errorf("commit image %s: %w", result.ImageID, err)
+		if !IsResponseBodyReadError(err) || ctx.Err() != nil {
+			return result, commitErr
+		}
+		// Apple returned success but the response body was lost. Confirm
+		// the reserved image's state before treating the upload as committed.
+		raw, err = request("GET", path, nil)
+		if err != nil {
+			return result, commitErr
+		}
+	}
+	var committed assetLibraryImageUploadResponse
+	decodeErr = json.Unmarshal(raw, &committed)
+	if commitErr != nil {
+		if decodeErr != nil || committed.Data.ID != result.ImageID || committed.Data.Type != "appAssetLibraryImages" {
+			return result, commitErr
+		}
+		switch committed.Data.Attributes.State {
+		case "UPLOAD_COMPLETE", "COMPLETE", "PREPARE_FOR_SUBMISSION":
+			result.State = committed.Data.Attributes.State
+		default:
+			return result, commitErr
+		}
 	}
 	result.Uploaded = true
-	_, err = PollUntilTolerant(ctx, assetLibraryProcessingPollInterval, func(context.Context) (struct{}, bool, error) {
+	nextStage("processing")
+	if decodeErr == nil &&
+		committed.Data.ID == result.ImageID && committed.Data.Type == "appAssetLibraryImages" &&
+		committed.ready() && strings.TrimSpace(committed.Data.Attributes.SpecID) != "" {
+		attrs := committed.Data.Attributes
+		result.State, result.SpecID = attrs.State, attrs.SpecID
+		result.Width, result.Height = attrs.ImageAsset.Width, attrs.ImageAsset.Height
+		result.Ready = true
+		return result, nil
+	}
+	_, err = PollMediaUntil(ctx, func(context.Context) (struct{}, bool, error) {
 		raw, err := request("GET", path, nil)
 		if err != nil {
 			return struct{}{}, false, err
 		}
 		var current assetLibraryImageUploadResponse
 		if err := json.Unmarshal(raw, &current); err != nil {
-			return struct{}{}, false, fmt.Errorf("parse processed image: %w", err)
+			return struct{}{}, false, fmt.Errorf("%w: %w", errImageUploadInvalidResponse, err)
 		}
 		if current.Data.ID != result.ImageID || current.Data.Type != "appAssetLibraryImages" {
-			return struct{}{}, false, fmt.Errorf("processing response does not identify reserved image")
+			return struct{}{}, false, fmt.Errorf("%w: processing identity mismatch", errImageUploadInvalidResponse)
 		}
 		attrs := current.Data.Attributes
 		result.State, result.SpecID = attrs.State, attrs.SpecID
 		if attrs.State == "FAILED" {
-			return struct{}{}, false, fmt.Errorf("image processing reached FAILED")
+			var codes []string
+			for _, detail := range attrs.StateDetails {
+				if code := strings.TrimSpace(detail.Code); code != "" {
+					codes = append(codes, code)
+				}
+			}
+			if len(codes) > 0 {
+				return struct{}{}, false, fmt.Errorf("%w: %s", errImageProcessingFailed, strings.Join(codes, ", "))
+			}
+			return struct{}{}, false, errImageProcessingFailed
 		}
 		if attrs.ImageAsset != nil {
 			result.Width, result.Height = attrs.ImageAsset.Width, attrs.ImageAsset.Height
 		}
-		result.Ready = attrs.State == "PREPARE_FOR_SUBMISSION" && attrs.ImageAsset != nil && attrs.ImageAsset.Width > 0 && attrs.ImageAsset.Height > 0
+		result.Ready = current.ready()
+		if !result.Ready {
+			stage.emit("started", nil)
+		}
 		return struct{}{}, result.Ready, nil
-	}, PollOptions{Tolerate: IsTransientWaitError})
+	}, PollOptions{Tolerate: IsTransientWaitError, OnToleratedFailure: func(err error, failures, max int) {
+		stage.retry(err)
+		if stage.observe == nil {
+			logToleratedPollFailureTo(stderr, err, failures, max)
+		}
+	}})
 	if err != nil {
 		return result, fmt.Errorf("wait for image %s processing (state %q): %w", result.ImageID, result.State, err)
 	}

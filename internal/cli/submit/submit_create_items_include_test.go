@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -51,7 +53,7 @@ func TestPrepareReviewSubmissionForCreateRejectsInvalidInputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := prepareReviewSubmissionForCreate(tt.ctx, tt.client, tt.appID, tt.platform, tt.versionID, nil); err == nil {
+			if _, err := prepareReviewSubmissionForCreate(tt.ctx, io.Discard, tt.client, tt.appID, tt.platform, tt.versionID, nil); err == nil {
 				t.Fatal("expected validation error")
 			}
 		})
@@ -65,11 +67,11 @@ func TestPrepareReviewSubmissionForCreateTreatsWhitespaceNextAsTerminal(t *testi
 		return submitJSONResponse(http.StatusOK, `{"data":[],"links":{"self":"/v1/apps/app-1/reviewSubmissions","next":"  \t  "}}`)
 	}))
 
-	prepared, err := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", nil)
+	prepared, err := prepareReviewSubmissionForCreate(context.Background(), io.Discard, client, "app-1", "IOS", "version-1", nil)
 	if err != nil {
 		t.Fatalf("prepareReviewSubmissionForCreate() error: %v", err)
 	}
-	if prepared != (submitCreateReviewSubmissionPreparation{}) {
+	if prepared.reuseSubmissionID != "" || prepared.stagedItems != nil {
 		t.Fatalf("preparation = %#v, want empty", prepared)
 	}
 	if requests != 1 {
@@ -91,7 +93,7 @@ func TestPrepareReviewSubmissionForCreateTreatsWhitespaceNextAsTerminal(t *testi
 // cannot distinguish a request that asks for linkage from one that does not, so it reports a fix as
 // working when the real API would still withhold the linkage.
 func respondLikeAppStoreConnectItems(req *http.Request) (*http.Response, error) {
-	for _, value := range req.URL.Query()["include"] {
+	for _, value := range strings.Split(req.URL.Query().Get("include"), ",") {
 		if value == "appStoreVersion" {
 			return submitJSONResponse(http.StatusOK, `{
 				"data": [{
@@ -137,7 +139,7 @@ func TestSummarizeReviewSubmissionItemsIncludesVersionRelationship(t *testing.T)
 		if req.URL.Path != "/v1/reviewSubmissions/submission-1/items" {
 			t.Fatalf("unexpected path %s", req.URL.Path)
 		}
-		for _, value := range req.URL.Query()["include"] {
+		for _, value := range strings.Split(req.URL.Query().Get("include"), ",") {
 			if value == "appStoreVersion" {
 				sawInclude = true
 			}

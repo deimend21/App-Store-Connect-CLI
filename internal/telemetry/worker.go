@@ -61,10 +61,6 @@ func runMaintenanceWorker(workerPath string, store spoolStore, deliver eventSend
 	})
 }
 
-func flushSpool(store spoolStore, deliver eventSender) error {
-	return flushSpoolWhileEnabled(store, deliver, func() (bool, error) { return true, nil })
-}
-
 func flushSpoolWhileEnabled(
 	store spoolStore,
 	deliver eventSender,
@@ -183,7 +179,10 @@ func startDetachedMaintenanceWorker() error {
 }
 
 func maintenanceWorkerEnvironment(environment []string) []string {
-	return setEnvironmentValue(removeEnvironmentValue(environment, "ASC_WEB_SESSION"), internalWorkerEnvVar, "1")
+	for _, credential := range []string{"ASC_WEB_SESSION", "ASC_WEB_BROKER_TOKEN"} {
+		environment = removeEnvironmentValue(environment, credential)
+	}
+	return setEnvironmentValue(environment, internalWorkerEnvVar, "1")
 }
 
 func removeEnvironmentValue(environment []string, key string) []string {

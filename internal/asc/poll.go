@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"time"
@@ -29,8 +30,17 @@ type PollOptions struct {
 
 	// OnToleratedFailure observes every tolerated failure with the 1-based
 	// position in the current streak and the configured ceiling. A nil handler
-	// reports tolerated failures on stderr.
+	// reports tolerated failures on Stderr.
 	OnToleratedFailure func(err error, failures, max int)
+
+	// Stderr is where the default handler reports a tolerated failure. Nil
+	// means the process stderr.
+	Stderr io.Writer
+
+	// NextInterval, when set, returns the wait before the next check given how
+	// many checks have run so far (1-based). It replaces the fixed interval so a
+	// long wait can slow down instead of polling at one rate throughout.
+	NextInterval func(checks int) time.Duration
 }
 
 // PollUntil repeatedly executes check until it returns done=true, an error,
@@ -60,7 +70,10 @@ func PollUntilTolerant[T any](ctx context.Context, interval time.Duration, check
 	}
 	onToleratedFailure := opts.OnToleratedFailure
 	if onToleratedFailure == nil {
-		onToleratedFailure = logToleratedPollFailure
+		stderr := opts.Stderr
+		onToleratedFailure = func(err error, failures, max int) {
+			logToleratedPollFailureTo(stderr, err, failures, max)
+		}
 	}
 
 	consecutiveFailures := 0
@@ -107,14 +120,19 @@ func PollUntilTolerant[T any](ctx context.Context, interval time.Duration, check
 		return value, nil
 	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	nextInterval := opts.NextInterval
+	if nextInterval == nil {
+		nextInterval = func(int) time.Duration { return interval }
+	}
 
-	for {
+	timer := time.NewTimer(pollWait(nextInterval(1), interval))
+	defer timer.Stop()
+
+	for checks := 2; ; checks++ {
 		select {
 		case <-ctx.Done():
 			return zero, ctx.Err()
-		case <-ticker.C:
+		case <-timer.C:
 			value, done, err = runCheck()
 			if err != nil {
 				return zero, err
@@ -122,8 +140,18 @@ func PollUntilTolerant[T any](ctx context.Context, interval time.Duration, check
 			if done {
 				return value, nil
 			}
+			timer.Reset(pollWait(nextInterval(checks), interval))
 		}
 	}
+}
+
+// pollWait falls back to the fixed interval when a schedule yields a
+// non-positive wait, so a schedule bug can never turn into a busy loop.
+func pollWait(next, fallback time.Duration) time.Duration {
+	if next <= 0 {
+		return fallback
+	}
+	return next
 }
 
 // IsTransientWaitError reports whether err is a transient App Store Connect or
@@ -171,9 +199,12 @@ func isTemporaryNetError(err net.Error) bool {
 	return ok && tempErr.Temporary()
 }
 
-func logToleratedPollFailure(err error, failures, max int) {
+func logToleratedPollFailureTo(stderr io.Writer, err error, failures, max int) {
+	if stderr == nil {
+		stderr = os.Stderr
+	}
 	fmt.Fprintf(
-		os.Stderr,
+		stderr,
 		"transient App Store Connect error while waiting (%d/%d): %s\n",
 		failures,
 		max,

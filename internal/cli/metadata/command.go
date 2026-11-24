@@ -9,9 +9,9 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-// MetadataCommand returns the metadata command group.
-func MetadataCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("metadata", flag.ExitOnError)
+// NewMetadataCommand returns the metadata command group.
+func NewMetadataCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("metadata", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "metadata",
@@ -29,8 +29,15 @@ Keyword workflow:
   - ` + "`asc apps search-keywords set`" + ` updates the supported version-localization ` + "`keywords`" + ` attribute
   - version-localization linkage operations remain under ` + "`asc localizations search-keywords ...`" + `
 
+Opt-in scopes (add to --include for pull, plan, and apply):
+` + metadataSettingsHelp("  ", true) + `
+  review-information never stores demoAccountPassword in clear text: pull writes
+  "@env:ASC_DEMO_ACCOUNT_PASSWORD", and the file must use @env:NAME or @file:PATH
+  (relative to --dir). Plans show <redacted> plus the reference, so an approval
+  binds the reference, not the secret value. Attachments are not managed.
+
 Not yet included in this group:
-  - categories, review information, age ratings, screenshots
+  - screenshots
 
 Note: copyright is managed via "asc versions create --copyright" or "asc versions update --copyright".
 
@@ -43,17 +50,17 @@ Examples:
   asc metadata apply --app "APP_ID" --version "1.2.3" --dir "./metadata" --review-dir ".asc/metadata/review" --confirm
   asc metadata keywords import --dir "./metadata" --version "1.2.3" --locale "en-US" --input "./keywords.csv"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			MetadataInitCommand(),
-			MetadataPullCommand(),
-			MetadataPlanCommand(),
-			MetadataApproveCommand(),
-			MetadataApplyCommand(),
-			MetadataStatusCommand(),
-			MetadataKeywordsCommand(),
-			MetadataPushCommand(),
-			MetadataValidateCommand(),
+			newMetadataInitCommand(d),
+			newMetadataPullCommand(d),
+			newMetadataPlanCommand(d),
+			newMetadataApproveCommand(d),
+			newMetadataApplyCommand(d),
+			newMetadataStatusCommand(d),
+			newMetadataKeywordsCommand(d),
+			newMetadataPushCommand(d),
+			newMetadataValidateCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp

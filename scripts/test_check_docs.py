@@ -16,6 +16,7 @@ import check_repo_docs
 import check_website_commands
 import check_website_docs
 import doc_links
+import go_test_shard
 
 
 class RepoDocsChecksTest(unittest.TestCase):
@@ -139,78 +140,42 @@ class WebsiteDocsChecksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
             (website / "guides").mkdir()
-            (website / "docs.json").write_text(
-                json.dumps(
-                    {
-                        "navigation": {
-                            "tabs": [{"groups": [{"pages": ["index", "guides/test"]}]}]
-                        },
-                        "redirects": [
-                            {"source": "/old-test", "destination": "/guides/test"}
-                        ],
-                    }
-                )
-            )
+            navigation = {
+                "topics": [
+                    {"items": [{"label": "Guides", "items": ["index", {"label": "Test", "slug": "guides/test"}]}]}
+                ],
+                "redirects": {"/old-test": "/guides/test"},
+            }
             (website / "index.mdx").write_text('[Guide](/guides/test)\n<a href="/guides/test">Guide</a>\n')
             (website / "guides" / "test.mdx").write_text("# Test\n")
 
             page_ids, routes = check_website_docs.collect_site_state(website)
-            self.assertEqual(check_website_docs.check_navigation(website, page_ids), [])
-            self.assertEqual(check_website_docs.check_redirects(website, routes), [])
+            self.assertEqual(check_website_docs.check_navigation(navigation, page_ids), [])
+            self.assertEqual(check_website_docs.check_redirects(navigation, routes), [])
             self.assertEqual(check_website_docs.check_internal_links(website, routes), [])
-
-    def test_website_docs_accept_nested_navigation_groups(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            website = Path(tmpdir)
-            (website / "guides").mkdir()
-            (website / "docs.json").write_text(
-                json.dumps(
-                    {
-                        "navigation": {
-                            "tabs": [
-                                {
-                                    "groups": [
-                                        {
-                                            "group": "Guides",
-                                            "pages": [
-                                                {
-                                                    "group": "Advanced",
-                                                    "pages": ["guides/test"],
-                                                }
-                                            ],
-                                        }
-                                    ]
-                                }
-                            ]
-                        }
-                    }
-                )
-            )
-            (website / "index.mdx").write_text("# Home\n")
-            (website / "guides" / "test.mdx").write_text("# Test\n")
-
-            page_ids, _ = check_website_docs.collect_site_state(website)
-            self.assertEqual(check_website_docs.check_navigation(website, page_ids), [])
 
     def test_website_docs_report_missing_navigation_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
-            (website / "docs.json").write_text(
-                json.dumps({"navigation": {"tabs": [{"groups": [{"pages": ["missing"]}]}]}})
-            )
             (website / "index.mdx").write_text("# Home\n")
+            navigation = {"topics": [{"items": [{"label": "Group", "items": [{"label": "Gone", "slug": "missing"}]}]}]}
 
             page_ids, _ = check_website_docs.collect_site_state(website)
-            errors = check_website_docs.check_navigation(website, page_ids)
+            errors = check_website_docs.check_navigation(navigation, page_ids)
             self.assertEqual(len(errors), 1)
             self.assertIn("missing page", errors[0])
+
+    def test_website_docs_reject_duplicate_redirect_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            navigation_path = Path(tmpdir) / "navigation.json"
+            navigation_path.write_text('{"redirects": {"/old": "/a", "/old": "/b"}}')
+
+            with self.assertRaisesRegex(ValueError, "duplicate keys"):
+                check_website_docs.load_navigation(navigation_path)
 
     def test_website_docs_report_missing_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
-            (website / "docs.json").write_text(
-                json.dumps({"navigation": {"tabs": [{"groups": [{"pages": ["index"]}]}]}})
-            )
             (website / "index.mdx").write_text("[Missing](/guides/unknown)\n")
 
             _, routes = check_website_docs.collect_site_state(website)
@@ -221,29 +186,17 @@ class WebsiteDocsChecksTest(unittest.TestCase):
     def test_website_docs_report_missing_redirect_destination(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
-            (website / "docs.json").write_text(
-                json.dumps(
-                    {
-                        "navigation": {"tabs": [{"groups": [{"pages": ["index"]}]}]},
-                        "redirects": [
-                            {"source": "/old-index", "destination": "/missing-page"}
-                        ],
-                    }
-                )
-            )
             (website / "index.mdx").write_text("# Home\n")
+            navigation = {"redirects": {"/old-index": "/missing-page"}}
 
             _, routes = check_website_docs.collect_site_state(website)
-            errors = check_website_docs.check_redirects(website, routes)
+            errors = check_website_docs.check_redirects(navigation, routes)
             self.assertEqual(len(errors), 1)
             self.assertIn("redirect destination", errors[0])
 
     def test_website_docs_ignore_angle_bracket_external_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             website = Path(tmpdir)
-            (website / "docs.json").write_text(
-                json.dumps({"navigation": {"tabs": [{"groups": [{"pages": ["index"]}]}]}})
-            )
             (website / "index.mdx").write_text("[External](<https://example.com/docs>)\n")
 
             _, routes = check_website_docs.collect_site_state(website)
@@ -256,9 +209,6 @@ class WebsiteDocsChecksTest(unittest.TestCase):
             website = tmp / "website"
             website.mkdir()
             (tmp / "shared.png").write_text("png\n")
-            (website / "docs.json").write_text(
-                json.dumps({"navigation": {"tabs": [{"groups": [{"pages": ["index"]}]}]}})
-            )
             (website / "index.mdx").write_text("![Shared](../shared.png)\n")
 
             _, routes = check_website_docs.collect_site_state(website)
@@ -1389,6 +1339,34 @@ class DocLinksTest(unittest.TestCase):
         self.assertIsNone(normalized)
 
 
+class AffectedPackagesTest(unittest.TestCase):
+    PACKAGES = ["m", "m/a", "m/b", "m/c"]
+    # `go list -test` shape: test variants and external test packages carry a
+    # "[pkg.test]" suffix, and Deps is transitive.
+    GO_LIST = [
+        "m\tm/a\tm/b", "m [m.test]\tm/a\tm/b", "m.test\tm [m.test]",
+        "m/a", "m/a [m/a.test]", "m/a_test [m/a.test]\tm/a [m/a.test]\tm/c",
+        "m/b\tm/a", "m/c",
+    ]
+
+    def affected(self, files: list[str]) -> list[str] | None:
+        def fake_run_capture(command: list[str]) -> list[str]:
+            return ["m"] if command[1:] == ["list", "-m"] else self.GO_LIST
+        with mock.patch.object(go_test_shard, "run_capture", fake_run_capture):
+            return go_test_shard.affected_packages(self.PACKAGES, files)
+
+    def test_source_change_reaches_importers_and_external_tests(self) -> None:
+        self.assertEqual(self.affected(["a/a.go"]), ["m", "m/a", "m/b"])
+        self.assertEqual(self.affected(["c/c.go"]), ["m/a", "m/c"])
+
+    def test_test_file_change_reaches_only_its_package(self) -> None:
+        self.assertEqual(self.affected(["a/a_test.go"]), ["m/a"])
+        self.assertEqual(self.affected(["main_test.go"]), ["m"])
+
+    def test_unknown_package_tests_everything(self) -> None:
+        self.assertIsNone(self.affected(["gone/gone.go"]))
+
+
 class HookChecksTest(unittest.TestCase):
     def run_hook(self, paths: list[str], fail_target: str = "", unstaged_changes: bool = False) -> tuple[int, list[str]]:
         hook = Path(__file__).resolve().parents[1] / ".githooks" / "pre-commit"
@@ -1422,7 +1400,7 @@ class HookChecksTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("make format-check", calls)
         self.assertIn("make lint", calls)
-        self.assertIn("make test-short", calls)
+        self.assertIn("make test-short TEST_AFFECTED_BY=main.go", calls)
 
     def test_format_check_failure_blocks_lint_and_tests(self) -> None:
         code, calls = self.run_hook(["main.go"], fail_target="format-check")
@@ -1440,15 +1418,26 @@ class HookChecksTest(unittest.TestCase):
                 self.assertEqual(calls, ["make check-repo-docs", "make check-agent-skills"])
 
     def test_executable_and_mixed_changes_keep_code_gates(self) -> None:
-        for paths in [[".agents/skills/example/scripts/check.py"],
-                      ["AGENTS.md", "internal/cli/main.go"], ["docs/example.go"],
-                      [".githooks/pre-commit"]]:
+        for paths, tests in [([".agents/skills/example/scripts/check.py"], "make test-short"),
+                             (["AGENTS.md", "internal/cli/main.go"], "make test-short TEST_AFFECTED_BY=internal/cli/main.go"),
+                             (["docs/example.go"], "make test-short TEST_AFFECTED_BY=docs/example.go"),
+                             ([".githooks/pre-commit"], "make test-short")]:
             with self.subTest(paths=paths):
                 code, calls = self.run_hook(paths)
                 self.assertEqual(code, 0)
                 self.assertIn("make format-check", calls)
                 self.assertIn("make lint", calls)
-                self.assertIn("make test-short", calls)
+                self.assertIn(tests, calls)
+
+    def test_go_only_changes_scope_tests_to_affected_packages(self) -> None:
+        for paths, tests in [(["internal/a/a.go", "internal/b/b_test.go"],
+                              "make test-short TEST_AFFECTED_BY=internal/a/a.go internal/b/b_test.go"),
+                             (["internal/a/a.go", "go.mod"], "make test-short"),
+                             (["internal/a/a.go", "internal/a/testdata/fixture.json"], "make test-short")]:
+            with self.subTest(paths=paths):
+                code, calls = self.run_hook(paths)
+                self.assertEqual(code, 0)
+                self.assertEqual(calls[-1], tests)
 
     def test_instruction_validation_failure_blocks_commit(self) -> None:
         for target in ["check-repo-docs", "check-agent-skills"]:
@@ -1458,8 +1447,8 @@ class HookChecksTest(unittest.TestCase):
                 self.assertNotIn("make format-check", calls)
 
     def test_website_and_wall_fast_paths_remain_separate(self) -> None:
-        for path, expected in [("index.mdx", "make check-website-docs"),
-                               (".mintlify/config.json", "make check-website-docs"),
+        for path, expected in [("website/src/content/docs/index.mdx", "make check-website-docs"),
+                               ("website/astro.config.mjs", "make check-website-docs"),
                                ("docs/wall-of-apps.json", "make check-wall-of-apps")]:
             with self.subTest(path=path):
                 code, calls = self.run_hook([path])

@@ -1,12 +1,11 @@
 package cmdtest
 
 import (
-	"errors"
-	"net/http"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 // TestUnknownFlagSuggestsTheIntendedFlag covers the unknown flag spellings
@@ -15,29 +14,20 @@ import (
 // invocation still fails as a usage error before any HTTP request.
 func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 	setupUsageExitCodeEnv(t)
-	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unknown flags must fail before HTTP: %s %s", req.Method, req.URL.String())
-		return nil, errors.New("unexpected request")
-	}))
+	asctest.NewRegistry(t).Install()
 
 	tests := []struct {
 		name string
 		args []string
 		want string
+		deps bool
 	}{
 		{
-			name: "submit status --app",
-			args: []string{"submit", "status", "--app", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--app` for `asc submit status`\n" +
+			name: "review submissions-get --app",
+			args: []string{"review", "submissions-get", "--app", "PRIVATE_VALUE"},
+			want: "Error: unknown flag `--app` for `asc review submissions-get`\n" +
 				"Try:\n  --id\n" +
-				"For help:\n  asc submit status --help\n",
-		},
-		{
-			name: "subscriptions list --group",
-			args: []string{"subscriptions", "list", "--group", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--group` for `asc subscriptions list`\n" +
-				"Try:\n  --group-id\n" +
-				"For help:\n  asc subscriptions list --help\n",
+				"For help:\n  asc review submissions-get --help\n",
 		},
 		{
 			name: "builds groups list --app",
@@ -45,6 +35,7 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 			want: "Error: unknown flag `--app` for `asc builds groups list`\n" +
 				"Try:\n  --build-id\n" +
 				"For help:\n  asc builds groups list --help\n",
+			deps: true,
 		},
 		{
 			name: "bundle-ids capabilities list --id",
@@ -54,32 +45,12 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 				"For help:\n  asc bundle-ids capabilities list --help\n",
 		},
 		{
-			name: "pricing availability territory-availabilities --app",
-			args: []string{"pricing", "availability", "territory-availabilities", "--app", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--app` for `asc pricing availability territory-availabilities`\n" +
-				"Try:\n  --availability\n" +
-				"For help:\n  asc pricing availability territory-availabilities --help\n",
-		},
-		{
 			name: "builds upload --file",
 			args: []string{"builds", "upload", "--app", "app-1", "--file", "PRIVATE_VALUE"},
 			want: "Error: unknown flag `--file` for `asc builds upload`\n" +
 				"Try:\n  --ipa\n  --pkg\n" +
 				"For help:\n  asc builds upload --help\n",
-		},
-		{
-			name: "review details-get --version-id",
-			args: []string{"review", "details-get", "--version-id", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--version-id` for `asc review details-get`\n" +
-				"Try:\n  --id\n" +
-				"For help:\n  asc review details-get --help\n",
-		},
-		{
-			name: "subscriptions versions view --version-id",
-			args: []string{"subscriptions", "versions", "view", "--version-id", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--version-id` for `asc subscriptions versions view`\n" +
-				"Try:\n  --id\n" +
-				"For help:\n  asc subscriptions versions view --help\n",
+			deps: true,
 		},
 		{
 			name: "profiles list --bundle-id",
@@ -90,21 +61,22 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 		},
 		{
 			name: "single-dash spelling",
-			args: []string{"submit", "status", "-app", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `-app` for `asc submit status`\n" +
+			args: []string{"review", "submissions-get", "-app", "PRIVATE_VALUE"},
+			want: "Error: unknown flag `-app` for `asc review submissions-get`\n" +
 				"Try:\n  --id\n" +
-				"For help:\n  asc submit status --help\n",
+				"For help:\n  asc review submissions-get --help\n",
 		},
 		{
 			name: "inline value is never echoed",
-			args: []string{"subscriptions", "list", "--group=PRIVATE_VALUE"},
-			want: "Error: unknown flag `--group` for `asc subscriptions list`\n" +
-				"Try:\n  --group-id\n" +
-				"For help:\n  asc subscriptions list --help\n",
+			args: []string{"review", "submissions-get", "--app=PRIVATE_VALUE"},
+			want: "Error: unknown flag `--app` for `asc review submissions-get`\n" +
+				"Try:\n  --id\n" +
+				"For help:\n  asc review submissions-get --help\n",
 		},
 		{
 			name: "a path-valued --output answers --path",
 			args: []string{"testflight", "testers", "export", "--app", "app-1", "--path", "PRIVATE_VALUE"},
+			deps: true,
 			want: "Error: unknown flag `--path` for `asc testflight testers export`\n" +
 				"Try:\n  --output\n" +
 				"For help:\n  asc testflight testers export --help\n",
@@ -115,13 +87,7 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 			want: "Error: unknown flag `--path` for `asc signing resign`\n" +
 				"Try:\n  --ipa\n  --output\n" +
 				"For help:\n  asc signing resign --help\n",
-		},
-		{
-			name: "ipa-info --ipa",
-			args: []string{"ipa-info", "--ipa", "PRIVATE_VALUE"},
-			want: "Error: unknown flag `--ipa` for `asc ipa-info`\n" +
-				"Try:\n  --path\n" +
-				"For help:\n  asc ipa-info --help\n",
+			deps: true,
 		},
 		{
 			name: "pkg-info --pkg",
@@ -135,6 +101,7 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 			args: []string{"apps", "list", "--path", "PRIVATE_VALUE"},
 			want: "Error: unknown flag `--path` for `asc apps list`\n" +
 				"For help:\n  asc apps list --help\n",
+			deps: true,
 		},
 		{
 			name: "no comparable flag leaves the Try block out",
@@ -147,9 +114,14 @@ func TestUnknownFlagSuggestsTheIntendedFlag(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var code int
-			stdout, stderr := captureOutput(t, func() {
-				code = rootcmd.Run(test.args, "5.6.0")
-			})
+			var stdout, stderr string
+			if test.deps {
+				stdout, stderr, code = runWithDeps(t, nil, test.args...)
+			} else {
+				stdout, stderr = captureOutput(t, func() {
+					code = rootcmd.Run(test.args, "5.6.0")
+				})
+			}
 			if code != rootcmd.ExitUsage {
 				t.Fatalf("exit code = %d, want %d; stderr=%q", code, rootcmd.ExitUsage, stderr)
 			}

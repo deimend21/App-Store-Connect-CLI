@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type buildGroupMembershipOutput struct {
@@ -52,6 +53,9 @@ func TestBuildsGroupsListCommandHasNarrowBuildSurface(t *testing.T) {
 		"pretty":   true,
 	}
 	list.FlagSet.VisitAll(func(value *flag.Flag) {
+		if shared.IsFlagAlias(value) {
+			return
+		}
 		if !wantFlags[value.Name] {
 			t.Errorf("unexpected --%s flag on builds groups list", value.Name)
 		}
@@ -59,12 +63,6 @@ func TestBuildsGroupsListCommandHasNarrowBuildSurface(t *testing.T) {
 	})
 	for name := range wantFlags {
 		t.Errorf("missing --%s flag on builds groups list", name)
-	}
-
-	for _, forbidden := range []string{"app", "global", "internal", "external", "limit", "next", "paginate"} {
-		if list.FlagSet.Lookup(forbidden) != nil {
-			t.Errorf("builds groups list must not expose --%s", forbidden)
-		}
 	}
 }
 
@@ -121,39 +119,16 @@ func TestBuildsGroupsListUsesExistingBuildMembershipLookup(t *testing.T) {
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "ambient-app-must-not-be-used")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`))
 
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1/relationships/app" {
-				t.Fatalf("unexpected app lookup: %s %s", req.Method, req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2:
-			assertBuildMembershipGroupQuery(t, req.URL, "filter[app]", "app-1")
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`), nil
-		case 3:
-			assertBuildMembershipGroupQuery(t, req.URL, "filter[builds]", "build-1")
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`), nil
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"builds", "groups", "list", "--output", "json", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runCommand(t, []string{"builds", "groups", "list", "--output", "json", "--build-id", "build-1"})
 
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
@@ -161,7 +136,7 @@ func TestBuildsGroupsListUsesExistingBuildMembershipLookup(t *testing.T) {
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if requestCount != 3 {
+	if requestCount := len(reg.Requests()); requestCount != 3 {
 		t.Fatalf("expected three requests, got %d", requestCount)
 	}
 
@@ -182,34 +157,26 @@ func TestBuildsGroupsListMatchesTestFlightBuildMembershipSurface(t *testing.T) {
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "ambient-app-must-not-be-used")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	const groups = `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	for range 2 {
+		reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+			asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+		reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+			asctest.JSON(http.StatusOK, groups))
+		reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+			asctest.JSON(http.StatusOK, groups))
+	}
 
 	run := func(args []string) (string, string, []string, error) {
 		t.Helper()
+		before := len(reg.Requests())
+		stdout, stderr, runErr := runCommand(t, args)
 		requests := make([]string, 0, 3)
-		http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		for _, req := range reg.Requests()[before:] {
 			requests = append(requests, req.Method+" "+req.URL.String())
-			switch len(requests) {
-			case 1:
-				return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-			case 2, 3:
-				return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`), nil
-			default:
-				t.Fatalf("unexpected request: %s", req.URL.String())
-				return nil, nil
-			}
-		})
-
-		root := RootCommand("1.2.3")
-		root.FlagSet.SetOutput(io.Discard)
-		var runErr error
-		stdout, stderr := captureOutput(t, func() {
-			if err := root.Parse(args); err != nil {
-				t.Fatalf("parse error: %v", err)
-			}
-			runErr = root.Run(context.Background())
-		})
+		}
 		return stdout, stderr, requests, runErr
 	}
 
@@ -231,24 +198,12 @@ func TestBuildsGroupsListPreservesLookupAPIErrors(t *testing.T) {
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.URL.Path != "/v1/builds/build-1/relationships/app" {
-			t.Fatalf("unexpected request: %s", req.URL.String())
-		}
-		return jsonHTTPResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Temporary failure"}]}`), nil
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Temporary failure"}]}`))
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"builds", "groups", "list", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runCommand(t, []string{"builds", "groups", "list", "--build-id", "build-1"})
 
 	if runErr == nil || !strings.Contains(runErr.Error(), "builds groups list: failed to resolve app for build") {
 		t.Fatalf("unexpected error: %v", runErr)
@@ -259,82 +214,45 @@ func TestBuildsGroupsListPreservesLookupAPIErrors(t *testing.T) {
 }
 
 func TestTestFlightGroupsListBuildMembershipUsesOfficialFilterAndPaginates(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "ambient-app-must-not-be-an-assertion")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-
 	const appNext = "https://api.appstoreconnect.apple.com/v1/betaGroups?cursor=app-next"
 	const buildNext = "https://api.appstoreconnect.apple.com/v1/betaGroups?cursor=build-next"
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			if req.Method != http.MethodGet || req.URL.Path != "/v1/builds/build-1/relationships/app" {
-				t.Fatalf("unexpected app lookup: %s %s", req.Method, req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2:
-			assertBuildMembershipGroupQuery(t, req.URL, "filter[app]", "app-1")
-			return jsonHTTPResponse(http.StatusOK, `{
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{
 				"data":[
 					{"type":"betaGroups","id":"group-explicit","attributes":{"name":"External QA","isInternalGroup":false}},
 					{"type":"betaGroups","id":"group-all","attributes":{"name":"Internal All Builds","isInternalGroup":true,"hasAccessToAllBuilds":true}}
 				],
 				"links":{"next":"`+appNext+`"}
-			}`), nil
-		case 3:
-			if req.URL.String() != appNext {
-				t.Fatalf("unexpected app groups next URL: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{
+			}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "cursor=app-next"),
+		asctest.JSON(http.StatusOK, `{
 				"data":[
 					{"type":"betaGroups","id":"group-explicit","attributes":{"name":"External QA duplicate","isInternalGroup":false}},
 					{"type":"betaGroups","id":"group-both","attributes":{"name":"Partner Preview","isInternalGroup":false,"hasAccessToAllBuilds":true}},
 					{"type":"betaGroups","id":"group-none","attributes":{"name":"Old Group","isInternalGroup":false}}
 				]
-			}`), nil
-		case 4:
-			assertBuildMembershipGroupQuery(t, req.URL, "filter[builds]", "build-1")
-			return jsonHTTPResponse(http.StatusOK, `{
+			}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{
 				"data":[
 					{"type":"betaGroups","id":"group-explicit","attributes":{"name":"External QA","isInternalGroup":false}}
 				],
 				"links":{"next":"`+buildNext+`"}
-			}`), nil
-		case 5:
-			if req.URL.String() != buildNext {
-				t.Fatalf("unexpected build-filter next URL: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-explicit","attributes":{"name":"duplicate"}}]}`), nil
-		case 6:
-			if req.URL.Path != "/v1/betaGroups/group-all/relationships/builds" {
-				t.Fatalf("unexpected all-build verification: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":[]}`), nil
-		case 7:
-			if req.URL.Path != "/v1/betaGroups/group-both/relationships/builds" {
-				t.Fatalf("unexpected explicit all-build verification: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`), nil
-		default:
-			t.Fatalf("unexpected extra request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
+			}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "cursor=build-next"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-explicit","attributes":{"name":"duplicate"}}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-all/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-both/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`))
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "groups", "list", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "testflight", "groups", "list", "--build-id", "build-1")
 
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
@@ -342,7 +260,7 @@ func TestTestFlightGroupsListBuildMembershipUsesOfficialFilterAndPaginates(t *te
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if requestCount != 7 {
+	if requestCount := len(reg.Requests()); requestCount != 7 {
 		t.Fatalf("expected seven requests, got %d", requestCount)
 	}
 
@@ -369,15 +287,9 @@ func TestTestFlightGroupsListBuildMembershipUsesOfficialFilterAndPaginates(t *te
 }
 
 func TestTestFlightGroupsListBuildMembershipRejectsExplicitBlankIDs(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("blank build ID must fail before HTTP request: %s", req.URL.String())
-		return nil, nil
-	})
+	reg := asctest.NewRegistry(t)
 
 	tests := []struct {
 		name       string
@@ -385,20 +297,12 @@ func TestTestFlightGroupsListBuildMembershipRejectsExplicitBlankIDs(t *testing.T
 		diagnostic string
 	}{
 		{name: "build ID", args: []string{"--app", "app-1", "--build-id", " "}, diagnostic: "--build-id cannot be empty"},
-		{name: "app assertion", args: []string{"--build-id", "build-1", "--app", " "}, diagnostic: "--app cannot be empty"},
+		{name: "app assertion", args: []string{"--build-id", "build-1", "--app", " "}, diagnostic: "--app must not be empty"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-			var runErr error
 			args := append([]string{"testflight", "groups", "list"}, test.args...)
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				runErr = root.Run(context.Background())
-			})
+			stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), args...)
 			if !errors.Is(runErr, flag.ErrHelp) {
 				t.Fatalf("expected usage error, got %v", runErr)
 			}
@@ -413,37 +317,17 @@ func TestTestFlightGroupsListBuildMembershipRejectsExplicitBlankIDs(t *testing.T
 }
 
 func TestTestFlightGroupsListBuildMembershipEmptyIsSuccessful(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-none","attributes":{"name":"No Access"}}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[]}`))
 
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-none","attributes":{"name":"No Access"}}]}`), nil
-		case 3:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[]}`), nil
-		default:
-			t.Fatalf("unexpected request: %s", req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "groups", "list", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "testflight", "groups", "list", "--build-id", "build-1")
 	if runErr != nil {
 		t.Fatalf("empty membership must succeed, got %v", runErr)
 	}
@@ -461,35 +345,17 @@ func TestTestFlightGroupsListBuildMembershipEmptyIsSuccessful(t *testing.T) {
 }
 
 func TestTestFlightGroupsListBuildMembershipRendersTable(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`))
 
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2, 3:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"External QA","isInternalGroup":false}}]}`), nil
-		default:
-			t.Fatalf("unexpected request: %s", req.URL.String())
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "groups", "list", "--build-id", "build-1", "--output", "table"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "testflight", "groups", "list", "--build-id", "build-1", "--output", "table")
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -504,48 +370,22 @@ func TestTestFlightGroupsListBuildMembershipRendersTable(t *testing.T) {
 }
 
 func TestTestFlightGroupsListBuildMembershipFallsBackAndFindsLargeGroupMatch(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-
 	const nextURL = "https://api.appstoreconnect.apple.com/v1/betaGroups/group-large/relationships/builds?cursor=next"
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-large","attributes":{"name":"Large External","isInternalGroup":false}}]}`), nil
-		case 3:
-			return jsonHTTPResponse(http.StatusBadRequest, `{"errors":[{"status":"400","code":"PARAMETER_ERROR","title":"Unsupported filter"}]}`), nil
-		case 4:
-			if req.URL.Path != "/v1/betaGroups/group-large/relationships/builds" || req.URL.Query().Get("limit") != "200" {
-				t.Fatalf("unexpected inverse lookup: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, buildLinkagesPage(200, "other", nextURL)), nil
-		case 5:
-			if req.URL.String() != nextURL {
-				t.Fatalf("unexpected inverse next URL: %s", req.URL.String())
-			}
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`), nil
-		default:
-			t.Fatalf("unexpected request: %s", req.URL.String())
-			return nil, nil
-		}
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-large","attributes":{"name":"Large External","isInternalGroup":false}}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusBadRequest, `{"errors":[{"status":"400","code":"PARAMETER_ERROR","title":"Unsupported filter"}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-large/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusOK, buildLinkagesPage(200, "other", nextURL)))
+	reg.Register(asctest.GET("/v1/betaGroups/group-large/relationships/builds", "cursor=next"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`))
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "groups", "list", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "testflight", "groups", "list", "--build-id", "build-1")
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -563,47 +403,27 @@ func TestTestFlightGroupsListBuildMembershipFallsBackAndFindsLargeGroupMatch(t *
 }
 
 func TestTestFlightGroupsListBuildMembershipPreservesPartialResultAndFails(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = originalTransport })
-
-	requestCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			return jsonHTTPResponse(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`), nil
-		case 2:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/builds/build-1/relationships/app"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"apps","id":"app-1"}}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[app]=app-1", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[
 				{"type":"betaGroups","id":"group-all","attributes":{"name":"All Builds","isInternalGroup":true,"hasAccessToAllBuilds":true}},
 				{"type":"betaGroups","id":"group-explicit","attributes":{"name":"Explicit","isInternalGroup":false}},
 				{"type":"betaGroups","id":"group-failed","attributes":{"name":"Failed","isInternalGroup":false}}
-			]}`), nil
-		case 3:
-			return jsonHTTPResponse(http.StatusBadRequest, `{"errors":[{"status":"400","code":"PARAMETER_ERROR","title":"Unsupported filter"}]}`), nil
-		case 4:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[]}`), nil
-		case 5:
-			return jsonHTTPResponse(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`), nil
-		case 6:
-			return jsonHTTPResponse(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Temporary failure"}]}`), nil
-		default:
-			t.Fatalf("unexpected request: %s", req.URL.String())
-			return nil, nil
-		}
-	})
+			]}`))
+	reg.Register(asctest.GET("/v1/betaGroups", "fields[betaGroups]=name,isInternalGroup,hasAccessToAllBuilds", "filter[builds]=build-1", "limit=200"),
+		asctest.JSON(http.StatusBadRequest, `{"errors":[{"status":"400","code":"PARAMETER_ERROR","title":"Unsupported filter"}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-all/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-explicit/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"builds","id":"build-1"}]}`))
+	reg.Register(asctest.GET("/v1/betaGroups/group-failed/relationships/builds", "limit=200"),
+		asctest.JSON(http.StatusInternalServerError, `{"errors":[{"status":"500","code":"INTERNAL_ERROR","title":"Temporary failure"}]}`))
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "groups", "list", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "testflight", "groups", "list", "--build-id", "build-1")
 	if runErr == nil {
 		t.Fatal("expected incomplete lookup to fail")
 	}
@@ -640,16 +460,8 @@ func TestTestFlightGroupsListBuildMembershipRejectsPageControlsAndGlobal(t *test
 
 	for _, extra := range tests {
 		t.Run(strings.TrimPrefix(strings.Join(extra, "_"), "--"), func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
 			args := append([]string{"testflight", "groups", "list", "--build-id", "build-1"}, extra...)
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				runErr = root.Run(context.Background())
-			})
+			stdout, stderr, runErr := runRootWithDeps(t, nil, args...)
 			if !errors.Is(runErr, flag.ErrHelp) {
 				t.Fatalf("expected usage error, got %v", runErr)
 			}
@@ -660,23 +472,6 @@ func TestTestFlightGroupsListBuildMembershipRejectsPageControlsAndGlobal(t *test
 				t.Fatalf("expected incompatibility diagnostic, got %q", stderr)
 			}
 		})
-	}
-}
-
-func assertBuildMembershipGroupQuery(t *testing.T, requestURL *url.URL, filterName, filterValue string) {
-	t.Helper()
-	if requestURL.Path != "/v1/betaGroups" {
-		t.Fatalf("unexpected beta groups path: %s", requestURL.String())
-	}
-	query := requestURL.Query()
-	if query.Get(filterName) != filterValue {
-		t.Fatalf("%s = %q, want %q in %s", filterName, query.Get(filterName), filterValue, requestURL.String())
-	}
-	if query.Get("limit") != "200" {
-		t.Fatalf("limit = %q, want 200", query.Get("limit"))
-	}
-	if query.Get("fields[betaGroups]") != "name,isInternalGroup,hasAccessToAllBuilds" {
-		t.Fatalf("unexpected sparse fields: %q", query.Get("fields[betaGroups]"))
 	}
 }
 

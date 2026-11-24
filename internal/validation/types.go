@@ -1,5 +1,7 @@
 package validation
 
+import "time"
+
 // Severity represents the validation severity level.
 type Severity string
 
@@ -20,9 +22,13 @@ const (
 
 // Resolution describes how to resolve an actionable validation finding.
 type Resolution struct {
-	Fixability         Fixability `json:"fixability"`
-	Commands           []string   `json:"commands,omitempty"`
-	AppStoreConnectURL string     `json:"appStoreConnectUrl,omitempty"`
+	Fixability Fixability `json:"fixability"`
+	Commands   []string   `json:"commands,omitempty"`
+	// NeedsUserInput reports that the commands contain UPPERCASE placeholders
+	// for decisions only the developer can make, such as a price, territories,
+	// an age rating answer or listing text; never run them as printed.
+	NeedsUserInput     bool   `json:"needsUserInput,omitempty"`
+	AppStoreConnectURL string `json:"appStoreConnectUrl,omitempty"`
 }
 
 // DeepStatus is the terminal state of one deep validation check.
@@ -56,6 +62,7 @@ const (
 
 const (
 	DeepCheckPrivacyPublishState       = "privacy.publish_state"
+	DeepCheckIAPAttachment             = "iap.first_type_app_version_attachment"
 	DeepCheckSubscriptionAttachment    = "subscriptions.first_type_app_version_attachment"
 	DeepCheckAgreementsActive          = "agreements.active"
 	DeepCheckAvailabilityConfigured    = "availability.configured"
@@ -97,6 +104,10 @@ type CheckResult struct {
 	ResourceType string      `json:"resourceType,omitempty"`
 	ResourceID   string      `json:"resourceId,omitempty"`
 	Resolution   *Resolution `json:"resolution,omitempty"`
+
+	// displayType is the screenshot display type a screenshot-set finding is
+	// about, so its fix command can name the set's device type.
+	displayType string
 }
 
 // Summary aggregates check counts by severity.
@@ -133,11 +144,15 @@ type Report struct {
 
 // Input collects the validation inputs.
 type Input struct {
-	AppID                       string
-	AppInfoID                   string
-	VersionID                   string
-	VersionString               string
-	VersionState                string
+	AppID         string
+	AppInfoID     string
+	VersionID     string
+	VersionString string
+	VersionState  string
+	// FirstVersion reports whether the version is the app's first App Store
+	// version on its platform, read from the app's version history; nil when
+	// that read was not made or failed.
+	FirstVersion                *bool
 	Platform                    string
 	PrimaryLocale               string
 	VersionLocalizations        []VersionLocalization
@@ -158,6 +173,9 @@ type Input struct {
 	AvailabilityFetchSkipReason string
 	PricingCoverageSkipReason   string
 	ScreenshotSets              []ScreenshotSet
+	PreviewSets                 []PreviewSet
+	MediaPlacements             []MediaPlacement
+	MediaReadGaps               []MediaReadGap
 	// SupportsIPad reports whether the app binary declares iPad support in
 	// UIDeviceFamily. It is nil when no binary was inspected.
 	SupportsIPad                *bool
@@ -171,6 +189,24 @@ type Input struct {
 	Copyright                   string
 	HasPaidAppPrice             bool
 	AppPricingKnown             bool
+	// CustomProductPageLocalizations lists the search keywords of the app's
+	// current custom product page localizations.
+	CustomProductPageLocalizations      []CustomProductPageLocalization
+	CustomProductPageKeywordsSkipReason string
+	// BuildSDKName is the binary's DTSDKName, empty when no binary was
+	// inspected.
+	BuildSDKName string
+	// Now is the time date-dependent checks read; zero means the current time.
+	Now time.Time
+}
+
+// CustomProductPageLocalization is one custom product page localization and
+// its search keywords.
+type CustomProductPageLocalization struct {
+	PageName       string
+	LocalizationID string
+	Locale         string
+	SearchKeywords []string
 }
 
 // VersionLocalization represents version-level metadata.
@@ -193,6 +229,9 @@ type AppInfoLocalization struct {
 	Subtitle          string
 	PrivacyPolicyURL  string
 	PrivacyChoicesURL string
+	// PrivacyPolicyText is the Apple TV privacy policy; tvOS versions require it
+	// in every localization instead of (or in addition to) the URL.
+	PrivacyPolicyText string
 }
 
 // ScreenshotSet represents a screenshot set and its assets.
@@ -210,6 +249,50 @@ type Screenshot struct {
 	FileName string
 	Width    int
 	Height   int
+	// DeliveryState is the asset's assetDeliveryState state, empty when Apple
+	// did not return one.
+	DeliveryState  string
+	DeliveryErrors []string
+}
+
+// PreviewSet represents an app preview set and its assets.
+type PreviewSet struct {
+	ID             string
+	PreviewType    string
+	Locale         string
+	LocalizationID string
+	Previews       []Preview
+}
+
+// Preview represents an app preview asset.
+type Preview struct {
+	ID       string
+	FileName string
+	// DeliveryState is the videoDeliveryState state, or the deprecated
+	// assetDeliveryState when Apple returned only that. It is empty when Apple
+	// returned neither.
+	DeliveryState  string
+	DeliveryErrors []string
+}
+
+// MediaPlacement represents an asset library placement on a version
+// localization.
+type MediaPlacement struct {
+	ID             string
+	Locale         string
+	PlacementType  string
+	PlacementGroup string
+	State          string
+	StateDetails   []string
+}
+
+// MediaReadGap records version media that could not be read for one
+// localization, so its delivery state is unknown.
+type MediaReadGap struct {
+	Media          string
+	Locale         string
+	LocalizationID string
+	Reason         string
 }
 
 // ReviewDetails represents App Store review details for a version.
@@ -234,6 +317,17 @@ type Build struct {
 	UsesNonExemptEncryption       *bool
 	AppEncryptionDeclarationID    string
 	AppEncryptionDeclarationState string
+	MinOSVersion                  string
+	Bundles                       []BuildBundle
+	// BundlesUnreadReason explains why Bundles could not be read. It is empty
+	// when the read succeeded or was not attempted.
+	BundlesUnreadReason string
+}
+
+// BuildBundle represents one bundle inside a build.
+type BuildBundle struct {
+	Type     string
+	SDKBuild string
 }
 
 // AgeRatingDeclaration represents age rating attributes for validation.

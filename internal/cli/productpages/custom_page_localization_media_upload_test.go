@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/kballard/go-shellquote"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type customPageUploadRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -116,13 +118,10 @@ func TestExecuteCustomPageScreenshotUpload_SyncDeletesExistingScreenshotsAndReor
 	})
 
 	client := newCustomPageTestClient(t)
-	origFactory := customPageMediaClientFactory
-	customPageMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		customPageMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	result, err := executeCustomPageScreenshotUpload(context.Background(), "loc-1", dir, "IPHONE_65", true)
+	result, err := executeCustomPageScreenshotUpload(context.Background(), d, "loc-1", dir, "IPHONE_65", true, true)
 	if err != nil {
 		t.Fatalf("executeCustomPageScreenshotUpload() error: %v", err)
 	}
@@ -174,13 +173,10 @@ func TestExecuteCustomPageScreenshotUploadFullSetQuotesReplacementPath(t *testin
 	httpClient := server.Client()
 	httpClient.Transport = customPageBaseURLRoundTripper{target: serverURL, next: httpClient.Transport}
 	client := newCustomPageTestClientWithHTTPClient(t, httpClient)
-	origFactory := customPageMediaClientFactory
-	customPageMediaClientFactory = func() (*asc.Client, error) { return client, nil }
-	t.Cleanup(func() {
-		customPageMediaClientFactory = origFactory
-	})
+	d := shared.DefaultDeps()
+	d.Client = func() (*asc.Client, error) { return client, nil }
 
-	_, err := executeCustomPageScreenshotUpload(context.Background(), "loc-1", trickyPath, "IPHONE_65", false)
+	_, err := executeCustomPageScreenshotUpload(context.Background(), d, "loc-1", trickyPath, "IPHONE_65", false, false)
 	if err == nil {
 		t.Fatal("expected full screenshot set error")
 	}
@@ -287,6 +283,9 @@ func writeCustomPageTestPNG(t *testing.T, dir, name string) string {
 			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 		}
 	}
+	// Distinct names get distinct pixels: uploads reject duplicate screenshots.
+	sum := crc32.ChecksumIEEE([]byte(name))
+	img.Set(0, 0, color.RGBA{R: byte(sum), G: byte(sum >> 8), B: byte(sum >> 16), A: 255})
 	if err := png.Encode(file, img); err != nil {
 		t.Fatalf("encode png: %v", err)
 	}
@@ -320,6 +319,9 @@ func writePNGWithDimensions(t *testing.T, dir, name string, width, height int) s
 			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 		}
 	}
+	// Distinct names get distinct pixels: uploads reject duplicate screenshots.
+	sum := crc32.ChecksumIEEE([]byte(name))
+	img.Set(0, 0, color.RGBA{R: byte(sum), G: byte(sum >> 8), B: byte(sum >> 16), A: 255})
 	if err := png.Encode(file, img); err != nil {
 		t.Fatalf("encode png: %v", err)
 	}

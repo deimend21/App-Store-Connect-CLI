@@ -2,9 +2,9 @@ package assets
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,6 +12,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
 const (
@@ -53,13 +54,13 @@ type screenshotValidateResult struct {
 	Issues         []screenshotValidateIssue `json:"issues,omitempty"`
 }
 
-// AssetsScreenshotsValidateCommand returns the screenshots validate subcommand.
-func AssetsScreenshotsValidateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+// NewAssetsScreenshotsValidateCommand returns the screenshots validate subcommand.
+func NewAssetsScreenshotsValidateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("validate", flag.ExitOnError)
 
 	path := fs.String("path", "", "Path to screenshot file or directory")
 	deviceType := fs.String("device-type", "", "Device type (e.g., IPHONE_65 or IPAD_PRO_3GEN_129)")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "validate",
@@ -68,48 +69,45 @@ func AssetsScreenshotsValidateCommand() *ffcli.Command {
 		LongHelp: `Validate screenshot assets locally before upload.
 
 This preflight mirrors upload file ordering and reports common local problems
-before any App Store Connect mutation happens, including hidden files,
+before any App Store Connect mutation happens, including hidden images,
 unreadable assets, unsupported dimensions, images whose encoded format
-contradicts their file extension, and duplicate decoded pixels.
+contradicts their file extension, PNG alpha channels or transparency, and
+duplicate decoded pixels. In a directory, the .png, .jpg, and .jpeg files are
+the screenshots; other files, such as the HTML a mockup was rendered from or
+.DS_Store, are reported as skipped warnings.
 
 Examples:
   asc screenshots validate --path "./screenshots" --device-type "IPHONE_65"
   asc screenshots validate --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129"
   asc screenshots validate --path "./screenshots" --device-type "IPHONE_65" --output table`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("screenshots validate does not accept positional arguments")
-			}
-
 			pathValue := strings.TrimSpace(*path)
 			if pathValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --path is required")
-				return shared.MissingRequiredUsageError("--path")
+				return d.RequiredFlag("--path")
 			}
 			deviceValue := strings.TrimSpace(*deviceType)
 			if deviceValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --device-type is required")
-				return shared.MissingRequiredUsageError("--device-type")
+				return d.RequiredFlag("--device-type")
 			}
 
 			displayType, err := normalizeScreenshotDisplayType(deviceValue)
 			if err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 
-			result, err := validateScreenshotAssets(pathValue, displayType)
+			result, err := validateScreenshotAssets(d, pathValue, displayType)
 			if err != nil {
 				return fmt.Errorf("screenshots validate: %w", err)
 			}
 
-			if err := shared.PrintOutputWithRenderers(
+			if err := d.PrintOutputWithRenderers(
 				result,
 				*output.Output,
 				*output.Pretty,
-				func() error { return renderScreenshotValidateResult(result, false) },
-				func() error { return renderScreenshotValidateResult(result, true) },
+				func() error { return renderScreenshotValidateResult(d, result, false) },
+				func() error { return renderScreenshotValidateResult(d, result, true) },
 			); err != nil {
 				return err
 			}
@@ -123,7 +121,7 @@ Examples:
 	}
 }
 
-func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidateResult, error) {
+func validateScreenshotAssets(d *shared.Deps, pathValue, displayType string) (*screenshotValidateResult, error) {
 	rawPath := strings.TrimSpace(pathValue)
 	apiDisplayType := asc.CanonicalScreenshotDisplayTypeForAPI(displayType)
 	result := &screenshotValidateResult{
@@ -136,21 +134,38 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 		result.APIDisplayType = apiDisplayType
 	}
 
-	paths, err := collectAssetPaths(rawPath)
+	paths, skipped, err := collectScreenshotPaths(d.OSPath(rawPath))
 	if err != nil {
 		return nil, err
 	}
-	result.TotalFiles = len(paths)
 	if len(paths) == 0 {
 		appendScreenshotValidateIssue(result, screenshotValidateIssue{
 			Code:        "no_files",
 			Severity:    screenshotValidateSeverityError,
-			Message:     fmt.Sprintf("no files found in %q", rawPath),
+			Message:     noScreenshotFilesError(rawPath, skipped).Error(),
 			Remediation: "Add screenshot image files or point --path at a specific screenshot.",
 		})
 		return result, nil
 	}
+	for _, name := range skipped {
+		appendScreenshotValidateIssue(result, screenshotValidateIssue{
+			Code:        "skipped_file",
+			Severity:    screenshotValidateSeverityWarning,
+			FilePath:    filepath.Join(rawPath, name),
+			FileName:    name,
+			Message:     fmt.Sprintf("skipped %q: not a .png, .jpg, or .jpeg screenshot", name),
+			Remediation: "Upload skips this file. Nothing to do unless it should be a screenshot; then export it as PNG or JPEG.",
+		})
+	}
+	checkScreenshotFiles(result, paths, apiDisplayType)
+	return result, nil
+}
 
+// checkScreenshotFiles runs every local screenshot check on paths in upload
+// order and records the outcome in result. Uploads run it too, so validate
+// and upload accept and reject the same files.
+func checkScreenshotFiles(result *screenshotValidateResult, paths []string, apiDisplayType string) {
+	result.TotalFiles = len(paths)
 	seenPixelDigests := make(map[screenshotPixelDigest][]string, len(paths))
 	for index, filePath := range paths {
 		fileName := filepath.Base(filePath)
@@ -171,7 +186,7 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 				FilePath:    filePath,
 				FileName:    fileName,
 				Message:     fmt.Sprintf("hidden file %q will be included in upload ordering", fileName),
-				Remediation: "Remove hidden files like .DS_Store from the upload directory before uploading screenshots.",
+				Remediation: "Rename or remove the hidden image before uploading if it is not a screenshot.",
 			})
 		}
 
@@ -188,6 +203,16 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 			fileResult.Status = screenshotValidateSeverityError
 			result.Files = append(result.Files, fileResult)
 			continue
+		}
+
+		if issue, found := screenshotImageFormatIssue(filePath, fileName); found {
+			hasError = true
+			appendScreenshotValidateIssue(result, issue)
+			if issue.Code != "alpha_channel" {
+				fileResult.Status = screenshotValidateSeverityError
+				result.Files = append(result.Files, fileResult)
+				continue
+			}
 		}
 
 		dimensions, format, err := asc.ReadImageDimensionsAndFormat(filePath)
@@ -250,8 +275,62 @@ func validateScreenshotAssets(pathValue, displayType string) (*screenshotValidat
 		}
 		result.Files = append(result.Files, fileResult)
 	}
+}
 
-	return result, nil
+// screenshotFilesError turns the error issues from checkScreenshotFiles into
+// the error an upload returns before reserving anything.
+func screenshotFilesError(result *screenshotValidateResult) error {
+	messages := make([]string, 0, result.ErrorCount)
+	var diagnostic shared.DiagnosticCode
+	for _, issue := range result.Issues {
+		if issue.Severity != screenshotValidateSeverityError {
+			continue
+		}
+		messages = append(messages, issue.Message)
+		if diagnostic == "" {
+			diagnostic = shared.DiagnosticFileInvalidFormat
+			if issue.Code == "dimension_mismatch" {
+				diagnostic = shared.DiagnosticInvalidInput
+			}
+		}
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	if len(messages) == 1 {
+		return markMediaInput(errors.New(messages[0]), diagnostic)
+	}
+	return markMediaInput(fmt.Errorf("%d screenshot problems; run asc screenshots validate for the full report:\n  %s", len(messages), strings.Join(messages, "\n  ")), diagnostic)
+}
+
+// screenshotImageFormatIssue runs the encoded-format and alpha check that
+// screenshot uploads repeat on the opened file just before reserving an asset.
+func screenshotImageFormatIssue(filePath, fileName string) (screenshotValidateIssue, bool) {
+	issue := screenshotValidateIssue{
+		Code:        "read_failure",
+		Severity:    screenshotValidateSeverityError,
+		FilePath:    filePath,
+		FileName:    fileName,
+		Remediation: "Replace this file with a valid PNG or JPEG screenshot.",
+	}
+	file, err := rootfs.OpenFile(filePath)
+	if err != nil {
+		issue.Message = err.Error()
+		return issue, true
+	}
+	_, err = asc.ReadAppStoreImageFormatFrom(file)
+	if closeErr := file.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err == nil {
+		return screenshotValidateIssue{}, false
+	}
+	issue.Message = fmt.Sprintf("%q: %v", filePath, err)
+	if errors.Is(err, asc.ErrAppStoreImageAlpha) {
+		issue.Code = "alpha_channel"
+		issue.Remediation = "Flatten this image onto an opaque background and re-export it as an RGB PNG or a JPEG without an alpha channel; App Store Connect rejects an alpha channel even when every pixel is opaque."
+	}
+	return issue, true
 }
 
 // screenshotFormatMismatchRemediation keeps the structured advice in step with
@@ -335,7 +414,7 @@ func appendScreenshotValidateIssue(result *screenshotValidateResult, issue scree
 	}
 }
 
-func renderScreenshotValidateResult(result *screenshotValidateResult, markdown bool) error {
+func renderScreenshotValidateResult(d *shared.Deps, result *screenshotValidateResult, markdown bool) error {
 	if result == nil {
 		return fmt.Errorf("result is nil")
 	}
@@ -356,7 +435,7 @@ func renderScreenshotValidateResult(result *screenshotValidateResult, markdown b
 	if strings.TrimSpace(result.APIDisplayType) != "" && result.APIDisplayType != result.DisplayType {
 		summaryRows = append(summaryRows[0:2], append([][]string{{"apiDisplayType", apiDisplayType}}, summaryRows[2:]...)...)
 	}
-	shared.RenderSection("Summary", []string{"field", "value"}, summaryRows, markdown)
+	d.RenderSection("Summary", []string{"field", "value"}, summaryRows, markdown)
 
 	if len(result.Files) > 0 {
 		rows := make([][]string, 0, len(result.Files))
@@ -374,7 +453,7 @@ func renderScreenshotValidateResult(result *screenshotValidateResult, markdown b
 				file.FilePath,
 			})
 		}
-		shared.RenderSection("Files", []string{"order", "file", "dimensions", "status", "hidden", "path"}, rows, markdown)
+		d.RenderSection("Files", []string{"order", "file", "dimensions", "status", "hidden", "path"}, rows, markdown)
 	}
 
 	issueRows := make([][]string, 0, len(result.Issues))
@@ -390,6 +469,6 @@ func renderScreenshotValidateResult(result *screenshotValidateResult, markdown b
 	if len(issueRows) == 0 {
 		issueRows = append(issueRows, []string{screenshotValidateSeverityInfo, "ok", "n/a", "No issues found", "n/a"})
 	}
-	shared.RenderSection("Issues", []string{"severity", "code", "file", "message", "remediation"}, issueRows, markdown)
+	d.RenderSection("Issues", []string{"severity", "code", "file", "message", "remediation"}, issueRows, markdown)
 	return nil
 }

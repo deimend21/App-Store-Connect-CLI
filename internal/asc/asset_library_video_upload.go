@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -23,22 +24,22 @@ type assetLibraryVideoUploadResponse struct {
 					Width  int `json:"width"`
 					Height int `json:"height"`
 				} `json:"image"`
+				State *struct {
+					State string `json:"state"`
+				} `json:"state"`
 			} `json:"previewFrameImage"`
 		} `json:"attributes"`
 	} `json:"data"`
 }
 
-// UploadAssetLibraryVideo reserves, uploads, commits, and waits for a video.
-// A partial result retains the reserved ID when a later operation fails.
-// The caller validates the video and owns the overall upload timeout.
-func (c *Client) UploadAssetLibraryVideo(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, requestContext RequestContextFunc) (AssetLibraryVideoUploadResult, error) {
-	return c.UploadAssetLibraryVideoWithCategory(ctx, libraryID, fileName, file, fileSize, "CREATIVE_ASSETS", "", requestContext)
-}
-
 // UploadAssetLibraryVideoWithCategory uploads an independently managed video.
-// An empty referenceName leaves Apple's default reference name in place.
-func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, libraryID, fileName string, file *os.File, fileSize int64, category, referenceName string, requestContext RequestContextFunc) (AssetLibraryVideoUploadResult, error) {
-	result := AssetLibraryVideoUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize, ReferenceName: referenceName, Category: category}
+// An empty referenceName leaves Apple's default reference name in place. A
+// non-empty previewFrameTimeCode also makes readiness wait for that frame.
+// Transient failures tolerated during that wait are reported on stderr; nil
+// means the process stderr.
+func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, stderr io.Writer, libraryID, fileName string, file *os.File, fileSize int64, category, referenceName, previewFrameTimeCode string, requestContext RequestContextFunc) (result AssetLibraryVideoUploadResult, err error) {
+	defer func() { result.FailedPhase = string(UploadPhaseOf(err)) }()
+	result = AssetLibraryVideoUploadResult{LibraryID: libraryID, FileName: fileName, FileSize: fileSize, ReferenceName: referenceName, PreviewFrameTimeCode: previewFrameTimeCode, Category: category}
 	if category != "CREATIVE_ASSETS" && category != "APP_SCREENSHOTS_AND_PREVIEWS" {
 		return result, fmt.Errorf("unsupported asset category %q", category)
 	}
@@ -52,10 +53,11 @@ func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, librar
 		Data struct {
 			Type       string `json:"type"`
 			Attributes struct {
-				FileSize      int64  `json:"fileSize"`
-				FileName      string `json:"fileName"`
-				Category      string `json:"category"`
-				ReferenceName string `json:"referenceName,omitempty"`
+				FileSize             int64  `json:"fileSize"`
+				FileName             string `json:"fileName"`
+				Category             string `json:"category"`
+				ReferenceName        string `json:"referenceName,omitempty"`
+				PreviewFrameTimeCode string `json:"previewFrameTimeCode,omitempty"`
 			} `json:"attributes"`
 			Relationships struct {
 				AssetLibrary Relationship `json:"assetLibrary"`
@@ -63,7 +65,7 @@ func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, librar
 		} `json:"data"`
 	}{}
 	payload.Data.Type = "appAssetLibraryVideos"
-	payload.Data.Attributes.FileSize, payload.Data.Attributes.FileName, payload.Data.Attributes.Category, payload.Data.Attributes.ReferenceName = fileSize, fileName, category, referenceName
+	payload.Data.Attributes.FileSize, payload.Data.Attributes.FileName, payload.Data.Attributes.Category, payload.Data.Attributes.ReferenceName, payload.Data.Attributes.PreviewFrameTimeCode = fileSize, fileName, category, referenceName, previewFrameTimeCode
 	payload.Data.Relationships.AssetLibrary.Data = ResourceData{Type: "appAssetLibraries", ID: libraryID}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -76,20 +78,20 @@ func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, librar
 	}
 	raw, err := request("POST", "/v1/appAssetLibraryVideos", body)
 	if err != nil {
-		return result, fmt.Errorf("reserve video: %w", err)
+		return result, WithUploadPhase(UploadPhaseReserve, fmt.Errorf("reserve video: %w", err))
 	}
 	var reserved assetLibraryVideoUploadResponse
 	decodeErr := json.Unmarshal(raw, &reserved)
 	result.VideoID = reserved.Data.ID
 	result.State = reserved.Data.Attributes.State
 	if decodeErr != nil {
-		return result, fmt.Errorf("parse video reservation: %w", decodeErr)
+		return result, WithUploadPhase(UploadPhaseReserve, fmt.Errorf("parse video reservation: %w", decodeErr))
 	}
 	if result.VideoID == "" || reserved.Data.Type != "appAssetLibraryVideos" {
-		return result, fmt.Errorf("video reservation missing video resource identity")
+		return result, WithUploadPhase(UploadPhaseReserve, fmt.Errorf("video reservation missing video resource identity"))
 	}
 	if err := UploadAssetFromFile(ctx, file, fileSize, reserved.Data.Attributes.UploadOperations); err != nil {
-		return result, fmt.Errorf("upload video %s: %w", result.VideoID, err)
+		return result, WithUploadPhase(UploadPhaseTransfer, fmt.Errorf("transfer video %s: %w", result.VideoID, err))
 	}
 	path := "/v1/appAssetLibraryVideos/" + url.PathEscape(result.VideoID)
 	commit := struct {
@@ -107,10 +109,10 @@ func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, librar
 		return result, err
 	}
 	if _, err := request("PATCH", path, body); err != nil {
-		return result, fmt.Errorf("commit video %s: %w", result.VideoID, err)
+		return result, WithUploadPhase(UploadPhaseCommit, fmt.Errorf("commit video %s: %w", result.VideoID, err))
 	}
 	result.Uploaded = true
-	_, err = PollUntilTolerant(ctx, assetLibraryProcessingPollInterval, func(context.Context) (struct{}, bool, error) {
+	_, err = PollMediaUntil(ctx, func(context.Context) (struct{}, bool, error) {
 		raw, err := request("GET", path, nil)
 		if err != nil {
 			return struct{}{}, false, err
@@ -130,13 +132,21 @@ func (c *Client) UploadAssetLibraryVideoWithCategory(ctx context.Context, librar
 		if attrs.PreviewFrameImage != nil && attrs.PreviewFrameImage.Image != nil {
 			result.Width, result.Height = attrs.PreviewFrameImage.Image.Width, attrs.PreviewFrameImage.Image.Height
 		}
+		frameState := ""
+		if attrs.PreviewFrameImage != nil && attrs.PreviewFrameImage.State != nil {
+			frameState = attrs.PreviewFrameImage.State.State
+		}
+		if previewFrameTimeCode != "" && frameState == "FAILED" {
+			return struct{}{}, false, fmt.Errorf("video preview frame reached FAILED")
+		}
 		videoURL, parseErr := url.Parse(attrs.VideoAsset)
 		videoAvailable := parseErr == nil && videoURL.Host != "" && (videoURL.Scheme == "https" || videoURL.Scheme == "http")
-		result.Ready = attrs.State == "PREPARE_FOR_SUBMISSION" && attrs.SpecID != "" && videoAvailable
+		frameReady := previewFrameTimeCode == "" || frameState == "COMPLETE"
+		result.Ready = attrs.State == "PREPARE_FOR_SUBMISSION" && attrs.SpecID != "" && videoAvailable && frameReady
 		return struct{}{}, result.Ready, nil
-	}, PollOptions{Tolerate: IsTransientWaitError})
+	}, PollOptions{Tolerate: IsTransientWaitError, Stderr: stderr})
 	if err != nil {
-		return result, fmt.Errorf("wait for video %s processing (state %q): %w", result.VideoID, result.State, err)
+		return result, WithUploadPhase(UploadPhaseProcessing, fmt.Errorf("wait for video %s processing (state %q): %w", result.VideoID, result.State, err))
 	}
 	return result, nil
 }

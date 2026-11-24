@@ -1,16 +1,15 @@
 package cmdtest
 
 import (
-	"context"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func installLocalizationsDefaultVersionTransport(t *testing.T, versionsByQuery map[string]string, log *[]string) {
@@ -41,27 +40,13 @@ func installLocalizationsDefaultVersionTransport(t *testing.T, versionsByQuery m
 	})
 }
 
-func runLocalizationsList(t *testing.T, args ...string) (string, string, error) {
-	t.Helper()
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse(args); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-	return stdout, stderr, runErr
-}
-
 func TestLocalizationsListDefaultsToEditableVersionWhenVersionOmitted(t *testing.T) {
 	var log []string
 	installLocalizationsDefaultVersionTransport(t, map[string]string{
 		editableVersionStateQuery: `{"data":[{"type":"appStoreVersions","id":"ver-1","attributes":{"platform":"IOS","versionString":"1.2.3","appVersionState":"PREPARE_FOR_SUBMISSION","createdDate":"2026-02-01T00:00:00Z"}}],"links":{"next":""}}`,
 	}, &log)
 
-	stdout, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--app", "app-1")
+	stdout, stderr, runErr := runRootCommand(t, []string{"localizations", "list", "--app", "app-1"})
 	if runErr != nil {
 		t.Fatalf("Run() error = %v", runErr)
 	}
@@ -86,7 +71,7 @@ func TestLocalizationsListDefaultsToLiveVersionWithPlatform(t *testing.T) {
 		liveVersionModernStateQuery + "&filter[platform]=MAC_OS": `{"data":[],"links":{"next":""}}`,
 	}, &log)
 
-	_, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--app", "app-1", "--platform", "MAC_OS")
+	_, stderr, runErr := runRootCommand(t, []string{"localizations", "list", "--app", "app-1", "--platform", "MAC_OS"})
 	if runErr != nil {
 		t.Fatalf("Run() error = %v", runErr)
 	}
@@ -144,7 +129,7 @@ func TestLocalizationsListDefaultVersionUsageErrors(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stdout, stderr, runErr := runLocalizationsList(t, test.args...)
+			stdout, stderr, runErr := runRootCommand(t, test.args)
 			if runErr == nil {
 				t.Fatal("expected error")
 			}
@@ -167,27 +152,23 @@ func TestLocalizationsListDefaultVersionUsageErrors(t *testing.T) {
 // would waste a request, could announce a version the page does not belong to,
 // and could fail a valid continuation when the app's defaults are ambiguous.
 func TestLocalizationsListNextContinuationSkipsDefaultVersionLookup(t *testing.T) {
-	var log []string
 	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 	t.Setenv("ASC_APP_ID", "")
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		log = append(log, req.URL.Path)
-		if req.URL.Path != "/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations" {
-			t.Fatalf("unexpected path: %s", req.URL.Path)
-		}
-		return jsonResponse(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-2","attributes":{"locale":"ja"}}],"links":{"next":""}}`)
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations", "cursor=NEXT"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"appStoreVersionLocalizations","id":"loc-2","attributes":{"locale":"ja"}}],"links":{"next":""}}`))
 
 	nextURL := "https://api.appstoreconnect.apple.com/v1/appStoreVersions/ver-page2/appStoreVersionLocalizations?cursor=NEXT"
-	stdout, stderr, runErr := runLocalizationsList(t, "localizations", "list", "--next", nextURL)
+	stdout, stderr, runErr := runRootCommand(t, []string{"localizations", "list", "--next", nextURL})
 	if runErr != nil {
 		t.Fatalf("Run() error = %v", runErr)
+	}
+	var log []string
+	for _, req := range reg.Requests() {
+		log = append(log, req.URL.Path)
 	}
 	for _, path := range log {
 		if strings.HasSuffix(path, "/appStoreVersions") {

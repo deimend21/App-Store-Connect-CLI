@@ -18,18 +18,23 @@ const (
 	JSONPayloadAny    JSONPayloadKind = "any"
 )
 
-// ReadJSONFilePayload loads a JSON object from a file path ("-" for standard
-// input) for commands that accept raw payload documents.
-func ReadJSONFilePayload(path string) (json.RawMessage, error) {
-	return ReadJSONFilePayloadKind(path, JSONPayloadObject)
+// ReadJSONFilePayload loads a JSON object from a file path ("-" for d's stdin)
+// for commands that accept raw payload documents.
+func (d *Deps) ReadJSONFilePayload(path string) (json.RawMessage, error) {
+	return d.ReadJSONFilePayloadKind(path, JSONPayloadObject)
 }
 
-// ReadJSONFilePayloadKind loads a JSON payload from a file path ("-" for
-// standard input) and validates the requested top-level JSON shape.
-func ReadJSONFilePayloadKind(path string, kind JSONPayloadKind) (json.RawMessage, error) {
+// ReadJSONFilePayloadKind loads a JSON payload from a file path ("-" for d's
+// stdin, refused when that stdin is a terminal) and validates the requested
+// top-level JSON shape.
+func (d *Deps) ReadJSONFilePayloadKind(path string, kind JSONPayloadKind) (json.RawMessage, error) {
 	if path == "-" {
-		return readJSONStdinPayloadKind(kind)
+		return readJSONStdinPayloadKind(d.IO.In, d.IO.stdinTerminal(), kind)
 	}
+	return readJSONFilePayloadKind(path, kind)
+}
+
+func readJSONFilePayloadKind(path string, kind JSONPayloadKind) (json.RawMessage, error) {
 	file, err := openJSONPayloadFile(path)
 	if err != nil {
 		return nil, err
@@ -51,11 +56,11 @@ func ReadJSONFilePayloadKind(path string, kind JSONPayloadKind) (json.RawMessage
 	return validateJSONPayloadKind(data, "payload file", kind)
 }
 
-func readJSONStdinPayloadKind(kind JSONPayloadKind) (json.RawMessage, error) {
-	if isTerminal(int(os.Stdin.Fd())) {
+func readJSONStdinPayloadKind(stdin io.Reader, stdinTTY bool, kind JSONPayloadKind) (json.RawMessage, error) {
+	if stdinTTY {
 		return nil, fmt.Errorf("stdin is a terminal; pipe JSON to --file - or pass a file path")
 	}
-	data, err := io.ReadAll(os.Stdin)
+	data, err := io.ReadAll(stdin)
 	if err != nil {
 		return nil, err
 	}

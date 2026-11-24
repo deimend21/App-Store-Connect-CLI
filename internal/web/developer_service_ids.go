@@ -105,7 +105,7 @@ func (c *Client) ListDeveloperServiceIDs(ctx context.Context) (*DeveloperService
 func (c *Client) listDeveloperServiceIDsAfterSession(ctx context.Context) (*DeveloperServiceIDsListResult, error) {
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint())
 	}
 	// Keep the captured source order in the proxy body. The query semantics are
 	// the same as url.Values.Encode, but the live frontend emits this order.
@@ -179,7 +179,7 @@ func (c *Client) CreateDeveloperServiceID(ctx context.Context, request Developer
 	}
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint())
 	}
 
 	payload := developerServiceIDCreatePayload{
@@ -326,7 +326,7 @@ func (c *Client) DeleteDeveloperServiceID(ctx context.Context, request Developer
 
 	if _, err := c.getDeveloperServiceIDAfterSession(ctx, request.ServiceID); err == nil {
 		return nil, &DeveloperServiceIDUnverifiedError{Err: fmt.Errorf("developer portal accepted the Services ID delete but %q is still listed; inspect it before retrying", request.ServiceID)}
-	} else if !developerServiceIDIsNotFound(err) {
+	} else if !isDeveloperPortalNotFound(err) {
 		return nil, &DeveloperServiceIDUnverifiedError{Err: fmt.Errorf("developer portal accepted the Services ID delete but verification failed: %w", err)}
 	}
 	return &asc.WebServiceIDMutationResult{
@@ -743,11 +743,6 @@ func developerServiceIDWriteError(operation string, err error) error {
 		return &DeveloperServiceIDUnverifiedError{Err: fmt.Errorf("developer portal Services ID %s outcome is unknown; inspect the resource before retrying: %w", operation, err)}
 	}
 	return err
-}
-
-func developerServiceIDIsNotFound(err error) bool {
-	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }
 
 // serviceIDCapabilityPlaceholderLimit is the paging limit Apple reports with

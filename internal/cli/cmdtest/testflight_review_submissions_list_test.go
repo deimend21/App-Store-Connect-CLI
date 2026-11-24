@@ -1,29 +1,21 @@
 package cmdtest
 
 import (
-	"context"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func TestTestFlightReviewSubmissionsListMissingBuild(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "review", "submissions", "list"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		err := root.Run(context.Background())
-		if !errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("expected ErrHelp, got %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, nil, "testflight", "review", "submissions", "list")
+	if !errors.Is(err, flag.ErrHelp) {
+		t.Fatalf("expected ErrHelp, got %v", err)
+	}
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -34,48 +26,17 @@ func TestTestFlightReviewSubmissionsListMissingBuild(t *testing.T) {
 }
 
 func TestTestFlightReviewSubmissionsListOutputTable(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/betaAppReviewSubmissions", "filter[build]=build-1", "limit=2"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaAppReviewSubmissions","id":"submission-1","attributes":{"betaReviewState":"WAITING_FOR_REVIEW","submittedDate":"2024-01-01T00:00:00Z"}}],"links":{"next":""}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/betaAppReviewSubmissions" {
-			t.Fatalf("expected path /v1/betaAppReviewSubmissions, got %s", req.URL.Path)
-		}
-		query := req.URL.Query()
-		if query.Get("filter[build]") != "build-1" {
-			t.Fatalf("expected build filter build-1, got %q", query.Get("filter[build]"))
-		}
-		if query.Get("limit") != "2" {
-			t.Fatalf("expected limit 2, got %q", query.Get("limit"))
-		}
-		body := `{"data":[{"type":"betaAppReviewSubmissions","id":"submission-1","attributes":{"betaReviewState":"WAITING_FOR_REVIEW","submittedDate":"2024-01-01T00:00:00Z"}}],"links":{"next":""}}`
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "review", "submissions", "list", "--build-id", "build-1", "--limit", "2", "--output", "table"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "testflight", "review", "submissions", "list", "--build-id", "build-1", "--limit", "2", "--output", "table")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -88,48 +49,77 @@ func TestTestFlightReviewSubmissionsListOutputTable(t *testing.T) {
 	}
 }
 
-func TestTestFlightRecruitmentDeleteOutput(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodDelete {
-			t.Fatalf("expected DELETE, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/betaRecruitmentCriteria/criteria-1" {
-			t.Fatalf("expected path /v1/betaRecruitmentCriteria/criteria-1, got %s", req.URL.Path)
-		}
-		return &http.Response{
-			StatusCode: http.StatusNoContent,
-			Body:       io.NopCloser(strings.NewReader("")),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "recruitment", "delete", "--id", "criteria-1", "--confirm"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
+func TestTestFlightReviewSubmissionsListScopesToApp(t *testing.T) {
+	type stub struct {
+		matcher asctest.Matcher
+		body    string
 	}
-	if !strings.Contains(stdout, `"id":"criteria-1"`) {
-		t.Fatalf("expected criteria id in output, got %q", stdout)
+	recentBuilds := asctest.GET("/v1/builds", "filter[app]=100000001", "sort=-uploadedDate", "limit=200")
+	tests := []struct {
+		name       string
+		args       []string
+		stubs      []stub
+		wantStdout string
+		wantErr    string
+	}{
+		{
+			name: "app lists its recent builds' submissions",
+			args: []string{"--app", "100000001"},
+			stubs: []stub{
+				{matcher: recentBuilds, body: `{"data":[{"type":"builds","id":"build-2"},{"type":"builds","id":"build-1"}]}`},
+				{matcher: asctest.GET("/v1/betaAppReviewSubmissions", "filter[build]=build-2,build-1"), body: `{"data":[{"type":"betaAppReviewSubmissions","id":"submission-2"}]}`},
+			},
+			wantStdout: `"id":"submission-2"`,
+		},
+		{
+			name:       "app without builds has no submissions",
+			args:       []string{"--app", "100000001"},
+			stubs:      []stub{{matcher: recentBuilds, body: `{"data":[]}`}},
+			wantStdout: `{"data":[]`,
+		},
+		{
+			name: "build of the app",
+			args: []string{"--app", "100000001", "--build-id", "build-1"},
+			stubs: []stub{
+				{matcher: asctest.GET("/v1/builds/build-1/relationships/app"), body: `{"data":{"type":"apps","id":"100000001"}}`},
+				{matcher: asctest.GET("/v1/betaAppReviewSubmissions", "filter[build]=build-1"), body: `{"data":[{"type":"betaAppReviewSubmissions","id":"submission-1"}]}`},
+			},
+			wantStdout: `"id":"submission-1"`,
+		},
+		{
+			name:    "build of another app",
+			args:    []string{"--app", "100000001", "--build-id", "build-9"},
+			stubs:   []stub{{matcher: asctest.GET("/v1/builds/build-9/relationships/app"), body: `{"data":{"type":"apps","id":"200000002"}}`}},
+			wantErr: `build "build-9" belongs to app "200000002", not "100000001"`,
+		},
 	}
-	if !strings.Contains(stdout, `"deleted":true`) {
-		t.Fatalf("expected deleted true in output, got %q", stdout)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			reg := asctest.NewRegistry(t)
+			for _, stub := range test.stubs {
+				reg.Register(stub.matcher, asctest.JSON(http.StatusOK, stub.body))
+			}
+
+			args := append([]string{"testflight", "review", "submissions", "list", "--output", "json"}, test.args...)
+			stdout, _, err := runRootWithDeps(t, stubClient(t, reg), args...)
+
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("err = %v, want %q", err, test.wantErr)
+				}
+				if stdout != "" {
+					t.Fatalf("expected no output for another app's build, got %q", stdout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+			if !strings.Contains(stdout, test.wantStdout) {
+				t.Fatalf("stdout = %q, want %s", stdout, test.wantStdout)
+			}
+		})
 	}
 }

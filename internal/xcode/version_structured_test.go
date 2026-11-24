@@ -650,51 +650,36 @@ func TestStructuredVersion_UnscopedBumpSupportsMultipleApplicationTargets(t *tes
 	}
 }
 
-func TestStructuredVersion_BumpRejectsMissingSettingWithoutMutation(t *testing.T) {
-	project := writeStructuredVersionProject(t, false)
-	pbxprojPath := filepath.Join(project, "project.pbxproj")
-	contents := mustReadVersionTestFile(t, pbxprojPath)
-	contents = strings.Replace(contents,
-		"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { MARKETING_VERSION = 1.2.3; CURRENT_PROJECT_VERSION = 42; }; name = Release; };",
-		"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { CURRENT_PROJECT_VERSION = 42; }; name = Release; };", 1)
-	if err := os.WriteFile(pbxprojPath, []byte(contents), 0o644); err != nil {
-		t.Fatalf("WriteFile(project) error = %v", err)
-	}
-	before := mustReadVersionTestFile(t, pbxprojPath)
+func TestStructuredVersion_RejectsMissingSettingWithoutMutation(t *testing.T) {
+	for name, run := range map[string]func(project string) error{
+		"bump": func(project string) error {
+			_, err := BumpVersion(context.Background(), BumpVersionOptions{ProjectDir: project, BumpType: BumpPatch})
+			return err
+		},
+		"edit": func(project string) error {
+			_, err := SetVersion(context.Background(), SetVersionOptions{ProjectDir: project, Version: "2.0.0"})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			project := writeStructuredVersionProject(t, false)
+			pbxprojPath := filepath.Join(project, "project.pbxproj")
+			contents := mustReadVersionTestFile(t, pbxprojPath)
+			contents = strings.Replace(contents,
+				"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { MARKETING_VERSION = 1.2.3; CURRENT_PROJECT_VERSION = 42; }; name = Release; };",
+				"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { CURRENT_PROJECT_VERSION = 42; }; name = Release; };", 1)
+			if err := os.WriteFile(pbxprojPath, []byte(contents), 0o644); err != nil {
+				t.Fatalf("WriteFile(project) error = %v", err)
+			}
+			before := mustReadVersionTestFile(t, pbxprojPath)
 
-	_, err := BumpVersion(context.Background(), BumpVersionOptions{
-		ProjectDir: project,
-		BumpType:   BumpPatch,
-	})
-	if err == nil || !strings.Contains(err.Error(), "MARKETING_VERSION") {
-		t.Fatalf("expected missing MARKETING_VERSION error, got %v", err)
-	}
-	if got := mustReadVersionTestFile(t, pbxprojPath); got != before {
-		t.Fatal("project changed after missing-setting validation failure")
-	}
-}
-
-func TestStructuredVersion_EditRejectsMissingSettingWithoutMutation(t *testing.T) {
-	project := writeStructuredVersionProject(t, false)
-	pbxprojPath := filepath.Join(project, "project.pbxproj")
-	contents := mustReadVersionTestFile(t, pbxprojPath)
-	contents = strings.Replace(contents,
-		"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { MARKETING_VERSION = 1.2.3; CURRENT_PROJECT_VERSION = 42; }; name = Release; };",
-		"999999999999999999999996 /* Widget Release */ = {isa = XCBuildConfiguration; buildSettings = { CURRENT_PROJECT_VERSION = 42; }; name = Release; };", 1)
-	if err := os.WriteFile(pbxprojPath, []byte(contents), 0o644); err != nil {
-		t.Fatalf("WriteFile(project) error = %v", err)
-	}
-	before := mustReadVersionTestFile(t, pbxprojPath)
-
-	_, err := SetVersion(context.Background(), SetVersionOptions{
-		ProjectDir: project,
-		Version:    "2.0.0",
-	})
-	if err == nil || !strings.Contains(err.Error(), "MARKETING_VERSION") {
-		t.Fatalf("expected missing MARKETING_VERSION error, got %v", err)
-	}
-	if got := mustReadVersionTestFile(t, pbxprojPath); got != before {
-		t.Fatal("project changed after missing-setting edit validation failure")
+			if err := run(project); err == nil || !strings.Contains(err.Error(), "MARKETING_VERSION") {
+				t.Fatalf("expected missing MARKETING_VERSION error, got %v", err)
+			}
+			if got := mustReadVersionTestFile(t, pbxprojPath); got != before {
+				t.Fatal("project changed after missing-setting validation failure")
+			}
+		})
 	}
 }
 
@@ -794,7 +779,7 @@ func TestStructuredVersion_PartialBuildSettingsAreReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openStructuredVersionProject() error = %v", err)
 	}
-	structured, err := parsed.hasStructuredVersionSettingsForMutation("", "")
+	structured, err := parsed.hasStructuredSettingsForMutation("", "", marketingVersionSetting, currentProjectSetting)
 	if err == nil || !strings.Contains(err.Error(), "partially") {
 		t.Fatalf("expected partial structured coverage error, got structured=%v err=%v", structured, err)
 	}
@@ -2904,5 +2889,143 @@ func TestStructuredVersion_RollsBackLargeXCConfigAfterLaterWriteFailure(t *testi
 	}
 	if got := mustReadVersionTestFile(t, secondPath); got != "old-b" {
 		t.Fatalf("later failed file changed: %q", got)
+	}
+}
+
+func TestStructuredVersionReportsLiteralInfoPlist(t *testing.T) {
+	for _, bump := range []bool{false, true} {
+		t.Run(fmt.Sprint("bump=", bump), func(t *testing.T) {
+			project := writeStructuredVersionProject(t, false)
+			pbx := filepath.Join(project, "project.pbxproj")
+			original := mustReadVersionTestFile(t, pbx)
+			original = strings.ReplaceAll(original, "MARKETING_VERSION = 1.2.3; CURRENT_PROJECT_VERSION = 42;", `INFOPLIST_FILE = "$(SRCROOT)/$(TARGET_NAME)/Info.plist"; MARKETING_VERSION = 1.2.3; CURRENT_PROJECT_VERSION = 42;`)
+			if err := os.WriteFile(pbx, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(filepath.Dir(project), "App", "Info.plist")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			contents := `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleVersion</key><string>42</string><key>CFBundleShortVersionString</key><string>1.2.3</string></dict></plist>`
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var warnings []string
+			if bump {
+				result, err := BumpVersion(context.Background(), BumpVersionOptions{ProjectDir: project, Target: "App", Configuration: "Release", BumpType: BumpBuild})
+				if err != nil {
+					t.Fatal(err)
+				}
+				warnings = result.ComputedWarnings
+			} else {
+				result, err := SetVersion(context.Background(), SetVersionOptions{ProjectDir: project, Target: "App", Configuration: "Release", Version: "2.0.0", BuildNumber: "50"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				warnings = result.ComputedWarnings
+			}
+
+			want := 2
+			if bump {
+				want = 1
+			}
+			if len(warnings) != want {
+				t.Fatalf("computedWarnings = %#v, want %d scoped literal warnings", warnings, want)
+			}
+			for _, warning := range warnings {
+				for _, expected := range []string{`target "App"`, `configuration "Release"`, "Info.plist", "CFBundle"} {
+					if !strings.Contains(warning, expected) {
+						t.Errorf("warning %q missing %q", warning, expected)
+					}
+				}
+			}
+			if got := mustReadVersionTestFile(t, path); got != contents {
+				t.Fatal("Info.plist was changed")
+			}
+			updated, err := GetVersionScoped(context.Background(), GetVersionOptions{ProjectDir: project, Target: "App", Configuration: "Release"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectedBuild := "50"
+			if bump {
+				expectedBuild = "43"
+			}
+			if updated.BuildNumber != expectedBuild {
+				t.Fatalf("build=%q want %q", updated.BuildNumber, expectedBuild)
+			}
+		})
+	}
+}
+
+func TestStructuredVersionInfoPlistInspectionScopeAndSafety(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, build                             string
+		xcconfig, generated, symlink, missingOptional bool
+		warnings                                      int
+		contains                                      string
+	}{
+		{name: "parentheses reference", path: "App/Info.plist", build: "$(CURRENT_PROJECT_VERSION)"},
+		{name: "braces reference", path: "App/Info.plist", build: "${CURRENT_PROJECT_VERSION}"},
+		{name: "xcconfig path", path: "$(PROJECT_DIR)/$(TARGET_NAME)/Info.plist", build: "42", xcconfig: true, warnings: 1, contains: `CFBundleVersion="42"`},
+		{name: "xcconfig missing optional include", path: "App/Info.plist", build: "42", xcconfig: true, missingOptional: true, warnings: 1, contains: `CFBundleVersion="42"`},
+		{name: "generated merge source", path: "App/Info.plist", build: "42", generated: true, warnings: 1, contains: "Verify the final archive"},
+		{name: "external", path: "../outside.plist", build: "42", warnings: 1, contains: "could not verify Info.plist"},
+		{name: "symlink", path: "App/Info.plist", build: "42", symlink: true, warnings: 1, contains: "could not verify Info.plist"},
+		{name: "unresolved", path: "$(UNKNOWN)/Info.plist", build: "42", warnings: 1, contains: "could not verify Info.plist"},
+		{name: "generated without source", generated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := writeStructuredVersionProject(t, tc.xcconfig)
+			path := filepath.Join(filepath.Dir(project), "App", "Info.plist")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			data := `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleVersion</key><string>` + tc.build + `</string></dict></plist>`
+			if tc.symlink {
+				outside := filepath.Join(t.TempDir(), "Info.plist")
+				if err := os.WriteFile(outside, []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			settings := ""
+			if tc.path != "" {
+				settings = fmt.Sprintf("INFOPLIST_FILE = %q; ", tc.path)
+			}
+			if tc.generated {
+				settings += "GENERATE_INFOPLIST_FILE = YES; "
+			}
+			if tc.xcconfig {
+				config := filepath.Join(filepath.Dir(project), "Configs", "App.xcconfig")
+				existing := mustReadVersionTestFile(t, config)
+				if tc.missingOptional {
+					existing += "\n#include? \"Local.xcconfig\"\n"
+				}
+				if err := os.WriteFile(config, []byte(existing+"\nINFOPLIST_FILE = "+tc.path+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				pbx := filepath.Join(project, "project.pbxproj")
+				old := mustReadVersionTestFile(t, pbx)
+				old = strings.ReplaceAll(old, "MARKETING_VERSION = 1.2.3;", settings+"MARKETING_VERSION = 1.2.3;")
+				if err := os.WriteFile(pbx, []byte(old), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := SetVersion(context.Background(), SetVersionOptions{ProjectDir: project, Target: "App", Configuration: "Release", BuildNumber: "50", AllowExternalXCConfig: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.ComputedWarnings) != tc.warnings {
+				t.Fatalf("warnings=%#v, want %d", result.ComputedWarnings, tc.warnings)
+			}
+			if tc.contains != "" && !strings.Contains(strings.Join(result.ComputedWarnings, "\n"), tc.contains) {
+				t.Fatalf("warnings=%#v missing %q", result.ComputedWarnings, tc.contains)
+			}
+		})
 	}
 }

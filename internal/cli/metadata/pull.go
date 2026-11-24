@@ -2,11 +2,14 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -34,18 +37,18 @@ type PullResult struct {
 	Files     []string `json:"files"`
 }
 
-// MetadataPullCommand returns the metadata pull subcommand.
-func MetadataPullCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("metadata pull", flag.ExitOnError)
+// newMetadataPullCommand returns the metadata pull subcommand.
+func newMetadataPullCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("metadata pull", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID env)")
 	appInfoID := shared.BindResourceIDFlag(fs, "app-info", "appInfos", "App Info ID (optional override for apps with multiple app-infos)")
-	version := fs.String("version", "", "App version string (for example 1.2.3); defaults to the app's active editable version, then a developer-removed version, else the live version")
+	version := fs.String("version", "", "App version string (for example 1.2.3) or App Store version ID; defaults to the app's active editable version, then a developer-removed version, else the live version")
 	platform := fs.String("platform", "", "Optional platform: IOS, MAC_OS, TV_OS, or VISION_OS")
 	dir := fs.String("dir", "", "Output root directory (required)")
-	force := fs.Bool("force", false, "Overwrite existing metadata files in --dir")
-	include := fs.String("include", includeLocalizations, "Included scopes: localizations,app-clip,previews (comma-separated)")
-	output := shared.BindOutputFlags(fs)
+	force := fs.Bool("force", false, "Replace existing files in --dir whose values differ from App Store Connect (files that already match are refreshed without it)")
+	include := fs.String("include", includeLocalizations, metadataIncludeFlagUsage())
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "pull",
@@ -57,62 +60,73 @@ The default scope is localizations. Add --include localizations,app-clip,preview
 App Clip metadata, header images, and App Preview videos. Media uses locale/app_clip,
 app_clip/action.txt, and app_previews below --dir.
 
+Opt-in scopes write one file each below --dir:
+` + metadataSettingsHelp("  ", false) + `
+
 When --version is omitted, the app's newest active editable App Store version is used
 (PREPARE_FOR_SUBMISSION, DEVELOPER_REJECTED, REJECTED, METADATA_REJECTED,
 READY_FOR_REVIEW, WAITING_FOR_REVIEW, or INVALID_BINARY), then a
 DEVELOPER_REMOVED_FROM_SALE version, and finally the live version. The selected version is reported on stderr. Pass --platform when
-the app has candidate versions on more than one platform.
+the app has candidate versions on more than one platform. --version also takes an
+App Store version ID, such as the IDs a version-not-found error lists; the
+version's own string and platform are then used.
+
+Pulling again into the same --dir refreshes files that already hold the App Store
+Connect values, and App Clip or preview media left unchanged since the last pull.
+A file with different values (a local edit not yet pushed) is kept, and pull
+fails before writing anything; push it first, or pass --force.
 
 Examples:
   asc metadata pull --app "APP_ID" --dir "./metadata"
   asc metadata pull --app "APP_ID" --version "1.2.3" --dir "./metadata"
   asc metadata pull --app "APP_ID" --version "1.2.3" --platform IOS --dir "./metadata"
+  asc metadata pull --app "APP_ID" --version "VERSION_ID" --dir "./metadata"
   asc metadata pull --app "APP_ID" --app-info "APP_INFO_ID" --version "1.2.3" --dir "./metadata"
   asc metadata pull --app "APP_ID" --version "1.2.3" --dir "./metadata" --force`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("metadata pull does not accept positional arguments")
-			}
-
-			resolvedAppID := shared.ResolveAppID(*appID)
+			resolvedAppID := d.ResolveAppID(*appID)
 			if resolvedAppID == "" {
-				return metadataRequiredInputError("--app", "--app is required (or set ASC_APP_ID)")
+				return metadataRequiredInputError(d, "--app", "--app is required (or set ASC_APP_ID)")
 			}
 
 			versionValue := strings.TrimSpace(*version)
 
 			dirValue := strings.TrimSpace(*dir)
 			if dirValue == "" {
-				return metadataRequiredInputError("--dir", "--dir is required")
+				return metadataRequiredInputError(d, "--dir", "--dir is required")
 			}
 
 			platformValue := strings.TrimSpace(*platform)
 			if platformValue != "" {
 				normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(platformValue)
 				if err != nil {
-					return shared.UsageError(err.Error())
+					return d.UsageError(err.Error())
 				}
 				platformValue = normalizedPlatform
 			}
 
-			includes, err := parseIncludes(*include)
-			if err != nil {
-				return shared.UsageError(err.Error())
+			if err := rejectPlatformInVersion(d, versionValue); err != nil {
+				return err
 			}
 
-			client, err := shared.GetASCClient()
+			includes, err := parseIncludes(*include)
+			if err != nil {
+				return d.UsageError(err.Error())
+			}
+
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("metadata pull: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			var versionIDValue, versionStateValue string
 			if versionValue == "" {
-				resolved, err := shared.ResolveAndAnnounceDefaultAppStoreVersion(requestCtx, client, resolvedAppID, platformValue, "--version")
+				resolved, err := d.ResolveAndAnnounceDefaultAppStoreVersion(requestCtx, client, resolvedAppID, platformValue, "--version")
 				if err != nil {
 					if errors.Is(err, flag.ErrHelp) {
 						return err
@@ -123,8 +137,22 @@ Examples:
 				versionIDValue = resolved.ID
 				versionStateValue = resolved.State
 				platformValue = resolved.Platform
+			} else if appStoreVersionIDPattern.MatchString(versionValue) {
+				// The version-not-found error lists each version's ID, so
+				// callers retry with one; read its version string and platform.
+				version, err := shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, resolvedAppID, versionValue, platformValue)
+				if err != nil {
+					if diagnostic, ok := shared.DiagnosticFromError(err); ok && diagnostic.Parameter == "--version-id" {
+						err = shared.WithDiagnostic(err, diagnostic.Code, "--version")
+					}
+					return fmt.Errorf("metadata pull: %w", err)
+				}
+				versionIDValue = version.ID
+				versionValue = version.Attributes.VersionString
+				versionStateValue = asc.ResolveAppStoreVersionState(version.Attributes)
+				platformValue = string(version.Attributes.Platform)
 			} else {
-				versionIDValue, versionStateValue, err = resolveVersionID(requestCtx, client, resolvedAppID, versionValue, platformValue)
+				versionIDValue, versionStateValue, err = resolveVersionID(requestCtx, d, client, resolvedAppID, versionValue, platformValue)
 				if err != nil {
 					if errors.Is(err, flag.ErrHelp) {
 						return err
@@ -136,9 +164,11 @@ Examples:
 			var appInfoIDValue string
 			var appInfoItems []asc.Resource[asc.AppInfoLocalizationAttributes]
 			var versionItems []asc.Resource[asc.AppStoreVersionLocalizationAttributes]
-			if includesScope(includes, includeLocalizations) {
+			settingScopes := selectedMetadataSettingScopes(includes)
+			if includesScope(includes, includeLocalizations) || metadataSettingsNeedAppInfo(settingScopes) {
 				appInfoIDValue, err = resolveMetadataPullAppInfoID(
 					requestCtx,
+					d,
 					client,
 					resolvedAppID,
 					strings.TrimSpace(*appInfoID),
@@ -150,12 +180,12 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("metadata pull: %w", err)
 				}
-
-				appInfoItems, versionItems, err = fetchMetadataLocalizations(ctx, client, appInfoIDValue, versionIDValue, true, true)
+			}
+			if includesScope(includes, includeLocalizations) {
+				appInfoItems, versionItems, err = fetchMetadataLocalizations(ctx, d, client, appInfoIDValue, versionIDValue, true, true)
 				if err != nil {
 					return fmt.Errorf("metadata pull: %w", err)
 				}
-
 			}
 
 			appInfoByLocale := make(map[string]AppInfoLocalization, len(appInfoItems))
@@ -202,31 +232,49 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("metadata pull: %w", err)
 			}
+			settingTarget := metadataSettingTarget{appInfoID: appInfoIDValue, versionID: versionIDValue}
+			for _, scope := range settingScopes {
+				values, err := scope.fetch(ctx, d, client, settingTarget)
+				if err != nil {
+					return fmt.Errorf("metadata pull: read %s: %w", scope.name, err)
+				}
+				data, err := encodeMetadataSettingFile(scope, values)
+				if err != nil {
+					return fmt.Errorf("metadata pull: %w", err)
+				}
+				plans = append(plans, WritePlan{Path: filepath.Join(dirValue, scope.fileName), Contents: data})
+			}
 			var assetFiles []storeassets.ExportFile
 			var assetWarnings []string
 			if includesScope(includes, includeLocalizations) {
-				assetFiles, assetWarnings, err = storeassets.ExportPlanWithVersionLocalizations(ctx, client, versionIDValue, ".", includesScope(includes, "app-clip"), includesScope(includes, "previews"), versionItems)
+				assetFiles, assetWarnings, err = storeassets.ExportPlanWithVersionLocalizations(ctx, d, client, versionIDValue, ".", includesScope(includes, "app-clip"), includesScope(includes, "previews"), versionItems)
 			} else {
-				assetFiles, assetWarnings, err = storeassets.ExportPlan(ctx, client, versionIDValue, ".", includesScope(includes, "app-clip"), includesScope(includes, "previews"))
+				assetFiles, assetWarnings, err = storeassets.ExportPlan(ctx, d, client, versionIDValue, ".", includesScope(includes, "app-clip"), includesScope(includes, "previews"))
 			}
 			if err != nil {
 				return fmt.Errorf("metadata pull: %w", err)
 			}
 			for _, warning := range assetWarnings {
-				fmt.Fprintln(os.Stderr, "Warning:", warning)
+				fmt.Fprintln(d.IO.ErrOut, "Warning:", warning)
 			}
 			assetRoot, err := rootfs.New(dirValue)
 			if err != nil {
 				return err
 			}
 			defer assetRoot.Close()
-			assetExport, err := storeassets.PrepareExport(assetRoot, assetFiles, storeassets.ExportOptions{AppID: resolvedAppID, VersionID: versionIDValue, MetadataPrefix: ".", Clip: includesScope(includes, "app-clip"), Previews: includesScope(includes, "previews"), Overwrite: *force})
-			if err != nil {
+			assetExport, err := storeassets.PrepareExport(d, assetRoot, assetFiles, storeassets.ExportOptions{AppID: resolvedAppID, VersionID: versionIDValue, MetadataPrefix: ".", Clip: includesScope(includes, "app-clip"), Previews: includesScope(includes, "previews"), Overwrite: *force})
+			var differingAssets []string
+			var differingTargets *storeassets.DifferingTargetsError
+			if errors.As(err, &differingTargets) {
+				for _, path := range differingTargets.Paths {
+					differingAssets = append(differingAssets, filepath.Join(dirValue, filepath.FromSlash(path)))
+				}
+			} else if err != nil {
 				return fmt.Errorf("metadata pull: %w", err)
 			}
 
 			if !*force {
-				if err := ensureNoExistingPullTargets(plans); err != nil {
+				if err := ensureNoExistingPullTargets(d, plans, differingAssets); err != nil {
 					return err
 				}
 			}
@@ -241,7 +289,7 @@ Examples:
 
 			assetWritten, cleanupWarnings, assetErr := assetExport.Write(ctx)
 			for _, warning := range cleanupWarnings {
-				fmt.Fprintln(os.Stderr, "Warning:", warning)
+				fmt.Fprintln(d.IO.ErrOut, "Warning:", warning)
 			}
 			for _, path := range assetWritten {
 				parts := strings.Split(filepath.ToSlash(path), "/")
@@ -276,12 +324,12 @@ Examples:
 			if assetErr != nil {
 				result.Failure = shared.SanitizeTerminal(assetErr.Error())
 			}
-			printErr := shared.PrintOutputWithRenderers(
+			printErr := d.PrintOutputWithRenderers(
 				result,
 				*output.Output,
 				*output.Pretty,
-				func() error { return printPullResultTable(result) },
-				func() error { return printPullResultMarkdown(result) },
+				func() error { return printPullResultTable(d, result) },
+				func() error { return printPullResultMarkdown(d, result) },
 			)
 			if printErr != nil {
 				return printErr
@@ -294,15 +342,56 @@ Examples:
 	}
 }
 
-func ensureNoExistingPullTargets(plans []WritePlan) error {
+// ensureNoExistingPullTargets refuses to replace a file whose JSON values
+// differ from what pull would write. A file that already holds the same values
+// is an earlier pull's output, or an edit pushed since, so refreshing it loses
+// nothing; a re-pull into the same --dir then needs no --force. differingAssets
+// are the App Clip and preview files the asset export already refused.
+func ensureNoExistingPullTargets(d *shared.Deps, plans []WritePlan, differingAssets []string) error {
+	var differing []string
 	for _, plan := range plans {
-		if _, err := os.Lstat(plan.Path); err == nil {
-			return shared.UsageErrorf("refusing to overwrite existing file %s (use --force)", plan.Path)
-		} else if !errors.Is(err, os.ErrNotExist) {
+		info, err := os.Lstat(plan.Path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
 			return fmt.Errorf("metadata pull: failed to inspect %s: %w", plan.Path, err)
 		}
+		if info.Mode().IsRegular() {
+			existing, err := readFileNoFollow(plan.Path)
+			if err != nil {
+				return fmt.Errorf("metadata pull: failed to inspect %s: %w", plan.Path, err)
+			}
+			if sameJSONValues(existing, plan.Contents) {
+				continue
+			}
+		}
+		differing = append(differing, plan.Path)
 	}
-	return nil
+	differing = append(differing, differingAssets...)
+	if len(differing) == 0 {
+		return nil
+	}
+	noun := "1 file that differs"
+	if len(differing) > 1 {
+		noun = fmt.Sprintf("%d files that differ", len(differing))
+	}
+	message := fmt.Sprintf(
+		"refusing to overwrite %s from App Store Connect: %s\nPush local edits first with `asc metadata push`, or rerun with --force to replace them with the App Store Connect values.",
+		noun, strings.Join(differing, ", "),
+	)
+	fmt.Fprintf(d.IO.ErrOut, "Error: %s\n", message)
+	return shared.NewReportedUsageError(shared.UsageErrorOther, message)
+}
+
+// sameJSONValues reports whether a and b decode to the same JSON value,
+// ignoring formatting and key order.
+func sameJSONValues(a, b []byte) bool {
+	var left, right any
+	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
+		return false
+	}
+	return reflect.DeepEqual(left, right)
 }
 
 func parseIncludes(value string) ([]string, error) {
@@ -314,8 +403,8 @@ func parseIncludes(value string) ([]string, error) {
 	unique := make(map[string]struct{})
 	for _, item := range includes {
 		normalized := strings.ToLower(strings.TrimSpace(item))
-		if normalized != includeLocalizations && normalized != "app-clip" && normalized != "previews" {
-			return nil, fmt.Errorf("--include supports localizations, app-clip, and previews")
+		if normalized != includeLocalizations && normalized != "app-clip" && normalized != "previews" && !isMetadataSettingScope(normalized) {
+			return nil, fmt.Errorf("--include supports %s", strings.Join(append([]string{includeLocalizations, "app-clip", "previews"}, metadataSettingScopeNames()...), ", "))
 		}
 		unique[normalized] = struct{}{}
 	}
@@ -328,26 +417,55 @@ func parseIncludes(value string) ([]string, error) {
 	return result, nil
 }
 
-func resolveVersionID(ctx context.Context, client *asc.Client, appID, version, platform string) (string, string, error) {
+// appStoreVersionIDPattern matches an App Store version ID, which App Store
+// Connect issues as a UUID; version strings are numeric and dotted.
+var appStoreVersionIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// rejectPlatformInVersion answers a --version such as "1.0.0/IOS", which
+// joins the version string and platform, with the flags that take them.
+func rejectPlatformInVersion(d *shared.Deps, version string) error {
+	versionString, suffix, ok := strings.Cut(version, "/")
+	if !ok || !shared.IsAppStoreVersionString(strings.TrimSpace(versionString)) {
+		return nil
+	}
+	platform, err := shared.NormalizeAppStoreVersionPlatform(strings.TrimSpace(suffix))
+	if err != nil {
+		return nil
+	}
+	return shared.WithDiagnostic(
+		d.UsageErrorf("--version takes the version string alone; pass --version %q --platform %s", strings.TrimSpace(versionString), platform),
+		shared.DiagnosticInvalidInput,
+		"--version",
+	)
+}
+
+func resolveVersionID(ctx context.Context, d *shared.Deps, client *asc.Client, appID, version, platform string) (string, string, error) {
+	id, state, _, err := resolveVersion(ctx, d, client, appID, version, platform)
+	return id, state, err
+}
+
+// resolveVersion is resolveVersionID that also returns the version's platform.
+func resolveVersion(ctx context.Context, d *shared.Deps, client *asc.Client, appID, version, platform string) (string, string, string, error) {
 	if platform != "" {
-		return shared.ResolveAppStoreVersionIDAndState(ctx, client, appID, version, platform)
+		id, state, err := shared.ResolveAppStoreVersionIDAndState(ctx, client, appID, version, platform)
+		return id, state, platform, err
 	}
 
 	resp, err := client.GetAppStoreVersions(
 		ctx,
 		appID,
 		asc.WithAppStoreVersionsVersionStrings([]string{version}),
-		asc.WithAppStoreVersionsLimit(200),
+		asc.Limit[asc.AppStoreVersionsOption](200),
 	)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if resp == nil {
-		return "", "", fmt.Errorf("empty app store versions response")
+		return "", "", "", fmt.Errorf("empty app store versions response")
 	}
 	pageHasNext := strings.TrimSpace(resp.Links.Next) != ""
 	if len(resp.Data) == 0 && !pageHasNext {
-		return "", "", shared.WithAppStoreVersionNotFoundDiagnostics(ctx, client, appID, version, "", fmt.Errorf("app store version not found for version %q", version))
+		return "", "", "", shared.WithAppStoreVersionNotFoundDiagnostics(ctx, client, appID, version, "", shared.NewErrorWithCause(fmt.Errorf("app store version not found for version %q", version), asc.ErrNotFound))
 	}
 	if len(resp.Data) > 1 || pageHasNext {
 		ambiguous := shared.AmbiguousAppStoreVersionError(version, "", resp.Data, "--platform", "")
@@ -359,13 +477,14 @@ func resolveVersionID(ctx context.Context, client *asc.Client, appID, version, p
 		if errors.As(ambiguous, &selection) && selection.Flag == "--platform" {
 			usageKind = shared.UsageErrorMissingRequired
 		}
-		return "", "", shared.AmbiguousUsageErrorWithKind(ambiguous, usageKind)
+		return "", "", "", d.AmbiguousUsageErrorWithKind(ambiguous, usageKind)
 	}
-	return resp.Data[0].ID, asc.ResolveAppStoreVersionState(resp.Data[0].Attributes), nil
+	return resp.Data[0].ID, asc.ResolveAppStoreVersionState(resp.Data[0].Attributes), string(resp.Data[0].Attributes.Platform), nil
 }
 
 func resolveMetadataPullAppInfoID(
 	ctx context.Context,
+	d *shared.Deps,
 	client *asc.Client,
 	appID string,
 	appInfoID string,
@@ -374,14 +493,14 @@ func resolveMetadataPullAppInfoID(
 	dir string,
 	versionState string,
 ) (string, error) {
-	return resolveMetadataAppInfoID(ctx, client, appID, appInfoID, version, platform, dir, versionState, func(aid, v, p, d, infoID string) string {
+	return resolveMetadataAppInfoID(ctx, d, client, appID, appInfoID, version, platform, dir, versionState, func(aid, v, p, d, infoID string) string {
 		return buildMetadataAppInfoExample("pull", aid, v, p, d, infoID)
 	})
 }
 
-func fetchAppInfoLocalizations(ctx context.Context, client *asc.Client, appInfoID string) ([]asc.Resource[asc.AppInfoLocalizationAttributes], error) {
-	firstPage, err := shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
-		return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsLimit(200))
+func fetchAppInfoLocalizations(ctx context.Context, d *shared.Deps, client *asc.Client, appInfoID string) ([]asc.Resource[asc.AppInfoLocalizationAttributes], error) {
+	firstPage, err := shared.RetryReadWithFreshTimeoutWith(ctx, d, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
+		return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.Limit[asc.AppInfoLocalizationsOption](200))
 	})
 	if err != nil {
 		return nil, err
@@ -394,8 +513,8 @@ func fetchAppInfoLocalizations(ctx context.Context, client *asc.Client, appInfoI
 	}
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
-			return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsNextURL(nextURL))
+		return shared.RetryReadWithFreshTimeoutWith(ctx, d, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
+			return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.NextURL[asc.AppInfoLocalizationsOption](nextURL))
 		})
 	})
 	if err != nil {
@@ -408,9 +527,9 @@ func fetchAppInfoLocalizations(ctx context.Context, client *asc.Client, appInfoI
 	return typed.Data, nil
 }
 
-func fetchVersionLocalizations(ctx context.Context, client *asc.Client, versionID string) ([]asc.Resource[asc.AppStoreVersionLocalizationAttributes], error) {
-	firstPage, err := shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
-		return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+func fetchVersionLocalizations(ctx context.Context, d *shared.Deps, client *asc.Client, versionID string) ([]asc.Resource[asc.AppStoreVersionLocalizationAttributes], error) {
+	firstPage, err := shared.RetryReadWithFreshTimeoutWith(ctx, d, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
+		return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	})
 	if err != nil {
 		return nil, err
@@ -423,8 +542,8 @@ func fetchVersionLocalizations(ctx context.Context, client *asc.Client, versionI
 	}
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return shared.RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
-			return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+		return shared.RetryReadWithFreshTimeoutWith(ctx, d, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
+			return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.NextURL[asc.AppStoreVersionLocalizationsOption](nextURL))
 		})
 	})
 	if err != nil {
@@ -437,15 +556,15 @@ func fetchVersionLocalizations(ctx context.Context, client *asc.Client, versionI
 	return typed.Data, nil
 }
 
-func printPullResultTable(result PullResult) error {
+func printPullResultTable(d *shared.Deps, result PullResult) error {
 	if result.Failure != "" {
-		fmt.Printf("Failure: %s\n", result.Failure)
+		fmt.Fprintf(d.IO.Out, "Failure: %s\n", result.Failure)
 	}
-	fmt.Printf("App ID: %s\n", result.AppID)
-	fmt.Printf("Version: %s\n", result.Version)
-	fmt.Printf("Dir: %s\n", result.Dir)
-	fmt.Printf("Includes: %s\n", strings.Join(result.Includes, ","))
-	fmt.Printf("File Count: %d\n\n", result.FileCount)
+	fmt.Fprintf(d.IO.Out, "App ID: %s\n", result.AppID)
+	fmt.Fprintf(d.IO.Out, "Version: %s\n", result.Version)
+	fmt.Fprintf(d.IO.Out, "Dir: %s\n", result.Dir)
+	fmt.Fprintf(d.IO.Out, "Includes: %s\n", strings.Join(result.Includes, ","))
+	fmt.Fprintf(d.IO.Out, "File Count: %d\n\n", result.FileCount)
 
 	rows := make([][]string, 0, len(result.Files))
 	for _, file := range result.Files {
@@ -454,19 +573,19 @@ func printPullResultTable(result PullResult) error {
 	if len(rows) == 0 {
 		rows = append(rows, []string{"(none)"})
 	}
-	asc.RenderTable([]string{"file"}, rows)
+	asc.RenderTableTo(d.IO.Out, []string{"file"}, rows)
 	return nil
 }
 
-func printPullResultMarkdown(result PullResult) error {
+func printPullResultMarkdown(d *shared.Deps, result PullResult) error {
 	if result.Failure != "" {
-		fmt.Printf("**Failure:** %s\n\n", result.Failure)
+		fmt.Fprintf(d.IO.Out, "**Failure:** %s\n\n", result.Failure)
 	}
-	fmt.Printf("**App ID:** %s\n\n", result.AppID)
-	fmt.Printf("**Version:** %s\n\n", result.Version)
-	fmt.Printf("**Dir:** %s\n\n", result.Dir)
-	fmt.Printf("**Includes:** %s\n\n", strings.Join(result.Includes, ","))
-	fmt.Printf("**File Count:** %d\n\n", result.FileCount)
+	fmt.Fprintf(d.IO.Out, "**App ID:** %s\n\n", result.AppID)
+	fmt.Fprintf(d.IO.Out, "**Version:** %s\n\n", result.Version)
+	fmt.Fprintf(d.IO.Out, "**Dir:** %s\n\n", result.Dir)
+	fmt.Fprintf(d.IO.Out, "**Includes:** %s\n\n", strings.Join(result.Includes, ","))
+	fmt.Fprintf(d.IO.Out, "**File Count:** %d\n\n", result.FileCount)
 
 	rows := make([][]string, 0, len(result.Files))
 	for _, file := range result.Files {
@@ -475,6 +594,6 @@ func printPullResultMarkdown(result PullResult) error {
 	if len(rows) == 0 {
 		rows = append(rows, []string{"(none)"})
 	}
-	asc.RenderMarkdown([]string{"file"}, rows)
+	asc.RenderMarkdownTo(d.IO.Out, []string{"file"}, rows)
 	return nil
 }

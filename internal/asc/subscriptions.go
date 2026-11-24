@@ -4,22 +4,11 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
-	"strings"
 )
 
 // SubscriptionGroupAttributes describes a subscription group resource.
 type SubscriptionGroupAttributes struct {
 	ReferenceName string `json:"referenceName"`
-}
-
-// SubscriptionGroupCreateAttributes describes attributes for creating a group.
-type SubscriptionGroupCreateAttributes struct {
-	ReferenceName string `json:"referenceName"`
-}
-
-// SubscriptionGroupUpdateAttributes describes attributes for updating a group.
-type SubscriptionGroupUpdateAttributes struct {
-	ReferenceName *string `json:"referenceName,omitempty"`
 }
 
 // SubscriptionGroupRelationships describes relationships for groups.
@@ -30,28 +19,11 @@ type SubscriptionGroupRelationships struct {
 	Versions                       *RelationshipList `json:"versions,omitempty"`
 }
 
-// SubscriptionGroupCreateData is the data portion of a group create request.
-type SubscriptionGroupCreateData struct {
-	Type          ResourceType                      `json:"type"`
-	Attributes    SubscriptionGroupCreateAttributes `json:"attributes"`
-	Relationships *SubscriptionGroupRelationships   `json:"relationships,omitempty"`
-}
-
-// SubscriptionGroupCreateRequest is a request to create a group.
-type SubscriptionGroupCreateRequest struct {
-	Data SubscriptionGroupCreateData `json:"data"`
-}
-
 // SubscriptionGroupUpdateData is the data portion of a group update request.
 type SubscriptionGroupUpdateData struct {
 	Type       ResourceType                      `json:"type"`
 	ID         string                            `json:"id"`
 	Attributes SubscriptionGroupUpdateAttributes `json:"attributes"`
-}
-
-// SubscriptionGroupUpdateRequest is a request to update a group.
-type SubscriptionGroupUpdateRequest struct {
-	Data SubscriptionGroupUpdateData `json:"data"`
 }
 
 // SubscriptionAttributes describes a subscription resource.
@@ -66,6 +38,8 @@ type SubscriptionAttributes struct {
 	AvailableInAllTerritories bool      `json:"availableInAllTerritories,omitempty"`
 	MarketSettings            *[]string `json:"marketSettings,omitempty"`
 	MultiSeatStatus           *string   `json:"multiSeatStatus,omitempty"`
+
+	api apiAttributes
 }
 
 // SubscriptionCreateAttributes describes attributes for creating a subscription.
@@ -91,42 +65,10 @@ type SubscriptionUpdateAttributes struct {
 	MultiSeatStatus           *string   `json:"multiSeatStatus,omitempty"`
 }
 
-// SubscriptionRelationships describes relationships for subscriptions.
-type SubscriptionRelationships struct {
-	Group *Relationship `json:"group"`
-}
-
-// SubscriptionResponseRelationships describes relationships returned with a
-// subscription resource. It is intentionally separate from
-// SubscriptionRelationships, which models the narrower create request shape.
-type SubscriptionResponseRelationships struct {
-	Versions *SubscriptionVersionsRelationship `json:"versions,omitempty"`
-}
-
-// SubscriptionVersionsRelationship describes the version linkages attached to
-// a subscription response in App Store Connect API 4.4.1.
-type SubscriptionVersionsRelationship struct {
-	Data  []ResourceData    `json:"data"`
-	Links RelationshipLinks `json:"links,omitempty"`
-	Meta  json.RawMessage   `json:"meta,omitempty"`
-}
-
 // RelationshipLinks describes links returned for a JSON:API relationship.
 type RelationshipLinks struct {
 	Self    string `json:"self,omitempty"`
 	Related string `json:"related,omitempty"`
-}
-
-// SubscriptionCreateData is the data portion of a subscription create request.
-type SubscriptionCreateData struct {
-	Type          ResourceType                 `json:"type"`
-	Attributes    SubscriptionCreateAttributes `json:"attributes"`
-	Relationships *SubscriptionRelationships   `json:"relationships,omitempty"`
-}
-
-// SubscriptionCreateRequest is a request to create a subscription.
-type SubscriptionCreateRequest struct {
-	Data SubscriptionCreateData `json:"data"`
 }
 
 // SubscriptionUpdateData is the data portion of a subscription update request.
@@ -240,41 +182,15 @@ type SubscriptionPriceRelationships struct {
 	Territory              *Relationship `json:"territory,omitempty"`
 }
 
-// SubscriptionPricePointResponseRelationships describes relationships returned
-// with a subscription price point resource.
-type SubscriptionPricePointResponseRelationships struct {
-	AdjustedEqualizations *SubscriptionPricePointLinkRelationship `json:"adjustedEqualizations,omitempty"`
-	Equalizations         *SubscriptionPricePointLinkRelationship `json:"equalizations,omitempty"`
-	Territory             *Relationship                           `json:"territory,omitempty"`
-}
-
 // SubscriptionPricePointLinkRelationship describes a price-point relationship
 // whose response contains links but no resource linkage data.
 type SubscriptionPricePointLinkRelationship struct {
 	Links RelationshipLinks `json:"links"`
 }
 
-// SubscriptionPriceCreateData is the data portion of a price create request.
-type SubscriptionPriceCreateData struct {
-	Type          ResourceType                       `json:"type"`
-	Attributes    *SubscriptionPriceCreateAttributes `json:"attributes,omitempty"`
-	Relationships *SubscriptionPriceRelationships    `json:"relationships"`
-}
-
-// SubscriptionPriceCreateRequest is a request to create a price.
-type SubscriptionPriceCreateRequest struct {
-	Data SubscriptionPriceCreateData `json:"data"`
-}
-
 // SubscriptionAvailabilityAttributes describes a subscription availability.
 type SubscriptionAvailabilityAttributes struct {
 	AvailableInNewTerritories bool `json:"availableInNewTerritories"`
-}
-
-// SubscriptionAvailabilityRelationships describes relationships for availability.
-type SubscriptionAvailabilityRelationships struct {
-	Subscription         *Relationship     `json:"subscription"`
-	AvailableTerritories *RelationshipList `json:"availableTerritories"`
 }
 
 // SubscriptionAvailabilityCreateData is the data portion of availability create requests.
@@ -284,31 +200,14 @@ type SubscriptionAvailabilityCreateData struct {
 	Relationships *SubscriptionAvailabilityRelationships `json:"relationships"`
 }
 
-// SubscriptionAvailabilityCreateRequest is a request to create availability.
-type SubscriptionAvailabilityCreateRequest struct {
-	Data SubscriptionAvailabilityCreateData `json:"data"`
-}
-
 // SubscriptionGroupsResponse is the response from subscription groups endpoints.
 type SubscriptionGroupsResponse = Response[SubscriptionGroupAttributes]
-
-// SubscriptionGroupResponse is the response from subscription group detail endpoints.
-type SubscriptionGroupResponse = SingleResponse[SubscriptionGroupAttributes]
 
 // SubscriptionsResponse is the response from subscriptions list endpoints.
 type SubscriptionsResponse = Response[SubscriptionAttributes]
 
-// SubscriptionResponse is the response from subscription detail endpoints.
-type SubscriptionResponse = SingleResponse[SubscriptionAttributes]
-
 // SubscriptionPricesResponse is the response from subscription prices list endpoints.
 type SubscriptionPricesResponse = Response[SubscriptionPriceAttributes]
-
-// SubscriptionPriceResponse is the response from subscription price create endpoints.
-type SubscriptionPriceResponse = SingleResponse[SubscriptionPriceAttributes]
-
-// SubscriptionAvailabilityResponse is the response from availability endpoints.
-type SubscriptionAvailabilityResponse = SingleResponse[SubscriptionAvailabilityAttributes]
 
 // SubscriptionGroupsOption is a functional option for GetSubscriptionGroups.
 type SubscriptionGroupsOption func(*subscriptionGroupsQuery)
@@ -319,15 +218,33 @@ type SubscriptionsOption func(*subscriptionsQuery)
 // SubscriptionOption is a functional option for GetSubscription.
 type SubscriptionOption func(*subscriptionQuery)
 
-// SubscriptionAvailabilityTerritoriesOption is a functional option for availability territory listings.
-type SubscriptionAvailabilityTerritoriesOption func(*subscriptionAvailabilityTerritoriesQuery)
-
 type subscriptionGroupsQuery struct {
 	listQuery
-	include       []string
-	groupFields   []string
-	versionFields []string
-	versionsLimit int
+	include            []string
+	groupFields        []string
+	versionFields      []string
+	subscriptionFields []string
+	localizationFields []string
+	versionsLimit      int
+}
+
+// SubscriptionRelatedFields selects sparse fields for resources included with a subscription.
+// Selecting fields for a resource also requests its relationship.
+type SubscriptionRelatedFields struct {
+	Localizations      []string
+	ReviewScreenshots  []string
+	Groups             []string
+	IntroductoryOffers []string
+	PromotionalOffers  []string
+	OfferCodes         []string
+	Prices             []string
+	PromotedPurchases  []string
+	Availabilities     []string
+	WinBackOffers      []string
+	Images             []string
+	PlanAvailabilities []string
+	RetentionOffers    []string
+	RetentionMessages  []string
 }
 
 type subscriptionsQuery struct {
@@ -336,6 +253,7 @@ type subscriptionsQuery struct {
 	names         []string
 	fields        []string
 	versionFields []string
+	relatedFields SubscriptionRelatedFields
 	include       []string
 	versionLimit  int
 }
@@ -343,30 +261,9 @@ type subscriptionsQuery struct {
 type subscriptionQuery struct {
 	fields        []string
 	versionFields []string
+	relatedFields SubscriptionRelatedFields
 	include       []string
 	versionLimit  int
-}
-
-type subscriptionAvailabilityTerritoriesQuery struct {
-	listQuery
-}
-
-// WithSubscriptionGroupsLimit sets the max number of groups to return.
-func WithSubscriptionGroupsLimit(limit int) SubscriptionGroupsOption {
-	return func(q *subscriptionGroupsQuery) {
-		if limit > 0 {
-			q.limit = limit
-		}
-	}
-}
-
-// WithSubscriptionGroupsNextURL uses a next page URL directly.
-func WithSubscriptionGroupsNextURL(next string) SubscriptionGroupsOption {
-	return func(q *subscriptionGroupsQuery) {
-		if strings.TrimSpace(next) != "" {
-			q.nextURL = strings.TrimSpace(next)
-		}
-	}
 }
 
 // WithSubscriptionGroupsInclude includes related resources in group responses.
@@ -383,6 +280,20 @@ func WithSubscriptionGroupsFields(fields []string) SubscriptionGroupsOption {
 	}
 }
 
+// WithSubscriptionGroupsSubscriptionFields sets sparse fields for included subscriptions.
+func WithSubscriptionGroupsSubscriptionFields(fields []string) SubscriptionGroupsOption {
+	return func(q *subscriptionGroupsQuery) {
+		q.subscriptionFields = normalizeList(fields)
+	}
+}
+
+// WithSubscriptionGroupsLocalizationFields sets sparse fields for included group localizations.
+func WithSubscriptionGroupsLocalizationFields(fields []string) SubscriptionGroupsOption {
+	return func(q *subscriptionGroupsQuery) {
+		q.localizationFields = normalizeList(fields)
+	}
+}
+
 // WithSubscriptionGroupsVersionFields sets sparse fields for included versions.
 func WithSubscriptionGroupsVersionFields(fields []string) SubscriptionGroupsOption {
 	return func(q *subscriptionGroupsQuery) {
@@ -395,24 +306,6 @@ func WithSubscriptionGroupsVersionsLimit(limit int) SubscriptionGroupsOption {
 	return func(q *subscriptionGroupsQuery) {
 		if limit > 0 {
 			q.versionsLimit = limit
-		}
-	}
-}
-
-// WithSubscriptionsLimit sets the max number of subscriptions to return.
-func WithSubscriptionsLimit(limit int) SubscriptionsOption {
-	return func(q *subscriptionsQuery) {
-		if limit > 0 {
-			q.limit = limit
-		}
-	}
-}
-
-// WithSubscriptionsNextURL uses a next page URL directly.
-func WithSubscriptionsNextURL(next string) SubscriptionsOption {
-	return func(q *subscriptionsQuery) {
-		if strings.TrimSpace(next) != "" {
-			q.nextURL = strings.TrimSpace(next)
 		}
 	}
 }
@@ -441,6 +334,11 @@ func WithSubscriptionsVersionFields(fields []string) SubscriptionsOption {
 	return func(q *subscriptionsQuery) { q.versionFields = normalizeList(fields) }
 }
 
+// WithSubscriptionsRelatedFields sets sparse fields for included related resources.
+func WithSubscriptionsRelatedFields(fields SubscriptionRelatedFields) SubscriptionsOption {
+	return func(q *subscriptionsQuery) { q.relatedFields = fields }
+}
+
 // WithSubscriptionsInclude sets relationships to include.
 func WithSubscriptionsInclude(include []string) SubscriptionsOption {
 	return func(q *subscriptionsQuery) { q.include = normalizeList(include) }
@@ -465,6 +363,11 @@ func WithSubscriptionIncludedVersionFields(fields []string) SubscriptionOption {
 	return func(q *subscriptionQuery) { q.versionFields = normalizeList(fields) }
 }
 
+// WithSubscriptionRelatedFields sets sparse fields for included related resources.
+func WithSubscriptionRelatedFields(fields SubscriptionRelatedFields) SubscriptionOption {
+	return func(q *subscriptionQuery) { q.relatedFields = fields }
+}
+
 // WithSubscriptionInclude sets relationships to include for a subscription detail response.
 func WithSubscriptionInclude(include []string) SubscriptionOption {
 	return func(q *subscriptionQuery) { q.include = normalizeList(include) }
@@ -479,29 +382,55 @@ func WithSubscriptionVersionLimit(limit int) SubscriptionOption {
 	}
 }
 
-// WithSubscriptionAvailabilityTerritoriesLimit sets the max number of territories to return.
-func WithSubscriptionAvailabilityTerritoriesLimit(limit int) SubscriptionAvailabilityTerritoriesOption {
-	return func(q *subscriptionAvailabilityTerritoriesQuery) {
-		if limit > 0 {
-			q.limit = limit
-		}
+type relatedSparseField struct {
+	parameter    string
+	relationship string
+	fields       []string
+}
+
+func (f SubscriptionRelatedFields) sparseFields() []relatedSparseField {
+	return []relatedSparseField{
+		{"fields[subscriptionLocalizations]", "subscriptionLocalizations", f.Localizations},
+		{"fields[subscriptionAppStoreReviewScreenshots]", "appStoreReviewScreenshot", f.ReviewScreenshots},
+		{"fields[subscriptionGroups]", "group", f.Groups},
+		{"fields[subscriptionIntroductoryOffers]", "introductoryOffers", f.IntroductoryOffers},
+		{"fields[subscriptionPromotionalOffers]", "promotionalOffers", f.PromotionalOffers},
+		{"fields[subscriptionOfferCodes]", "offerCodes", f.OfferCodes},
+		{"fields[subscriptionPrices]", "prices", f.Prices},
+		{"fields[promotedPurchases]", "promotedPurchase", f.PromotedPurchases},
+		{"fields[subscriptionAvailabilities]", "subscriptionAvailability", f.Availabilities},
+		{"fields[winBackOffers]", "winBackOffers", f.WinBackOffers},
+		{"fields[subscriptionImages]", "images", f.Images},
+		{"fields[subscriptionPlanAvailabilities]", "planAvailabilities", f.PlanAvailabilities},
+		{"fields[retentionOffers]", "retentionOffers", f.RetentionOffers},
+		{"fields[retentionMessages]", "retentionMessage", f.RetentionMessages},
 	}
 }
 
-// WithSubscriptionAvailabilityTerritoriesNextURL uses a next page URL directly.
-func WithSubscriptionAvailabilityTerritoriesNextURL(next string) SubscriptionAvailabilityTerritoriesOption {
-	return func(q *subscriptionAvailabilityTerritoriesQuery) {
-		if strings.TrimSpace(next) != "" {
-			q.nextURL = strings.TrimSpace(next)
+// addRelatedSparseFields writes the primary fields and include alongside the related
+// fields, because a selected related resource needs its relationship in both.
+func addRelatedSparseFields(values url.Values, primaryParameter string, primary, include []string, related ...relatedSparseField) {
+	for _, field := range related {
+		if len(field.fields) == 0 {
+			continue
+		}
+		addCSV(values, field.parameter, field.fields)
+		include = includeWhenFieldsSelected(include, field.relationship, field.fields)
+		if len(primary) > 0 {
+			primary = includeWhenFieldsSelected(primary, field.relationship, field.fields)
 		}
 	}
+	addCSV(values, primaryParameter, primary)
+	addCSV(values, "include", include)
 }
 
 func buildSubscriptionGroupsQuery(query *subscriptionGroupsQuery) string {
 	values := url.Values{}
 	addLimit(values, query.limit)
-	addCSV(values, "include", query.include)
-	addCSV(values, "fields[subscriptionGroups]", query.groupFields)
+	addRelatedSparseFields(values, "fields[subscriptionGroups]", query.groupFields, query.include,
+		relatedSparseField{"fields[subscriptions]", "subscriptions", query.subscriptionFields},
+		relatedSparseField{"fields[subscriptionGroupLocalizations]", "subscriptionGroupLocalizations", query.localizationFields},
+	)
 	addCSV(values, "fields[subscriptionGroupVersions]", query.versionFields)
 	if query.versionsLimit > 0 {
 		values.Set("limit[versions]", strconv.Itoa(query.versionsLimit))
@@ -514,24 +443,20 @@ func buildSubscriptionsQuery(query *subscriptionsQuery) string {
 	addLimit(values, query.limit)
 	addCSV(values, "filter[productId]", query.productIDs)
 	addCSV(values, "filter[name]", query.names)
-	addCSV(values, "fields[subscriptions]", query.fields)
+	addRelatedSparseFields(values, "fields[subscriptions]", query.fields, query.include, query.relatedFields.sparseFields()...)
 	addCSV(values, "fields[subscriptionVersions]", query.versionFields)
-	addCSV(values, "include", query.include)
-	addNamedLimit(values, "limit[versions]", query.versionLimit)
+	if query.versionLimit > 0 {
+		values.Set("limit[versions]", strconv.Itoa(query.versionLimit))
+	}
 	return values.Encode()
 }
 
 func buildSubscriptionQuery(query *subscriptionQuery) string {
 	values := url.Values{}
-	addCSV(values, "fields[subscriptions]", query.fields)
+	addRelatedSparseFields(values, "fields[subscriptions]", query.fields, query.include, query.relatedFields.sparseFields()...)
 	addCSV(values, "fields[subscriptionVersions]", query.versionFields)
-	addCSV(values, "include", query.include)
-	addNamedLimit(values, "limit[versions]", query.versionLimit)
-	return values.Encode()
-}
-
-func buildSubscriptionAvailabilityTerritoriesQuery(query *subscriptionAvailabilityTerritoriesQuery) string {
-	values := url.Values{}
-	addLimit(values, query.limit)
+	if query.versionLimit > 0 {
+		values.Set("limit[versions]", strconv.Itoa(query.versionLimit))
+	}
 	return values.Encode()
 }

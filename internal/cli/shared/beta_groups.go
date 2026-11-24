@@ -54,23 +54,101 @@ type AddBuildBetaGroupsResult struct {
 	NotificationAction             asc.BuildBetaGroupsNotificationAction
 }
 
-// ResolveBetaGroups lists an app's beta groups and resolves the provided IDs or names.
-func ResolveBetaGroups(ctx context.Context, client betaGroupsClient, appID string, groups []string, opts ResolveBetaGroupsOptions) ([]ResolvedBetaGroup, error) {
-	allGroups, err := ListAllBetaGroups(ctx, client, appID)
+// ResolveBetaGroups lists an app's beta groups and resolves a raw --group
+// value. A value that exactly matches one group ID or name is used as-is, even
+// when it contains commas; otherwise the value is treated as a comma-separated
+// list of group names or IDs.
+func ResolveBetaGroups(ctx context.Context, client betaGroupsClient, appID, rawGroups string, opts ResolveBetaGroupsOptions) ([]ResolvedBetaGroup, error) {
+	groups := SplitCSV(rawGroups)
+	page, err := client.GetBetaGroups(ctx, appID, asc.Limit[asc.BetaGroupsOption](200))
+	if err == nil && !betaGroupPageContainsAllIDs(page, groups) {
+		page, err = paginateBetaGroups(ctx, client, appID, page)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to list beta groups: %w", err)
 	}
-	return ResolveBetaGroupsFromList(groups, allGroups, opts)
+	if len(groups) > 1 {
+		resolved, err := resolveBetaGroupsFromList([]string{strings.TrimSpace(rawGroups)}, page, opts, appID)
+		if diagnostic, ok := DiagnosticFromError(err); !ok || diagnostic.Code != DiagnosticResourceNotFound {
+			return resolved, err
+		}
+	}
+	return resolveBetaGroupsFromList(groups, page, opts, appID)
+}
+
+// maxListedBetaGroups bounds how many of the app's groups a not-found error
+// lists.
+const maxListedBetaGroups = 10
+
+// betaGroupNotFoundError says which app was searched and which groups it has,
+// so a name typo, a group of another app, or a group that does not exist yet
+// can be told apart from the message alone.
+func betaGroupNotFoundError(group, appID string, groups []asc.Resource[asc.BetaGroupAttributes]) error {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return fmt.Errorf("beta group %q not found", group)
+	}
+	if len(groups) == 0 {
+		return fmt.Errorf("beta group %q not found: app %s has no beta groups. Create one with: asc testflight groups create --app %q --name \"NAME\"", group, appID, appID)
+	}
+	listed := make([]string, 0, min(len(groups), maxListedBetaGroups))
+	for _, item := range groups[:min(len(groups), maxListedBetaGroups)] {
+		kind := "external"
+		if item.Attributes.IsInternalGroup {
+			kind = "internal"
+		}
+		listed = append(listed, fmt.Sprintf("%q (%s, %s)", strings.TrimSpace(item.Attributes.Name), strings.TrimSpace(item.ID), kind))
+	}
+	more := ""
+	if len(groups) > maxListedBetaGroups {
+		more = fmt.Sprintf(", and %d more (asc testflight groups list --app %q)", len(groups)-maxListedBetaGroups, appID)
+	}
+	return fmt.Errorf("beta group %q not found in app %s. Its groups: %s%s. Pass one of those names or IDs, or create the group with: asc testflight groups create --app %q --name \"NAME\"", group, appID, strings.Join(listed, ", "), more, appID)
+}
+
+// A name must still be checked against the full list for ambiguity.
+func betaGroupPageContainsAllIDs(page *asc.BetaGroupsResponse, selectors []string) bool {
+	if page == nil {
+		return false
+	}
+	ids := make(map[string]struct{}, len(page.Data))
+	for _, group := range page.Data {
+		ids[strings.TrimSpace(group.ID)] = struct{}{}
+	}
+	for _, selector := range selectors {
+		if id := strings.TrimSpace(selector); id != "" {
+			if _, found := ids[id]; !found {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// NormalizeBetaGroupName collapses every Unicode space run to one ASCII space.
+// App Store Connect names each app's default internal group with a
+// non-breaking space, which users cannot type. Resolvers try exact names first
+// and fall back to normalized names.
+func NormalizeBetaGroupName(name string) string {
+	return strings.Join(strings.Fields(name), " ")
 }
 
 // ResolveBetaGroupsFromList resolves IDs or names against a provided beta-groups payload.
 func ResolveBetaGroupsFromList(inputGroups []string, groups *asc.BetaGroupsResponse, opts ResolveBetaGroupsOptions) ([]ResolvedBetaGroup, error) {
+	return resolveBetaGroupsFromList(inputGroups, groups, opts, "")
+}
+
+// resolveBetaGroupsFromList is ResolveBetaGroupsFromList with the ID of the
+// app whose groups were listed; a not-found error then names that app and its
+// groups.
+func resolveBetaGroupsFromList(inputGroups []string, groups *asc.BetaGroupsResponse, opts ResolveBetaGroupsOptions, appID string) ([]ResolvedBetaGroup, error) {
 	if groups == nil {
 		return nil, fmt.Errorf("no beta groups returned for app")
 	}
 
 	groupIDs := make(map[string]struct{}, len(groups.Data))
 	groupNameToIDs := make(map[string][]string)
+	normalizedNameToIDs := make(map[string][]string)
 	groupInternal := make(map[string]bool, len(groups.Data))
 	groupsByID := make(map[string]asc.Resource[asc.BetaGroupAttributes], len(groups.Data))
 	for _, item := range groups.Data {
@@ -90,6 +168,10 @@ func ResolveBetaGroupsFromList(inputGroups []string, groups *asc.BetaGroupsRespo
 		if !slices.Contains(groupNameToIDs[key], id) {
 			groupNameToIDs[key] = append(groupNameToIDs[key], id)
 		}
+		normalizedKey := strings.ToLower(NormalizeBetaGroupName(name))
+		if !slices.Contains(normalizedNameToIDs[normalizedKey], id) {
+			normalizedNameToIDs[normalizedKey] = append(normalizedNameToIDs[normalizedKey], id)
+		}
 	}
 
 	resolvedIDs := make([]string, 0, len(inputGroups))
@@ -105,9 +187,12 @@ func ResolveBetaGroupsFromList(inputGroups []string, groups *asc.BetaGroupsRespo
 			resolvedID = group
 		} else {
 			matches := groupNameToIDs[strings.ToLower(group)]
+			if len(matches) == 0 {
+				matches = normalizedNameToIDs[strings.ToLower(NormalizeBetaGroupName(group))]
+			}
 			switch len(matches) {
 			case 0:
-				return nil, WithDiagnostic(NewValidationError(fmt.Errorf("beta group %q not found", group)), DiagnosticResourceNotFound, "--group")
+				return nil, WithDiagnostic(NewValidationError(betaGroupNotFoundError(group, appID, groups.Data)), DiagnosticResourceNotFound, "--group")
 			case 1:
 				resolvedID = matches[0]
 			default:
@@ -182,16 +267,20 @@ func AddBuildBetaGroups(ctx context.Context, client buildBetaGroupsMutationClien
 
 // ListAllBetaGroups fetches and paginates all beta groups for an app.
 func ListAllBetaGroups(ctx context.Context, client betaGroupsClient, appID string) (*asc.BetaGroupsResponse, error) {
-	firstPage, err := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
+	firstPage, err := client.GetBetaGroups(ctx, appID, asc.Limit[asc.BetaGroupsOption](200))
 	if err != nil {
 		return nil, err
 	}
+	return paginateBetaGroups(ctx, client, appID, firstPage)
+}
+
+func paginateBetaGroups(ctx context.Context, client betaGroupsClient, appID string, firstPage *asc.BetaGroupsResponse) (*asc.BetaGroupsResponse, error) {
 	if firstPage == nil || firstPage.Links.Next == "" {
 		return firstPage, nil
 	}
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsNextURL(nextURL))
+		return client.GetBetaGroups(ctx, appID, asc.NextURL[asc.BetaGroupsOption](nextURL))
 	})
 	if err != nil {
 		return nil, err

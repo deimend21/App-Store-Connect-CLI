@@ -12,16 +12,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/errfmt"
 )
 
 func TestAssetLibraryVideoUpload(t *testing.T) { runLibraryVideoUploadCase(t, false, false, false) }
 func TestAssetLibraryVideoUploadSendsReferenceName(t *testing.T) {
-	runLibraryVideoUploadCaseWithReferenceName(t, false, false, false, "Hero · en-US · 3.14")
+	runLibraryVideoUploadCaseWith(t, false, false, false, libraryVideoUploadAttributes{referenceName: "Hero · en-US · 3.14"})
+}
+
+func TestAssetLibraryVideoUploadSendsTimeCode(t *testing.T) {
+	runLibraryVideoUploadCaseWith(t, false, false, false, libraryVideoUploadAttributes{timeCode: "00:00:03:00", frameState: "COMPLETE"})
+}
+
+func TestAssetLibraryVideoUploadWaitsForRequestedPosterFrame(t *testing.T) {
+	runLibraryVideoUploadCaseWith(t, true, false, false, libraryVideoUploadAttributes{timeCode: "00:00:03:00", frameState: "PROCESSING"})
+}
+
+func TestAssetLibraryVideoUploadFailedPosterFrameKeepsPartialReceipt(t *testing.T) {
+	runLibraryVideoUploadCaseWith(t, false, false, false, libraryVideoUploadAttributes{timeCode: "00:00:03:00", frameState: "FAILED"})
 }
 
 func TestAssetLibraryVideoUploadKeepsProcessingPartialReceipt(t *testing.T) {
 	runLibraryVideoUploadCase(t, true, false, false)
+}
+
+// A failure after reservation must name the step it stopped in, on stderr and
+// in the partial receipt, so a caller can tell a failed transfer from a commit
+// Apple did not accept or a video Apple could not process.
+func TestAssetLibraryVideoUploadPartialReceiptNamesFailedPhase(t *testing.T) {
+	for _, phase := range []string{"transfer", "commit", "processing"} {
+		t.Run(phase, func(t *testing.T) {
+			runLibraryVideoUploadCaseWith(t, false, false, false, libraryVideoUploadAttributes{failPhase: phase})
+		})
+	}
 }
 
 func TestAssetLibraryVideoUploadObjectAspectRatio(t *testing.T) {
@@ -33,10 +57,12 @@ func TestAssetLibraryVideoUploadRequestDeadlineKeepsRequestHint(t *testing.T) {
 }
 
 func runLibraryVideoUploadCase(t *testing.T, pending, objectSpec, requestDeadline bool) {
-	runLibraryVideoUploadCaseWithReferenceName(t, pending, objectSpec, requestDeadline, "")
+	runLibraryVideoUploadCaseWith(t, pending, objectSpec, requestDeadline, libraryVideoUploadAttributes{})
 }
 
-func runLibraryVideoUploadCaseWithReferenceName(t *testing.T, pending, objectSpec, requestDeadline bool, referenceName string) {
+type libraryVideoUploadAttributes struct{ referenceName, timeCode, frameState, failPhase string }
+
+func runLibraryVideoUploadCaseWith(t *testing.T, pending, objectSpec, requestDeadline bool, attributes libraryVideoUploadAttributes) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX ffprobe fixture")
 	}
@@ -61,9 +87,10 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,
 	if pending {
 		t.Setenv("ASC_UPLOAD_TIMEOUT", "100ms")
 	}
+	calls := []string{}
 	original := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = original })
-	calls := []string{}
+	// Upload operations take their transport from http.DefaultTransport.
 	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		calls = append(calls, req.Method+" "+req.URL.Path)
 		switch req.Method + " " + req.URL.Path {
@@ -85,25 +112,40 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,
 			if data["type"] != "appAssetLibraryVideos" || attrs["category"] != "CREATIVE_ASSETS" || attrs["fileName"] != "video.mp4" {
 				t.Fatalf("reservation %+v", body)
 			}
-			if got, ok := attrs["referenceName"]; ok != (referenceName != "") || (ok && got != referenceName) {
-				t.Fatalf("reservation referenceName = %v, want %q", got, referenceName)
+			if got, ok := attrs["referenceName"]; ok != (attributes.referenceName != "") || (ok && got != attributes.referenceName) {
+				t.Fatalf("reservation referenceName = %v, want %q", got, attributes.referenceName)
+			}
+			if got, ok := attrs["previewFrameTimeCode"]; ok != (attributes.timeCode != "") || (ok && got != attributes.timeCode) {
+				t.Fatalf("reservation previewFrameTimeCode = %v, want %q", got, attributes.timeCode)
 			}
 			return jsonResponse(201, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"AWAITING_UPLOAD","uploadOperations":[{"method":"PUT","url":"https://storage.example/video","offset":0,"length":21}]}}}`)
 		case "PUT /video":
+			if attributes.failPhase == "transfer" {
+				return jsonResponse(http.StatusForbidden, "")
+			}
 			bytes, err := io.ReadAll(req.Body)
 			if err != nil || string(bytes) != string(content) || req.Header.Get("Authorization") != "" {
 				t.Fatal("incorrect or credentialed transfer")
 			}
 			return jsonResponse(200, "")
 		case "PATCH /v1/appAssetLibraryVideos/video":
+			if attributes.failPhase == "commit" {
+				return jsonResponse(http.StatusUnprocessableEntity, `{"errors":[{"status":"422","code":"ENTITY_ERROR","title":"commit rejected","detail":"commit rejected"}]}`)
+			}
 			bytes, _ := io.ReadAll(req.Body)
 			if string(bytes) != `{"data":{"type":"appAssetLibraryVideos","id":"video","attributes":{"uploaded":true}}}` {
 				t.Fatalf("commit %s", bytes)
 			}
 			return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos"}}`)
 		case "GET /v1/appAssetLibraryVideos/video":
+			if attributes.failPhase == "processing" {
+				return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"FAILED"}}}`)
+			}
+			if attributes.frameState != "" {
+				return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"PREPARE_FOR_SUBMISSION","specId":"spec","videoAsset":"https://video.example/processed.mp4","previewFrameImage":{"image":{"templateUrl":"https://frame.example/{w}x{h}bb.{f}","width":1920,"height":1280},"state":{"errors":null,"warnings":null,"state":"`+attributes.frameState+`"}}}}}`)
+			}
 			if pending {
-				return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"PREPARE_FOR_SUBMISSION","specId":"spec","videoAsset":null,"previewFrameImage":{"state":"COMPLETE"}}}}`)
+				return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"PREPARE_FOR_SUBMISSION","specId":"spec","videoAsset":null,"previewFrameImage":{"state":{"state":"COMPLETE"}}}}}`)
 			}
 			return jsonResponse(200, `{"data":{"id":"video","type":"appAssetLibraryVideos","attributes":{"state":"PREPARE_FOR_SUBMISSION","specId":"spec","videoAsset":"https://video.example/processed.mp4"}}}`)
 		default:
@@ -112,17 +154,33 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,
 		}
 	})
 	args := []string{"asset-library", "videos", "upload", "--library-id", "library", "--file", file, "--output", "json"}
-	if referenceName != "" {
-		args = append(args, "--reference-name", referenceName)
+	if attributes.referenceName != "" {
+		args = append(args, "--reference-name", attributes.referenceName)
 	}
-	stdout, stderr, err := runAssetLibrary(t, args...)
+	if attributes.timeCode != "" {
+		args = append(args, "--time-code", attributes.timeCode)
+	}
+	stdout, stderr, err := runAssetLibrary(t, stubClient(t, http.DefaultTransport), args...)
 	if requestDeadline {
 		if !errors.Is(err, context.DeadlineExceeded) || errfmt.Classify(err).Hint != "Increase the request timeout (e.g. set `ASC_TIMEOUT=90s`)." {
 			t.Fatalf("request deadline uses wrong hint: err=%v hint=%q", err, errfmt.Classify(err).Hint)
 		}
 		return
 	}
+	if attributes.failPhase != "" {
+		prefix := map[string]string{"transfer": "transfer video video:", "commit": "commit video video:", "processing": "wait for video video processing"}[attributes.failPhase]
+		if err == nil || !strings.HasPrefix(err.Error(), "asset-library videos upload: "+prefix) {
+			t.Fatalf("error = %v, want the %q step named", err, prefix)
+		}
+		if !strings.Contains(stdout, `"videoId":"video"`) || !strings.Contains(stdout, `"failedPhase":"`+attributes.failPhase+`"`) {
+			t.Fatalf("partial receipt does not name the %s phase: %s", attributes.failPhase, stdout)
+		}
+		return
+	}
 	if pending {
+		if !strings.Contains(stdout, `"failedPhase":"processing"`) {
+			t.Fatalf("processing deadline receipt does not name the phase: %s", stdout)
+		}
 		if !errors.Is(err, context.DeadlineExceeded) || errfmt.Classify(err).Hint != "Increase the upload timeout (e.g. set `ASC_UPLOAD_TIMEOUT=45m`)." {
 			t.Fatalf("processing deadline uses wrong hint: err=%v hint=%q", err, errfmt.Classify(err).Hint)
 		}
@@ -131,17 +189,42 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,
 		}
 		return
 	}
+	if attributes.frameState == "FAILED" {
+		if err == nil || !strings.Contains(err.Error(), "preview frame reached FAILED") || !strings.Contains(stdout, `"videoId":"video"`) || !strings.Contains(stdout, `"ready":false`) {
+			t.Fatalf("failed preview frame: err=%v stdout=%s", err, stdout)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("error %v stdout %s stderr %s", err, stdout, stderr)
 	}
-	if referenceName != "" && !strings.Contains(stdout, `"referenceName":"`+referenceName+`"`) {
+	if attributes.referenceName != "" && !strings.Contains(stdout, `"referenceName":"`+attributes.referenceName+`"`) {
 		t.Fatalf("receipt missing referenceName: %s", stdout)
+	}
+	if attributes.timeCode != "" && !strings.Contains(stdout, `"previewFrameTimeCode":"`+attributes.timeCode+`"`) {
+		t.Fatalf("receipt missing previewFrameTimeCode: %s", stdout)
 	}
 	if !strings.Contains(stdout, `"videoId":"video"`) || !strings.Contains(stdout, `"ready":true`) {
 		t.Fatalf("receipt %s", stdout)
 	}
 	if len(calls) != 5 {
 		t.Fatalf("calls %v", calls)
+	}
+}
+
+func TestAssetLibraryVideoUploadRejectsInvalidTimeCodeBeforeHTTP(t *testing.T) {
+	setupAuth(t)
+	videoPath := filepath.Join(t.TempDir(), "video.mp4")
+	if err := os.WriteFile(videoPath, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := asctest.NewRegistry(t)
+	for _, timeCode := range []string{"  ", "3s", "00:00:03"} {
+		stdout, stderr, err := runAssetLibrary(t, stubClient(t, reg), "asset-library", "videos", "upload", "--library-id", "lib", "--file", videoPath, "--time-code", timeCode)
+		want := "asset-library videos upload: --time-code must be HH:MM:SS:FF or HH:MM:SS.mmm"
+		if !isUsageClassError(err) || stdout != "" || !strings.Contains(stderr, want) {
+			t.Fatalf("time code %q: err=%v stdout=%q stderr=%q", timeCode, err, stdout, stderr)
+		}
 	}
 }
 
@@ -162,11 +245,9 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"h264","width":1920,
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	original := http.DefaultTransport
-	t.Cleanup(func() { http.DefaultTransport = original })
-	calls := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) { calls++; return jsonResponse(400, `{"errors":[]}`) })
-	_, stderr, err := runAssetLibrary(t, "asset-library", "videos", "upload", "--library-id", "library", "--file", file)
+	reg := asctest.NewRegistry(t)
+	_, stderr, err := runAssetLibrary(t, stubClient(t, reg), "asset-library", "videos", "upload", "--library-id", "library", "--file", file)
+	calls := len(reg.Requests())
 	if err == nil || !strings.Contains(stderr, "container") || calls != 0 {
 		t.Fatalf("expected pre-auth container rejection, calls=%d err=%v stderr=%s", calls, err, stderr)
 	}

@@ -3,18 +3,26 @@ package shared
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
+	"regexp"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
+
+var appStoreVersionStringPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*$`)
+
+// IsAppStoreVersionString reports whether a selector is a numeric dotted version string.
+func IsAppStoreVersionString(value string) bool {
+	return appStoreVersionStringPattern.MatchString(value)
+}
 
 // ResolveAppStoreVersionIDAndState finds a version ID and state by version string and platform.
 func ResolveAppStoreVersionIDAndState(ctx context.Context, client *asc.Client, appID, version, platform string) (string, string, error) {
 	opts := []asc.AppStoreVersionsOption{
 		asc.WithAppStoreVersionsVersionStrings([]string{version}),
 		asc.WithAppStoreVersionsPlatforms([]string{platform}),
-		asc.WithAppStoreVersionsLimit(10),
+		asc.Limit[asc.AppStoreVersionsOption](10),
 	}
 	resp, err := client.GetAppStoreVersions(ctx, appID, opts...)
 	if err != nil {
@@ -72,15 +80,21 @@ func ResolveOwnedAppStoreVersionByID(ctx context.Context, client *asc.Client, ap
 }
 
 // ResolveAppInfoID resolves the app info ID, optionally using a provided
-// override supplied through --app-info.
-func ResolveAppInfoID(ctx context.Context, client *asc.Client, appID, appInfoID string) (string, error) {
-	return ResolveAppInfoIDWithFlag(ctx, client, appID, appInfoID, "--app-info")
+// override supplied through --app-info. The auto-selection notice goes to d's
+// stderr.
+func (d *Deps) ResolveAppInfoID(ctx context.Context, client *asc.Client, appID, appInfoID string) (string, error) {
+	return d.ResolveAppInfoIDWithFlag(ctx, client, appID, appInfoID, "--app-info")
 }
 
 // ResolveAppInfoIDWithFlag resolves the app info ID, optionally using a
 // provided override. appInfoFlag names the command's override flag so an
-// ambiguity error can tell the caller which flag accepts one candidate ID.
-func ResolveAppInfoIDWithFlag(ctx context.Context, client *asc.Client, appID, appInfoID, appInfoFlag string) (string, error) {
+// ambiguity error can tell the caller which flag accepts one candidate ID. The
+// auto-selection notice goes to d's stderr.
+func (d *Deps) ResolveAppInfoIDWithFlag(ctx context.Context, client *asc.Client, appID, appInfoID, appInfoFlag string) (string, error) {
+	return resolveAppInfoIDTo(ctx, d.IO.ErrOut, client, appID, appInfoID, appInfoFlag)
+}
+
+func resolveAppInfoIDTo(ctx context.Context, stderr io.Writer, client *asc.Client, appID, appInfoID, appInfoFlag string) (string, error) {
 	if strings.TrimSpace(appInfoID) != "" {
 		return strings.TrimSpace(appInfoID), nil
 	}
@@ -110,16 +124,21 @@ func ResolveAppInfoIDWithFlag(ctx context.Context, client *asc.Client, appID, ap
 		return candidates[0].ID, nil
 	}
 	if selected, ok := asc.AutoResolveAppInfoIDByVersionState(candidates, "PREPARE_FOR_SUBMISSION"); ok {
-		fmt.Fprintf(os.Stderr, "Multiple app infos found for app %s, auto-selected %s (PREPARE_FOR_SUBMISSION).\n", appID, selected)
+		fmt.Fprintf(stderr, "Multiple app infos found for app %s, auto-selected %s (PREPARE_FOR_SUBMISSION).\n", appID, selected)
 		return selected, nil
 	}
 	return "", AmbiguousAppInfoError(appID, appInfoFlag, candidates)
 }
 
 // ResolveOwnedAppInfoID resolves the app info ID and verifies that an explicit
-// override belongs to the requested app.
-func ResolveOwnedAppInfoID(ctx context.Context, client *asc.Client, appID, appInfoID string) (string, error) {
-	resolvedAppInfoID, err := ResolveAppInfoID(ctx, client, appID, appInfoID)
+// override belongs to the requested app. The auto-selection notice goes to d's
+// stderr.
+func (d *Deps) ResolveOwnedAppInfoID(ctx context.Context, client *asc.Client, appID, appInfoID string) (string, error) {
+	return resolveOwnedAppInfoIDTo(ctx, d.IO.ErrOut, client, appID, appInfoID)
+}
+
+func resolveOwnedAppInfoIDTo(ctx context.Context, stderr io.Writer, client *asc.Client, appID, appInfoID string) (string, error) {
+	resolvedAppInfoID, err := resolveAppInfoIDTo(ctx, stderr, client, appID, appInfoID, "--app-info")
 	if err != nil {
 		return "", err
 	}

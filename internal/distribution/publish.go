@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -117,25 +119,13 @@ func (signing *PreparedSigning) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*signing = PreparedSigning(wire.plain)
-	if len(signing.ProfileCertificateSHA256Fingerprints) > 0 && len(wire.LegacyCertificateSHA256Fingerprints) > 0 && !equalStrings(signing.ProfileCertificateSHA256Fingerprints, wire.LegacyCertificateSHA256Fingerprints) {
+	if len(signing.ProfileCertificateSHA256Fingerprints) > 0 && len(wire.LegacyCertificateSHA256Fingerprints) > 0 && !slices.Equal(signing.ProfileCertificateSHA256Fingerprints, wire.LegacyCertificateSHA256Fingerprints) {
 		return fmt.Errorf("signing profileCertificateSha256Fingerprints conflicts with certificateSha256Fingerprints")
 	}
 	if len(signing.ProfileCertificateSHA256Fingerprints) == 0 {
 		signing.ProfileCertificateSHA256Fingerprints = wire.LegacyCertificateSHA256Fingerprints
 	}
 	return nil
-}
-
-func equalStrings(left, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 type PreparedBundle struct {
@@ -147,7 +137,7 @@ type PreparedBundle struct {
 	IPASize          int64
 }
 
-func LoadPreparedBundle(bundleDir string) (*PreparedBundle, error) {
+func LoadPreparedBundle(bundleDir string, now time.Time) (*PreparedBundle, error) {
 	trimmed := strings.TrimSpace(bundleDir)
 	if trimmed == "" {
 		return nil, fmt.Errorf("bundle directory is required")
@@ -157,13 +147,14 @@ func LoadPreparedBundle(bundleDir string) (*PreparedBundle, error) {
 		return nil, fmt.Errorf("open prepared bundle: %w", err)
 	}
 	defer root.Close()
-	return LoadPreparedBundleContext(context.Background(), root)
+	return LoadPreparedBundleContext(context.Background(), root, now)
 }
 
 // LoadPreparedBundleContext reads a prepared bundle through an already-pinned
-// root. The caller owns root and must retain it for the complete publication
-// workflow so a lexical path replacement cannot select a different bundle.
-func LoadPreparedBundleContext(ctx context.Context, root rootfs.Root) (*PreparedBundle, error) {
+// root and checks its signing profile has not expired at now. The caller owns
+// root and must retain it for the complete publication workflow so a lexical
+// path replacement cannot select a different bundle.
+func LoadPreparedBundleContext(ctx context.Context, root rootfs.Root, now time.Time) (*PreparedBundle, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
@@ -204,7 +195,7 @@ func LoadPreparedBundleContext(ctx context.Context, root rootfs.Root) (*Prepared
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("decode bundle.json: trailing content")
 	}
-	if err := validateDescriptor(descriptor); err != nil {
+	if err := validateDescriptor(descriptor, now); err != nil {
 		return nil, err
 	}
 	artifactPath := descriptor.Artifact.RelativePath
@@ -260,7 +251,7 @@ func LoadPreparedBundleContext(ctx context.Context, root rootfs.Root) (*Prepared
 	}, nil
 }
 
-func validateDescriptor(descriptor PreparedDescriptor) error {
+func validateDescriptor(descriptor PreparedDescriptor, now time.Time) error {
 	if descriptor.SchemaVersion != "1" {
 		return fmt.Errorf("bundle.json schemaVersion %q is not supported", descriptor.SchemaVersion)
 	}
@@ -300,7 +291,7 @@ func validateDescriptor(descriptor PreparedDescriptor) error {
 	if strings.TrimSpace(descriptor.Signing.ProfileUUID) == "" || strings.TrimSpace(descriptor.Signing.TeamID) == "" || strings.TrimSpace(descriptor.Signing.ExpiresAt) == "" {
 		return fmt.Errorf("bundle.json signing requires profileUuid, teamId, and expiresAt")
 	}
-	if descriptor.Signing.DeviceCount <= 0 || !isCanonicalSHA256(descriptor.Signing.DeviceSetSHA256) || !isCanonicalSHA256(descriptor.Signing.EmbeddedProfileSHA256) || len(descriptor.Signing.ProfileCertificateSHA256Fingerprints) == 0 {
+	if descriptor.Signing.DeviceCount <= 0 || !isCanonicalDigest(descriptor.Signing.DeviceSetSHA256) || !isCanonicalDigest(descriptor.Signing.EmbeddedProfileSHA256) || len(descriptor.Signing.ProfileCertificateSHA256Fingerprints) == 0 {
 		return fmt.Errorf("bundle.json signing requires a non-empty device set, embedded profile digest, and profile certificate fingerprints")
 	}
 	if descriptor.Signing.CodeSignatureVerification.Status != "verified" {
@@ -314,13 +305,13 @@ func validateDescriptor(descriptor PreparedDescriptor) error {
 	}
 	profileFingerprints := make(map[string]struct{}, len(descriptor.Signing.ProfileCertificateSHA256Fingerprints))
 	for _, fingerprint := range descriptor.Signing.ProfileCertificateSHA256Fingerprints {
-		if !isCanonicalSHA256(fingerprint) {
+		if !isCanonicalDigest(fingerprint) {
 			return fmt.Errorf("bundle.json signing.profileCertificateSha256Fingerprints must contain canonical SHA-256 values")
 		}
 		profileFingerprints[fingerprint] = struct{}{}
 	}
 	for _, fingerprint := range descriptor.Signing.CodeSignatureVerification.SignerCertificateSHA256Fingerprints {
-		if !isCanonicalSHA256(fingerprint) {
+		if !isCanonicalDigest(fingerprint) {
 			return fmt.Errorf("bundle.json signing.codeSignatureVerification.signerCertificateSha256Fingerprints must contain canonical SHA-256 values")
 		}
 		if _, ok := profileFingerprints[fingerprint]; !ok {
@@ -337,21 +328,13 @@ func validateDescriptor(descriptor PreparedDescriptor) error {
 	if err != nil {
 		return fmt.Errorf("bundle.json signing.expiresAt must be RFC3339: %w", err)
 	}
-	if !expiresAt.After(time.Now()) {
+	if !expiresAt.After(now) {
 		return fmt.Errorf("bundle.json signing profile is expired")
 	}
 	if descriptor.Artifact.RelativePath != "payload/app.ipa" {
 		return fmt.Errorf("bundle.json artifact.relativePath must be payload/app.ipa")
 	}
 	return nil
-}
-
-func isCanonicalSHA256(value string) bool {
-	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
-		return false
-	}
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size
 }
 
 type PutObject struct {
@@ -469,13 +452,13 @@ func (signing ReceiptSigning) MatchesPrepared(prepared PreparedSigning) bool {
 	want := receiptSigningFromPrepared(prepared)
 	return signing.ProfileClass == want.ProfileClass && signing.ProfileUUID == want.ProfileUUID && signing.EmbeddedProfileSHA256 == want.EmbeddedProfileSHA256 && signing.TeamID == want.TeamID &&
 		signing.ProfileExpiresAt == want.ProfileExpiresAt && signing.DeviceCount == want.DeviceCount && signing.DeviceSetSHA256 == want.DeviceSetSHA256 &&
-		equalStrings(signing.ProfileCertificateFingerprints, want.ProfileCertificateFingerprints) &&
+		slices.Equal(signing.ProfileCertificateFingerprints, want.ProfileCertificateFingerprints) &&
 		verificationMatches(signing.ProfileIntegrityVerification, want.ProfileIntegrityVerification) && verificationMatches(signing.ProfileTrustVerification, want.ProfileTrustVerification) &&
 		verificationMatches(signing.CodeSignatureVerification, want.CodeSignatureVerification)
 }
 
 func verificationMatches(left, right PreparedCodeSignatureVerification) bool {
-	return left.Status == right.Status && left.Reason == right.Reason && left.Scope == right.Scope && equalStrings(left.SignerCertificateSHA256Fingerprints, right.SignerCertificateSHA256Fingerprints)
+	return left.Status == right.Status && left.Reason == right.Reason && left.Scope == right.Scope && slices.Equal(left.SignerCertificateSHA256Fingerprints, right.SignerCertificateSHA256Fingerprints)
 }
 
 type SensitiveLinks struct {
@@ -491,7 +474,8 @@ func Publish(ctx context.Context, ipa io.ReadSeeker, descriptor PreparedDescript
 	if options.Store == nil || options.Verifier == nil {
 		return PublishReceipt{}, SensitiveLinks{}, fmt.Errorf("object store and verifier are required")
 	}
-	if err := validateDescriptor(descriptor); err != nil {
+	clock := publishClock(options)
+	if err := validateDescriptor(descriptor, clock()); err != nil {
 		return PublishReceipt{}, SensitiveLinks{}, err
 	}
 	prefix, err := NormalizePrefix(options.Prefix)
@@ -511,10 +495,6 @@ func Publish(ctx context.Context, ipa io.ReadSeeker, descriptor PreparedDescript
 		if _, err := ValidatePublicBaseURL(options.PublicBaseURL); err != nil {
 			return PublishReceipt{}, SensitiveLinks{}, err
 		}
-	}
-	clock := func() time.Time { return time.Now().UTC() }
-	if options.Now != nil {
-		clock = func() time.Time { return options.Now().UTC() }
 	}
 	now := clock()
 	profileExpiry, _ := time.Parse(time.RFC3339, descriptor.Signing.ExpiresAt)
@@ -662,8 +642,10 @@ func Publish(ctx context.Context, ipa io.ReadSeeker, descriptor PreparedDescript
 	return receipt, sensitive, nil
 }
 
-func Reverify(ctx context.Context, verifier Verifier, receipt PublishReceipt, links SensitiveLinks, now time.Time) error {
-	return reverifyWithClock(ctx, verifier, receipt, links, now, func() time.Time { return time.Now().UTC() })
+// Reverify checks a stored publication against clock: the saved profile and
+// links when it starts, and the profile again after the remote checks.
+func Reverify(ctx context.Context, verifier Verifier, receipt PublishReceipt, links SensitiveLinks, clock func() time.Time) error {
+	return reverifyWithClock(ctx, verifier, receipt, links, clock(), clock)
 }
 
 func reverifyWithClock(ctx context.Context, verifier Verifier, receipt PublishReceipt, links SensitiveLinks, now time.Time, clock func() time.Time) error {
@@ -1107,12 +1089,25 @@ func NewHTTPVerifier(client *http.Client, timeout time.Duration) *HTTPVerifier {
 	return &HTTPVerifier{client: &clone, timeout: timeout}
 }
 
-// NewHTTPVerifierWithEnvironmentTrust builds a verifier that honors the same
-// AWS_CA_BUNDLE trust override used by the S3 SDK for private endpoints.
-func NewHTTPVerifierWithEnvironmentTrust(timeout time.Duration) (*HTTPVerifier, error) {
+// NewHTTPVerifierWithEnvironmentTrust builds a verifier that sends through
+// transport (nil means http.DefaultTransport) and honors the AWS_CA_BUNDLE
+// trust override the S3 SDK uses for private endpoints:
+//   - without AWS_CA_BUNDLE, transport is used as given;
+//   - with AWS_CA_BUNDLE and http.DefaultTransport itself, the bundle is added
+//     to a clone of the default transport;
+//   - with AWS_CA_BUNDLE and any other transport, it returns an error before
+//     the verifier sends anything: a custom transport carries its own trust,
+//     so the two cannot be combined.
+func NewHTTPVerifierWithEnvironmentTrust(transport http.RoundTripper, timeout time.Duration) (*HTTPVerifier, error) {
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
 	caPath := strings.TrimSpace(os.Getenv("AWS_CA_BUNDLE"))
 	if caPath == "" {
-		return NewHTTPVerifier(nil, timeout), nil
+		return NewHTTPVerifier(&http.Client{Transport: transport}, timeout), nil
+	}
+	if !IsDefaultHTTPTransport(transport) {
+		return nil, fmt.Errorf("AWS_CA_BUNDLE cannot be combined with a custom HTTP transport (%T); unset AWS_CA_BUNDLE or use the default transport", transport)
 	}
 	file, err := os.Open(caPath)
 	if err != nil {
@@ -1134,13 +1129,29 @@ func NewHTTPVerifierWithEnvironmentTrust(timeout time.Duration) (*HTTPVerifier, 
 	if !roots.AppendCertsFromPEM(pemBytes) {
 		return nil, fmt.Errorf("custom CA bundle contains no certificates")
 	}
-	transport, ok := http.DefaultTransport.(*http.Transport)
+	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("default HTTP transport is unavailable")
 	}
-	clone := transport.Clone()
+	clone := base.Clone()
 	clone.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	return NewHTTPVerifier(&http.Client{Transport: clone}, timeout), nil
+}
+
+// IsDefaultHTTPTransport reports whether transport is http.DefaultTransport
+// itself or nil, which an http.Client reads as http.DefaultTransport. A value
+// whose dynamic type cannot be compared is never the default: comparing it
+// with == would panic.
+func IsDefaultHTTPTransport(transport http.RoundTripper) bool {
+	if transport == nil {
+		return true
+	}
+	value := reflect.ValueOf(transport)
+	defaultValue := reflect.ValueOf(http.DefaultTransport)
+	if !value.IsValid() || !defaultValue.IsValid() || value.Type() != defaultValue.Type() || !value.Comparable() {
+		return false
+	}
+	return value.Equal(defaultValue)
 }
 
 func (v *HTTPVerifier) Verify(ctx context.Context, verification VerifyRequest) error {

@@ -1,9 +1,7 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 )
@@ -14,10 +12,9 @@ import (
 // so an agent taking examples[0] would run the wrong command. Prerequisite
 // invocations belong in the prose above the block.
 //
-// Not covered here: `asc doctor` and `asc migrate metadata ...` share their
-// command objects with `asc auth doctor` and `asc metadata ...`, so their
-// examples document the canonical path on purpose. `asc screenshots download`
-// is excluded while PR #2067 rewrites that file.
+// Not covered here: `asc doctor` shares its command object with `asc auth
+// doctor`, so its examples document the canonical path on purpose. `asc
+// screenshots download` is excluded while PR #2067 rewrites that file.
 func TestSearchExamplesAreFirstPartyForFixedCommands(t *testing.T) {
 	tests := []struct {
 		command string
@@ -55,17 +52,10 @@ func TestSearchExamplesAreFirstPartyForFixedCommands(t *testing.T) {
 func searchResultForCommand(t *testing.T, query, command string) (searchResult, bool) {
 	t.Helper()
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"search", "--output", "json", "--limit", "25", query}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, nil, "search", "--output", "json", "--limit", "25", query)
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}

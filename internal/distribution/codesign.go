@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -41,7 +42,6 @@ const (
 
 var (
 	runCodeSignTool                   = runBoundedTool
-	duringMaterializationForTest      func(string)
 	duringMaterializedCopyForTest     func()
 	materializeMainAppForVerification func(*os.Root, []*zip.File, string) error
 )
@@ -126,7 +126,7 @@ func verifyMainAppCodeSignatureContext(ctx context.Context, members []*zip.File,
 		result.Status, result.Reason = CodeSignatureInvalid, "could not enumerate nested signed code: "+err.Error()
 		return result
 	}
-	if !containsPath(codePaths, mainExecutablePath) {
+	if !slices.Contains(codePaths, mainExecutablePath) {
 		result.Status, result.Reason = CodeSignatureInvalid, "CFBundleExecutable is not a Mach-O file in the main app"
 		return result
 	}
@@ -266,10 +266,6 @@ func validateSignedMainAppEntitlements(entitlementsData []byte, bundleID string,
 		}
 	}
 	return nil
-}
-
-func enumerateMachOFiles(appPath string) ([]string, error) {
-	return enumerateMachOFilesContext(context.Background(), appPath)
 }
 
 func enumerateMachOFilesContext(ctx context.Context, appPath string) ([]string, error) {
@@ -510,15 +506,6 @@ func stringSet(values []string) map[string]struct{} {
 	return result
 }
 
-func containsPath(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
 func entitlementValuePermits(profileValue, signedValue any) bool {
 	profileString, profileIsString := profileValue.(string)
 	signedString, signedIsString := signedValue.(string)
@@ -568,9 +555,6 @@ func materializeMainAppContext(ctx context.Context, destination *os.Root, member
 	prefix := appDir + "/"
 	var total int64
 	for _, member := range members {
-		if duringMaterializationForTest != nil {
-			duringMaterializationForTest(member.Name)
-		}
 		if err := contextError(ctx); err != nil {
 			return err
 		}

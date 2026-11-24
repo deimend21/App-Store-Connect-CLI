@@ -11,9 +11,9 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shots"
 )
 
-// ScreenshotsCommand returns the top-level screenshots command.
-func ScreenshotsCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("screenshots", flag.ExitOnError)
+// NewScreenshotsCommand returns the top-level screenshots command.
+func NewScreenshotsCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("screenshots", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "screenshots",
@@ -38,8 +38,9 @@ Local workflow:
 
 App Store workflow:
   asc screenshots list --version-localization "VERSION_LOCALIZATION_ID"
-  asc screenshots list --version-id "VERSION_ID" --locale "en-US"
+  asc screenshots list --version "VERSION_ID" --locale "en-US"
   asc screenshots list --app "123456789" --version "1.2.3"
+  asc screenshots list --set-id "SET_ID"
   asc screenshots sizes
   asc screenshots sizes --all
   asc screenshots validate --path "./screenshots/iphone" --device-type "IPHONE_65"
@@ -47,30 +48,32 @@ App Store workflow:
   asc screenshots upload --app "123456789" --version "1.2.3" --path "./screenshots" --device-type "IPHONE_65"
   asc screenshots upload --version-localization "VERSION_LOCALIZATION_ID" --path "./screenshots/ipad" --device-type "IPAD_PRO_3GEN_129"
   asc screenshots download --version-localization "VERSION_LOCALIZATION_ID" --output-dir "./screenshots/downloaded"
+  asc screenshots reorder --set-id "SET_ID" --ids "THIRD_ID,FIRST_ID,SECOND_ID"
   asc screenshots delete --id "SCREENSHOT_ID" --confirm
 
 For most iOS submissions, one iPhone set (IPHONE_65) and one iPad set
 (IPAD_PRO_3GEN_129) are enough. "asc screenshots sizes" focuses on these by
 default; use --all only when you need the full matrix.`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			shots.ShotsRunCommand(),
-			shots.ShotsMatrixCommand(),
-			shots.ShotsCaptureCommand(),
-			shots.ShotsFrameCommand(),
-			shots.ShotsFramesListDevicesCommand(),
-			shots.ShotsReviewGenerateCommand(),
-			shots.ShotsReviewOpenCommand(),
-			shots.ShotsReviewApproveCommand(),
-			assets.AssetsScreenshotsPlanCommand(),
-			assets.AssetsScreenshotsApplyCommand(),
-			assets.AssetsScreenshotsListCommand(),
-			assets.AssetsScreenshotsSizesCommand(),
-			assets.AssetsScreenshotsValidateCommand(),
-			assets.AssetsScreenshotsUploadCommand(),
-			assets.AssetsScreenshotsDownloadCommand(),
-			assets.AssetsScreenshotsDeleteCommand(),
+			shots.NewShotsRunCommand(d),
+			shots.NewShotsMatrixCommand(d),
+			shots.NewShotsCaptureCommand(d),
+			shots.NewShotsFrameCommand(d),
+			shots.NewShotsFramesListDevicesCommand(d),
+			shots.NewShotsReviewGenerateCommand(d),
+			shots.NewShotsReviewOpenCommand(d),
+			shots.NewShotsReviewApproveCommand(d),
+			assets.NewAssetsScreenshotsPlanCommand(d),
+			assets.NewAssetsScreenshotsApplyCommand(d),
+			assets.NewAssetsScreenshotsListCommand(d),
+			assets.NewAssetsScreenshotsSizesCommand(d),
+			assets.NewAssetsScreenshotsValidateCommand(d),
+			assets.NewAssetsScreenshotsUploadCommand(d),
+			assets.NewAssetsScreenshotsDownloadCommand(d),
+			assets.NewAssetsScreenshotsReorderCommand(d),
+			assets.NewAssetsScreenshotsDeleteCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp

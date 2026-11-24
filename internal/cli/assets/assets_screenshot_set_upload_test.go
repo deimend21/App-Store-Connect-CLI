@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type screenshotSetUploadProbeResult struct {
@@ -60,11 +61,12 @@ func TestExecuteScreenshotSetUploadCompletesUploadFlow(t *testing.T) {
 	listCalls := 0
 	createCalls := 0
 
-	result, err := ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[screenshotSetUploadProbeResult]{
+	result, err := ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[screenshotSetUploadProbeResult]{
 		LocalizationID: "LOC_123",
 		Path:           filePath,
 		DeviceType:     "IPHONE_65",
 		Replace:        true,
+		RequireConfirm: func() error { return nil },
 		ClientFactory: func() (*asc.Client, error) {
 			clientFactoryCalled = true
 			return newAssetsUploadTestClient(t), nil
@@ -142,7 +144,7 @@ func TestExecuteScreenshotSetUploadFullSetUsesOwnerSpecificInspectionCommand(t *
 		t.Fatalf("full-set validation must not mutate remote assets: %s %s", req.Method, req.URL.String())
 	}))
 
-	_, err := ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[screenshotSetUploadProbeResult]{
+	_, err := ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[screenshotSetUploadProbeResult]{
 		LocalizationID: "CUSTOM_LOC_123",
 		Path:           filePath,
 		DeviceType:     "IPHONE_65",
@@ -189,7 +191,7 @@ func TestExecuteScreenshotSetUploadFullSetUsesOwnerSpecificInspectionCommand(t *
 }
 
 func TestExecuteScreenshotSetUploadRequiresDependencies(t *testing.T) {
-	_, err := ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[struct{}]{
+	_, err := ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[struct{}]{
 		LocalizationID: "LOC_123",
 		Path:           "unused",
 		DeviceType:     "IPHONE_65",
@@ -198,7 +200,7 @@ func TestExecuteScreenshotSetUploadRequiresDependencies(t *testing.T) {
 		t.Fatalf("expected missing client factory error, got %v", err)
 	}
 
-	_, err = ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[struct{}]{
+	_, err = ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[struct{}]{
 		LocalizationID: "LOC_123",
 		Path:           "unused",
 		DeviceType:     "IPHONE_65",
@@ -216,7 +218,7 @@ func TestExecuteScreenshotSetUploadInvalidDeviceTypeUsageMode(t *testing.T) {
 	clientFactoryCalled := false
 	var runErr error
 	stdout, stderr := captureOutput(t, func() {
-		_, runErr = ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[struct{}]{
+		_, runErr = ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[struct{}]{
 			LocalizationID:           "LOC_123",
 			Path:                     "unused",
 			DeviceType:               "ANDROID",
@@ -249,7 +251,7 @@ func TestExecuteScreenshotSetUploadInvalidDeviceTypeNonUsageMode(t *testing.T) {
 	clientFactoryCalled := false
 	var runErr error
 	stdout, stderr := captureOutput(t, func() {
-		_, runErr = ExecuteScreenshotSetUpload(context.Background(), ScreenshotSetUploadOptions[struct{}]{
+		_, runErr = ExecuteScreenshotSetUpload(context.Background(), shared.DefaultDeps(), ScreenshotSetUploadOptions[struct{}]{
 			LocalizationID: "LOC_123",
 			Path:           "unused",
 			DeviceType:     "ANDROID",

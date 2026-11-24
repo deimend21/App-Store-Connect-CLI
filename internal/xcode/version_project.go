@@ -44,13 +44,15 @@ type versionConfiguration struct {
 }
 
 type structuredVersionProject struct {
-	project        xcodeproj.XcodeProj
-	projectPath    string
-	pbxprojPath    string
-	rootDir        string
-	objects        serialized.Object
-	configurations []*versionConfiguration
-	parentByChild  map[string]string
+	project         xcodeproj.XcodeProj
+	projectPath     string
+	projectFilePath string
+	projectSource   string
+	rootDir         string
+	objects         serialized.Object
+	configurations  []*versionConfiguration
+	parentByChild   map[string]string
+	xcproj          *xcprojModel
 }
 
 type preparedVersionWrite struct {
@@ -126,7 +128,7 @@ func GetVersionScoped(ctx context.Context, opts GetVersionOptions) (*VersionInfo
 	if strings.TrimSpace(opts.Configuration) != "" {
 		return nil, fmt.Errorf("--configuration requires structured MARKETING_VERSION and CURRENT_PROJECT_VERSION settings: %w", err)
 	}
-	return getVersionLegacy(ctx, opts.ProjectDir, opts.Target, lookupSession)
+	return project.getVersionFallback(ctx, opts.ProjectDir, opts.Target, lookupSession)
 }
 
 // GetConsistentMarketingVersion resolves one marketing version across the full selected mutation scope.
@@ -158,7 +160,7 @@ func GetConsistentMarketingVersion(ctx context.Context, opts GetVersionOptions) 
 	if strings.TrimSpace(opts.Configuration) != "" {
 		return "", fmt.Errorf("--configuration requires structured %s settings: %w", marketingVersionSetting, err)
 	}
-	legacy, err := getVersionLegacy(ctx, opts.ProjectDir, opts.Target, lookupSession)
+	legacy, err := project.getVersionFallback(ctx, opts.ProjectDir, opts.Target, lookupSession)
 	if err != nil {
 		return "", err
 	}
@@ -178,14 +180,25 @@ func openStructuredVersionProjectWithPolicy(projectInput string, signingSafety b
 	if err != nil {
 		return nil, err
 	}
+	usesXCProj, err := xcprojFilePresent(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	projectFileName := pbxprojFileName
+	if usesXCProj {
+		projectFileName = xcprojFileName
+	}
 	if signingSafety {
-		if err := validateStructuredVersionProjectPath(projectPath); err != nil {
+		if err := validateStructuredVersionProjectPath(projectPath, projectFileName); err != nil {
 			return nil, err
 		}
 	}
+	if usesXCProj {
+		return openXCProjStructuredProject(projectPath)
+	}
 	parsed, err := xcodeproj.Open(projectPath)
 	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", filepath.Join(projectPath, "project.pbxproj"), err)
+		return nil, fmt.Errorf("parse %s: %w", filepath.Join(projectPath, pbxprojFileName), err)
 	}
 	objects, err := parsed.RawProj.Object("objects")
 	if err != nil {
@@ -196,12 +209,13 @@ func openStructuredVersionProjectWithPolicy(projectInput string, signingSafety b
 		return nil, fmt.Errorf("resolve Xcode project path: %w", err)
 	}
 	project := &structuredVersionProject{
-		project:       parsed,
-		projectPath:   absolutePath,
-		pbxprojPath:   filepath.Join(absolutePath, "project.pbxproj"),
-		rootDir:       filepath.Dir(absolutePath),
-		objects:       objects,
-		parentByChild: make(map[string]string),
+		project:         parsed,
+		projectPath:     absolutePath,
+		projectFilePath: filepath.Join(absolutePath, pbxprojFileName),
+		projectSource:   "pbxproj",
+		rootDir:         filepath.Dir(absolutePath),
+		objects:         objects,
+		parentByChild:   make(map[string]string),
 	}
 	project.indexGroupParents()
 	if err := project.indexConfigurations(); err != nil {
@@ -211,12 +225,12 @@ func openStructuredVersionProjectWithPolicy(projectInput string, signingSafety b
 }
 
 // validateStructuredVersionProjectPath performs the signing-only rooted
-// no-follow checks before the plist parser opens project.pbxproj. The parser
-// accepts ordinary filesystem paths and would otherwise follow an explicitly
-// selected .xcodeproj or project.pbxproj symlink before signing's later
+// no-follow checks before the parser opens the project definition file. The
+// parser accepts ordinary filesystem paths and would otherwise follow an explicitly
+// selected .xcodeproj or project file symlink before signing's later
 // mutation preflight had a chance to reject it. Stable version commands retain
 // their historical selected-path symlink behavior through openStructuredVersionProject.
-func validateStructuredVersionProjectPath(projectPath string) error {
+func validateStructuredVersionProjectPath(projectPath, projectFileName string) error {
 	absolute, err := filepath.Abs(projectPath)
 	if err != nil {
 		return fmt.Errorf("resolve Xcode project path: %w", err)
@@ -230,9 +244,9 @@ func validateStructuredVersionProjectPath(projectPath string) error {
 	if err := root.CheckContained(absolute); err != nil {
 		return fmt.Errorf("refusing to parse Xcode project %s: %w", absolute, err)
 	}
-	pbxprojPath := filepath.Join(absolute, "project.pbxproj")
-	if err := root.CheckContained(pbxprojPath); err != nil {
-		return fmt.Errorf("refusing to parse Xcode project file %s: %w", pbxprojPath, err)
+	projectFilePath := filepath.Join(absolute, projectFileName)
+	if err := root.CheckContained(projectFilePath); err != nil {
+		return fmt.Errorf("refusing to parse Xcode project file %s: %w", projectFilePath, err)
 	}
 	return nil
 }
@@ -243,10 +257,6 @@ func (project *structuredVersionProject) hasStructuredVersionSettingsForView(tar
 		return false, err
 	}
 	return project.configurationsResolveStructuredSettings([]*versionConfiguration{selected})
-}
-
-func (project *structuredVersionProject) hasStructuredVersionSettingsForMutation(target, configuration string) (bool, error) {
-	return project.hasStructuredSettingsForMutation(target, configuration, marketingVersionSetting, currentProjectSetting)
 }
 
 func (project *structuredVersionProject) hasStructuredSettingsForMutation(target, configuration string, settings ...string) (bool, error) {
@@ -316,7 +326,7 @@ func (project *structuredVersionProject) configurationDefinesSetting(configurati
 		if err != nil {
 			return false, err
 		}
-		paths, err := collectStableXCConfigFiles(root)
+		paths, err := collectXCConfigFiles(root, xcconfigCollectOptions{identify: stableXCConfigIdentify()})
 		if err != nil {
 			return false, err
 		}
@@ -619,7 +629,7 @@ func (project *structuredVersionProject) expandSettingReferences(configuration *
 	for iteration := 0; iteration < 32; iteration++ {
 		match := referencePattern.FindStringSubmatchIndex(resolved)
 		if match == nil {
-			return strings.TrimSpace(resolved), project.pbxprojPath, nil
+			return strings.TrimSpace(resolved), project.projectFilePath, nil
 		}
 		name := ""
 		if match[2] >= 0 {
@@ -697,7 +707,7 @@ func (project *structuredVersionProject) resolveConfigurationXCConfig(
 			}
 		}
 	}
-	return resolveXCConfigSettingWithBase(path, setting, base)
+	return resolveXCConfigSetting(path, setting, xcconfigResolveOptions{base: base, identify: stableXCConfigIdentify()})
 }
 
 func (project *structuredVersionProject) bumpBaseline(opts BumpVersionOptions, setting string, requireConsistent bool) (string, error) {
@@ -827,6 +837,7 @@ type setVersionValidation struct {
 	fileConsumers              map[string]map[string]bool
 	fileIdentities             map[string]string
 	configFiles                map[string][]string
+	lexicalConfigPaths         map[string][]string
 	uncertainXCConfigConsumers bool
 }
 
@@ -846,7 +857,7 @@ func (project *structuredVersionProject) validateSetVersion(opts SetVersionOptio
 		selectedIDs[configuration.id] = true
 	}
 
-	fileConsumers, configFiles, fileIdentities, uncertainXCConfigConsumers, err := project.xcconfigConsumers(selectedIDs)
+	fileConsumers, configFiles, fileIdentities, uncertainXCConfigConsumers, lexicalConfigPaths, err := project.xcconfigConsumers(selectedIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +908,7 @@ func (project *structuredVersionProject) validateSetVersion(opts SetVersionOptio
 		fileConsumers:              fileConsumers,
 		fileIdentities:             fileIdentities,
 		configFiles:                configFiles,
+		lexicalConfigPaths:         lexicalConfigPaths,
 		uncertainXCConfigConsumers: uncertainXCConfigConsumers,
 	}, nil
 }
@@ -1054,7 +1066,7 @@ func (project *structuredVersionProject) setVersion(opts SetVersionOptions) (*Se
 					}
 					configuration.buildSettings[key] = requested.value
 					pbxprojChanged = true
-					changes = append(changes, versionChangeForConfiguration(configuration, requested.name, oldValue, requested.value, project.pbxprojPath, "pbxproj"))
+					changes = append(changes, versionChangeForConfiguration(configuration, requested.name, oldValue, requested.value, project.projectFilePath, project.projectSource))
 				}
 				continue
 			}
@@ -1099,7 +1111,7 @@ func (project *structuredVersionProject) setVersion(opts SetVersionOptions) (*Se
 					}
 					configuration.buildSettings[requested.name] = requested.value
 					pbxprojChanged = true
-					changes = append(changes, versionChangeForConfiguration(configuration, requested.name, oldValue, requested.value, project.pbxprojPath, "pbxproj"))
+					changes = append(changes, versionChangeForConfiguration(configuration, requested.name, oldValue, requested.value, project.projectFilePath, project.projectSource))
 				} else {
 					handlingErrors[configuration.id] = resolveErr
 				}
@@ -1171,13 +1183,14 @@ func (project *structuredVersionProject) setVersion(opts SetVersionOptions) (*Se
 	}
 	sort.Strings(changedFiles)
 	return &SetVersionResult{
-		Version:       strings.TrimSpace(opts.Version),
-		BuildNumber:   strings.TrimSpace(opts.BuildNumber),
-		ProjectDir:    project.rootDir,
-		Target:        strings.TrimSpace(opts.Target),
-		Configuration: strings.TrimSpace(opts.Configuration),
-		ChangedFiles:  changedFiles,
-		Changes:       changes,
+		Version:          strings.TrimSpace(opts.Version),
+		BuildNumber:      strings.TrimSpace(opts.BuildNumber),
+		ProjectDir:       project.rootDir,
+		Target:           strings.TrimSpace(opts.Target),
+		Configuration:    strings.TrimSpace(opts.Configuration),
+		ChangedFiles:     changedFiles,
+		Changes:          changes,
+		ComputedWarnings: project.versionInfoPlistWarnings(opts, selected, configFiles, validation.lexicalConfigPaths),
 	}, nil
 }
 
@@ -1350,8 +1363,29 @@ func (index *xcconfigFileIdentityIndex) identity(
 	return key, nil
 }
 
-func (project *structuredVersionProject) xcconfigConsumers(selectedIDs map[string]bool) (map[string]map[string]bool, map[string][]string, map[string]string, bool, error) {
-	return project.xcconfigConsumersWithCollectorAndIdentity(selectedIDs, collectStableXCConfigFiles, os.Stat)
+func (project *structuredVersionProject) xcconfigConsumers(selectedIDs map[string]bool) (map[string]map[string]bool, map[string][]string, map[string]string, bool, map[string][]string, error) {
+	observedByRoot := make(map[string][]string)
+	collect := func(path string) ([]string, error) {
+		var observed []string
+		files, err := collectXCConfigFiles(path, xcconfigCollectOptions{
+			onPath:   func(path string) { observed = append(observed, path) },
+			identify: stableXCConfigIdentify(),
+		})
+		observedByRoot[normalizeSigningLexicalPath(path)] = observed
+		return files, err
+	}
+	consumers, files, identities, uncertain, err := project.xcconfigConsumersWithCollector(selectedIDs, collect, os.Stat, nil)
+	lexicalPaths := make(map[string][]string)
+	for _, configuration := range project.configurations {
+		if configuration.baseReferenceID == "" {
+			continue
+		}
+		path, pathErr := project.fileReferencePath(configuration.baseReferenceID)
+		if pathErr == nil {
+			lexicalPaths[configuration.id] = observedByRoot[normalizeSigningLexicalPath(path)]
+		}
+	}
+	return consumers, files, identities, uncertain, lexicalPaths, err
 }
 
 func (project *structuredVersionProject) signingXCConfigConsumers(selectedIDs map[string]bool, allowExternal bool) (map[string]map[string]bool, map[string][]string, map[string]string, bool, []string, []string, map[string][]string, bool, error) {
@@ -1415,12 +1449,11 @@ func (project *structuredVersionProject) signingXCConfigConsumersWithOptionalMis
 		if xcconfigUsesIdentityTraversal() {
 			identify = signingXCConfigIdentityFn
 		}
-		files, err := collectXCConfigFilesWithHooksAndIdentityAndOptionalMissingLimitWithBudget(
-			path,
-			func(filePath string) ([]byte, error) {
+		files, err := collectXCConfigFiles(path, xcconfigCollectOptions{
+			read: func(filePath string) ([]byte, error) {
 				return signingXCConfigReadFileFn(filePath, signingPlanMaxBytes)
 			},
-			func(filePath string) error {
+			authorize: func(filePath string) error {
 				if !allowExternal && signingPathDefinitelyExternal(project, filePath) {
 					unauthorizedExternal = true
 					return &signingXCConfigAccessError{path: filePath, err: errors.New("path is outside the project directory"), external: true}
@@ -1447,7 +1480,7 @@ func (project *structuredVersionProject) signingXCConfigConsumersWithOptionalMis
 				}
 				return nil
 			},
-			func(filePath string) {
+			onPath: func(filePath string) {
 				// This runs before authorization, stat, open, read, and parse.
 				// An external path remains protected from artifact writes even
 				// when the operator opted into reading it.
@@ -1458,15 +1491,15 @@ func (project *structuredVersionProject) signingXCConfigConsumersWithOptionalMis
 					observedPaths = append(observedPaths, absolute)
 				}
 			},
-			func(filePath string, _ error) {
+			onError: func(filePath string, _ error) {
 				collectionErrorPath = filePath
 			},
-			identify,
-			addMissingOptionalInclude,
-			signingPlanMaxFiles,
-			signingXCConfigStatFileFn,
-			sourceBudget,
-		)
+			identify:          identify,
+			onOptionalMissing: addMissingOptionalInclude,
+			maxFiles:          signingPlanMaxFiles,
+			optionalProbe:     signingXCConfigStatFileFn,
+			budget:            sourceBudget,
+		})
 		observedPathsByRoot[normalizeSigningLexicalPath(path)] = observedPaths
 		if err == nil {
 			return files, nil
@@ -1484,7 +1517,7 @@ func (project *structuredVersionProject) signingXCConfigConsumersWithOptionalMis
 		}
 		return nil, err
 	}
-	consumers, configFiles, identities, uncertain, err := project.xcconfigConsumersWithCollectorAndErrorHook(selectedIDs, collect, func(configuration *versionConfiguration, err error) {
+	consumers, configFiles, identities, uncertain, err := project.xcconfigConsumersWithCollector(selectedIDs, collect, signingXCConfigIdentityFn, func(configuration *versionConfiguration, err error) {
 		var accessErr *signingXCConfigAccessError
 		if errors.As(err, &accessErr) {
 			addBlockedPath(accessErr.path)
@@ -1522,23 +1555,7 @@ func (project *structuredVersionProject) signingXCConfigConsumersWithOptionalMis
 	return consumers, configFiles, identities, uncertain, protectedConfigPaths, blockedExternalPaths, lexicalConfigPaths, unauthorizedExternal, missingOptionalIncludes, err
 }
 
-func (project *structuredVersionProject) xcconfigConsumersWithCollectorAndErrorHook(
-	selectedIDs map[string]bool,
-	collect func(string) ([]string, error),
-	onUnselectedError func(*versionConfiguration, error),
-) (map[string]map[string]bool, map[string][]string, map[string]string, bool, error) {
-	return project.xcconfigConsumersWithCollectorAndIdentityAndErrorHook(selectedIDs, collect, signingXCConfigIdentityFn, onUnselectedError)
-}
-
-func (project *structuredVersionProject) xcconfigConsumersWithCollectorAndIdentity(
-	selectedIDs map[string]bool,
-	collect func(string) ([]string, error),
-	identify func(string) (os.FileInfo, error),
-) (map[string]map[string]bool, map[string][]string, map[string]string, bool, error) {
-	return project.xcconfigConsumersWithCollectorAndIdentityAndErrorHook(selectedIDs, collect, identify, nil)
-}
-
-func (project *structuredVersionProject) xcconfigConsumersWithCollectorAndIdentityAndErrorHook(
+func (project *structuredVersionProject) xcconfigConsumersWithCollector(
 	selectedIDs map[string]bool,
 	collect func(string) ([]string, error),
 	identify func(string) (os.FileInfo, error),
@@ -1685,7 +1702,7 @@ func consumersAuthorizeSetting(
 }
 
 func (project *structuredVersionProject) preparePBXProjWrite(projectRoot rootfs.Root, strictIdentity bool) (result preparedVersionWrite, resultErr error) {
-	target, err := project.containedVersionFileTarget(projectRoot, project.pbxprojPath)
+	target, err := project.containedVersionFileTarget(projectRoot, project.projectFilePath)
 	if err != nil {
 		return preparedVersionWrite{}, fmt.Errorf("prepare Xcode project file: %w", err)
 	}
@@ -1698,6 +1715,16 @@ func (project *structuredVersionProject) preparePBXProjWrite(projectRoot rootfs.
 	original, mode, err := readRegularVersionFile(&target)
 	if err != nil {
 		return preparedVersionWrite{}, err
+	}
+	if project.xcproj != nil {
+		updated, err := project.editXCProjBuildSettings(original)
+		if err != nil {
+			return preparedVersionWrite{}, fmt.Errorf("edit Xcode project build settings: %w", err)
+		}
+		target.original = original
+		target.updated = updated
+		target.mode = mode
+		return target, nil
 	}
 	tempRoot, err := os.MkdirTemp("", "asc-xcode-project-stage-*")
 	if err != nil {

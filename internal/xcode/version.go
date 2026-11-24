@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 // BumpType represents the version component to increment.
@@ -152,26 +154,10 @@ type SetVersionOptions struct {
 }
 
 // VersionChange describes one concrete build-setting mutation.
-type VersionChange struct {
-	Setting       string `json:"setting"`
-	OldValue      string `json:"oldValue,omitempty"`
-	NewValue      string `json:"newValue"`
-	Target        string `json:"target,omitempty"`
-	Configuration string `json:"configuration,omitempty"`
-	Path          string `json:"path"`
-	Source        string `json:"source"`
-}
+type VersionChange = asc.XcodeVersionChange
 
 // SetVersionResult holds the result of a set operation.
-type SetVersionResult struct {
-	Version       string          `json:"version,omitempty"`
-	BuildNumber   string          `json:"buildNumber,omitempty"`
-	ProjectDir    string          `json:"projectDir"`
-	Target        string          `json:"target,omitempty"`
-	Configuration string          `json:"configuration,omitempty"`
-	ChangedFiles  []string        `json:"changedFiles"`
-	Changes       []VersionChange `json:"changes"`
-}
+type SetVersionResult = asc.XcodeSetVersionResult
 
 // BumpVersionOptions configures the bump operation.
 type BumpVersionOptions struct {
@@ -189,18 +175,7 @@ type BumpVersionOptions struct {
 }
 
 // BumpVersionResult holds the result of a bump operation.
-type BumpVersionResult struct {
-	BumpType      string          `json:"bumpType"`
-	OldVersion    string          `json:"oldVersion,omitempty"`
-	NewVersion    string          `json:"newVersion,omitempty"`
-	OldBuild      string          `json:"oldBuild,omitempty"`
-	NewBuild      string          `json:"newBuild,omitempty"`
-	ProjectDir    string          `json:"projectDir"`
-	Target        string          `json:"target,omitempty"`
-	Configuration string          `json:"configuration,omitempty"`
-	ChangedFiles  []string        `json:"changedFiles"`
-	Changes       []VersionChange `json:"changes"`
-}
+type BumpVersionResult = asc.XcodeBumpVersionResult
 
 func resolvedProjectDir(projectDir string) string {
 	projectDir = trimTrailingPathSeparators(projectDir)
@@ -214,11 +189,6 @@ func resolvedProjectDir(projectDir string) string {
 		return filepath.Dir(projectDir)
 	}
 	return projectDir
-}
-
-// GetVersion reads the current marketing version and build number.
-func GetVersion(ctx context.Context, projectDir, target string) (*VersionInfo, error) {
-	return GetVersionScoped(ctx, GetVersionOptions{ProjectDir: projectDir, Target: target})
 }
 
 func getVersionLegacy(
@@ -278,6 +248,34 @@ func getVersionLegacy(
 	}, nil
 }
 
+// getVersionFallback reads versions when structured parsing cannot resolve
+// them. agvtool only reads project.pbxproj, so JSON projects use xcodebuild.
+func (project *structuredVersionProject) getVersionFallback(
+	ctx context.Context,
+	projectDir string,
+	target string,
+	lookupSession *BuildSettingsLookupSession,
+) (*VersionInfo, error) {
+	if project.xcproj == nil {
+		return getVersionLegacy(ctx, projectDir, target, lookupSession)
+	}
+	resolved, err := readBuildSettings(ctx, projectDir, target, lookupSession)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve build settings: %w", err)
+	}
+	version, build := resolved[marketingVersionSetting], resolved[currentProjectSetting]
+	if version == "" || build == "" {
+		return nil, fmt.Errorf("xcodebuild did not report both %s and %s", marketingVersionSetting, currentProjectSetting)
+	}
+	return &VersionInfo{
+		Version:     version,
+		BuildNumber: build,
+		ProjectDir:  resolvedProjectDir(projectDir),
+		Target:      target,
+		Modern:      true,
+	}, nil
+}
+
 // SetVersion sets the marketing version and/or build number.
 func SetVersion(ctx context.Context, opts SetVersionOptions) (*SetVersionResult, error) {
 	if err := validateVersionMutationValue("--version", opts.Version); err != nil {
@@ -300,6 +298,9 @@ func SetVersion(ctx context.Context, opts SetVersionOptions) (*SetVersionResult,
 	err = fmt.Errorf("%w: selected Xcode configurations do not resolve both MARKETING_VERSION and CURRENT_PROJECT_VERSION", errStructuredVersionUnavailable)
 	if strings.TrimSpace(opts.Target) != "" || strings.TrimSpace(opts.Configuration) != "" {
 		return nil, fmt.Errorf("scoped edits require structured Xcode build settings: %w", err)
+	}
+	if project.xcproj != nil {
+		return nil, errXCProjAgvtoolUnsupported
 	}
 	return setVersionLegacy(ctx, opts)
 }
@@ -328,6 +329,9 @@ func ValidateSetVersion(ctx context.Context, opts SetVersionOptions) error {
 	structuredErr := fmt.Errorf("%w: selected Xcode configurations do not resolve both MARKETING_VERSION and CURRENT_PROJECT_VERSION", errStructuredVersionUnavailable)
 	if strings.TrimSpace(opts.Target) != "" || strings.TrimSpace(opts.Configuration) != "" {
 		return fmt.Errorf("scoped edits require structured Xcode build settings: %w", structuredErr)
+	}
+	if project.xcproj != nil {
+		return errXCProjAgvtoolUnsupported
 	}
 	return validateSetVersionLegacy(ctx)
 }
@@ -406,11 +410,15 @@ func BumpVersion(ctx context.Context, opts BumpVersionOptions) (*BumpVersionResu
 		}
 		result.ChangedFiles = updated.ChangedFiles
 		result.Changes = updated.Changes
+		result.ComputedWarnings = updated.ComputedWarnings
 		return result, nil
 	}
 	err = fmt.Errorf("%w: selected Xcode configurations do not resolve both MARKETING_VERSION and CURRENT_PROJECT_VERSION", errStructuredVersionUnavailable)
 	if strings.TrimSpace(opts.Target) != "" || strings.TrimSpace(opts.Configuration) != "" {
 		return nil, fmt.Errorf("scoped bumps require structured Xcode build settings: %w", err)
+	}
+	if project.xcproj != nil {
+		return nil, errXCProjAgvtoolUnsupported
 	}
 	return bumpVersionLegacy(ctx, opts)
 }
@@ -444,6 +452,9 @@ func ValidateBumpVersion(ctx context.Context, opts BumpVersionOptions) error {
 	structuredErr := fmt.Errorf("%w: selected Xcode configurations do not resolve both MARKETING_VERSION and CURRENT_PROJECT_VERSION", errStructuredVersionUnavailable)
 	if strings.TrimSpace(opts.Target) != "" || strings.TrimSpace(opts.Configuration) != "" {
 		return fmt.Errorf("scoped bumps require structured Xcode build settings: %w", structuredErr)
+	}
+	if project.xcproj != nil {
+		return errXCProjAgvtoolUnsupported
 	}
 	if err := validateSetVersionLegacy(ctx); err != nil {
 		return err

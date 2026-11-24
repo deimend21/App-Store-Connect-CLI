@@ -71,6 +71,16 @@ func TestExitCodeFromError(t *testing.T) {
 			expected: ExitAuth,
 		},
 		{
+			name:     "ASC_BEARER_TOKEN expiring mid-run returns auth failure",
+			err:      fmt.Errorf("failed to generate JWT: %w", asc.ErrBearerTokenExpired),
+			expected: ExitAuth,
+		},
+		{
+			name:     "ASC_BEARER_TOKEN_COMMAND failing mid-run returns auth failure",
+			err:      fmt.Errorf("failed to generate JWT: %w", fmt.Errorf("%w: helper exited with status 1", asc.ErrBearerTokenRenewal)),
+			expected: ExitAuth,
+		},
+		{
 			name:     "wrapped invalid Apple Account credentials return auth failure",
 			err:      fmt.Errorf("SRP login failed: %w", webcore.ErrInvalidAppleAccountCredentials),
 			expected: ExitAuth,
@@ -752,7 +762,7 @@ func TestScreenshotsUploadResumeMissingValueExitCode(t *testing.T) {
 	}
 
 	stderr := string(output)
-	if !strings.Contains(stderr, "flag needs an argument: -resume") {
+	if !strings.Contains(stderr, "flag needs an argument: --resume") {
 		t.Fatalf("expected missing resume value message, got %q", stderr)
 	}
 }
@@ -783,41 +793,6 @@ func TestBuildsTestNotesUpdateConflictingFlagsExitCode(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "--localization-id cannot be combined with build selectors or --locale") {
 		t.Fatalf("expected conflict message, got %q", stderr)
-	}
-}
-
-func TestRemovedBuildSelectorAliasesExitUsage(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		args []string
-		flag string
-	}{
-		{name: "builds wait --build", args: []string{"builds", "wait", "--build", "BUILD_123"}, flag: "--build"},
-		{name: "builds wait --newest", args: []string{"builds", "wait", "--app", "APP_123", "--newest"}, flag: "--newest"},
-		{name: "builds list --app-id", args: []string{"builds", "list", "--app-id", "APP_123"}, flag: "--app-id"},
-		{name: "builds test-notes view --id", args: []string{"builds", "test-notes", "view", "--id", "loc-1"}, flag: "--id"},
-		{name: "testflight groups view --group-id", args: []string{"testflight", "groups", "view", "--group-id", "group-1"}, flag: "--group-id"},
-		{name: "testflight testers list --build", args: []string{"testflight", "testers", "list", "--build", "BUILD_123"}, flag: "--build"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			resetReportFlags(t)
-
-			stdout, stderr := captureCommandOutput(t, func() {
-				if code := Run(test.args, "1.0.0"); code != ExitUsage {
-					t.Fatalf("Run() exit code = %d, want %d", code, ExitUsage)
-				}
-			})
-
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			if !strings.Contains(stderr, "Error: `"+test.flag+"` was removed in 5.0.0") {
-				t.Fatalf("expected removed-flag guidance for %s, got %q", test.flag, stderr)
-			}
-			if strings.Contains(stderr, "is deprecated") {
-				t.Fatalf("removed alias must not emit deprecation guidance, got %q", stderr)
-			}
-		})
 	}
 }
 
@@ -1146,7 +1121,65 @@ func TestAuthLoginInvalidPrivateKeyExitCodes(t *testing.T) {
 			if !strings.Contains(stderr.String(), "invalid private key") {
 				t.Fatalf("stderr = %q, want invalid private key diagnostic", stderr.String())
 			}
+			// The message names the key file problem; the command's usage page
+			// after it would only bury that.
+			if strings.Contains(stderr.String(), "USAGE") {
+				t.Fatalf("stderr = %q, want no usage page after the private key error", stderr.String())
+			}
 		})
+	}
+}
+
+func TestAuthLoginPermissiveKeyPrintsFixWithoutUsagePage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode permissions are not enforced on Windows")
+	}
+	tmpDir := t.TempDir()
+	binaryPath := buildASCBlackboxBinary(t)
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey() error: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey() error: %v", err)
+	}
+	keyPath := filepath.Join(tmpDir, "AuthKey_TEST.p8")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatalf("Chmod() error: %v", err)
+	}
+
+	runCmd := exec.Command(binaryPath, "auth", "login", "--name", "demo", "--key-id", "ABC123DEF4", "--issuer-id", "00000000-0000-0000-0000-000000000000",
+		"--private-key", keyPath, "--bypass-keychain", "--local", "--skip-validation")
+	runCmd.Env = isolatedCLITestEnv(filepath.Join(tmpDir, "config.json"))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	runCmd.Stdout = &stdout
+	runCmd.Stderr = &stderr
+
+	err = runCmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *exec.ExitError, got %T (%v); stderr=%q", err, err, stderr.String())
+	}
+	if exitErr.ExitCode() != ExitUsage {
+		t.Fatalf("exit code = %d, want %d; stderr=%q", exitErr.ExitCode(), ExitUsage, stderr.String())
+	}
+	got := stderr.String()
+	errorAt := strings.Index(got, "Error: auth login: invalid private key: private key file is too permissive")
+	fixAt := strings.Index(got, "To fix, run:\n  chmod 600 ")
+	if errorAt < 0 || fixAt < errorAt {
+		t.Fatalf("stderr = %q, want the error line first, then the chmod fix", got)
+	}
+	if strings.Contains(got, "USAGE") {
+		t.Fatalf("stderr = %q, want no usage page burying the fix", got)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
 }
 
@@ -1221,189 +1254,6 @@ func TestWebAuthLoginPromptInterruptDoesNotFallBackToUsageError(t *testing.T) {
 	stderr := output.String()
 	if strings.Contains(stderr, "password is required") {
 		t.Fatalf("expected no password-required fallback after interrupt, got %q", stderr)
-	}
-}
-
-func TestWebAuthLoginPromptInterruptSkipsSkillsAutoCheck(t *testing.T) {
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-
-	configPath := filepath.Join(tmpDir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"skills_checked_at":"2000-01-01T00:00:00Z"}`), 0o600); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-
-	scriptDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatalf("failed to create fake skills dir: %v", err)
-	}
-
-	markerPath := filepath.Join(tmpDir, "skills-check-ran")
-	scriptPath := filepath.Join(scriptDir, "skills")
-	// Marker paths are baked into the script: helper processes receive an
-	// allowlisted environment, so arbitrary test variables cannot reach them.
-	script := "#!/bin/sh\n" +
-		"printf 'ran' > '" + markerPath + "'\n" +
-		"sleep 2\n" +
-		"printf 'update available\\n'\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("failed to write fake skills command: %v", err)
-	}
-
-	runCmd := exec.Command(binaryPath, "web", "auth", "login", "--apple-id", "user@example.com")
-	env := append(
-		isolatedCLITestEnv(configPath),
-		"ASC_WEB_SESSION_CACHE=1",
-		"ASC_WEB_SESSION_CACHE_BACKEND=file",
-		"ASC_WEB_SESSION_CACHE_DIR="+filepath.Join(tmpDir, "web-session-cache"),
-		"ASC_SKILLS_AUTO_CHECK=1",
-		"CI=",
-		"PATH="+scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
-	runCmd.Env = env
-
-	ptmx, err := pty.Start(runCmd)
-	if err != nil {
-		t.Fatalf("failed to start PTY command: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
-
-	output, promptSeen, readDone := startPTYCapture(ptmx, "Apple Account password:")
-	expired := ptyTestDeadline(t)
-
-	select {
-	case <-promptSeen:
-	case readErr := <-readDone:
-		t.Fatalf("process exited before password prompt: %v\noutput:\n%s", readErr, output.String())
-	case <-expired:
-		t.Fatalf("password prompt did not appear before the test deadline\noutput:\n%s", output.String())
-	}
-
-	if _, err := ptmx.Write([]byte{3}); err != nil {
-		t.Fatalf("failed to send Ctrl+C to PTY: %v", err)
-	}
-
-	waitDone := make(chan error, 1)
-	go func() {
-		waitDone <- runCmd.Wait()
-	}()
-
-	select {
-	case err = <-waitDone:
-	case <-expired:
-		t.Fatalf("process did not exit after interrupt before the test deadline\noutput:\n%s", output.String())
-	}
-
-	if err == nil {
-		t.Fatalf("expected non-zero exit after interrupt\noutput:\n%s", output.String())
-	}
-
-	select {
-	case <-readDone:
-	case <-expired:
-		t.Fatalf("PTY reader did not exit after process completion\noutput:\n%s", output.String())
-	}
-
-	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
-		if statErr == nil {
-			t.Fatalf("expected skills auto-check to be skipped after interrupt\noutput:\n%s", output.String())
-		}
-		t.Fatalf("failed to stat skills marker: %v", statErr)
-	}
-
-	if strings.Contains(output.String(), "skills updates may be available") {
-		t.Fatalf("expected no skills update notice after interrupt, got %q", output.String())
-	}
-}
-
-func TestSkillsAutoCheckIsDisabledEvenWhenEnvironmentOptsIn(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("PTY timing regression requires a Unix shell")
-	}
-
-	tmpDir := t.TempDir()
-	binaryPath := buildASCBlackboxBinary(t)
-	configPath := filepath.Join(tmpDir, "config.json")
-	if err := os.WriteFile(configPath, []byte(`{"skills_checked_at":"2000-01-01T00:00:00Z"}`), 0o600); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-
-	scriptDir := filepath.Join(tmpDir, "bin")
-	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatalf("failed to create fake skills dir: %v", err)
-	}
-	markerPath := filepath.Join(tmpDir, "skills-check-ran")
-	sleepPIDPath := filepath.Join(tmpDir, "skills-check-sleep-pid")
-	t.Cleanup(func() {
-		pidBytes, err := os.ReadFile(sleepPIDPath)
-		if err != nil {
-			return
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
-		if err != nil {
-			return
-		}
-		if process, err := os.FindProcess(pid); err == nil {
-			_ = process.Kill()
-		}
-	})
-	scriptPath := filepath.Join(scriptDir, "skills")
-	// Marker paths are baked into the script: helper processes receive an
-	// allowlisted environment, so arbitrary test variables cannot reach them.
-	script := "#!/bin/sh\n" +
-		"printf 'ran' > '" + markerPath + "'\n" +
-		"sleep 10 &\n" +
-		"printf '%s' \"$!\" > '" + sleepPIDPath + "'\n" +
-		"printf '2 updates available\\n'\n"
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("failed to write fake skills command: %v", err)
-	}
-
-	runCmd := exec.Command(binaryPath, "completion", "--shell", "bash")
-	runCmd.Env = append(
-		isolatedCLITestEnv(configPath),
-		"ASC_SKILLS_AUTO_CHECK=1",
-		"CI=",
-		"PATH="+scriptDir+string(os.PathListSeparator)+os.Getenv("PATH"),
-	)
-
-	ptmx, err := pty.Start(runCmd)
-	if err != nil {
-		t.Fatalf("failed to start PTY command: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
-	output, _, readDone := startPTYCapture(ptmx, "")
-	expired := ptyTestDeadline(t)
-
-	waitDone := make(chan error, 1)
-	go func() {
-		waitDone <- runCmd.Wait()
-	}()
-
-	select {
-	case err = <-waitDone:
-	case <-expired:
-		_ = runCmd.Process.Kill()
-		_ = ptmx.Close()
-		<-waitDone
-		t.Fatalf("foreground command did not exit before the test deadline\noutput:\n%s", output.String())
-	}
-	if err != nil {
-		t.Fatalf("foreground command failed: %v\noutput:\n%s", err, output.String())
-	}
-
-	select {
-	case <-readDone:
-	case <-expired:
-		t.Fatalf("PTY stayed open after foreground exit\noutput:\n%s", output.String())
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	if _, statErr := os.Stat(markerPath); !os.IsNotExist(statErr) {
-		t.Fatalf("automatic skills checker ran despite being disabled: %v", statErr)
-	}
-	if _, statErr := os.Stat(sleepPIDPath); !os.IsNotExist(statErr) {
-		t.Fatalf("automatic skills checker spawned a descendant despite being disabled: %v", statErr)
 	}
 }
 

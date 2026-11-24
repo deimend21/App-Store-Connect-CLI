@@ -3,6 +3,7 @@ package testflight
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"strings"
 
@@ -16,12 +17,23 @@ var errBetaTesterNotFound = errors.New("beta tester not found")
 // helper into a usage error so the command exits 2, preserving both the
 // diagnostic the helper attached and the command-path rewrites the command
 // tree installed on ctx.
-func usageErrorFromValidation(ctx context.Context, format string, err error) error {
-	usageErr := shared.UsageErrorfCtx(ctx, format, err)
+func usageErrorFromValidation(ctx context.Context, d *shared.Deps, format string, err error) error {
+	usageErr := d.UsageErrorfCtx(ctx, format, err)
 	if diagnostic, ok := shared.DiagnosticFromError(err); ok {
 		return shared.WithDiagnostic(usageErr, diagnostic.Code, diagnostic.Parameter)
 	}
 	return usageErr
+}
+
+// parseCreateRelationshipIDs reads a create command's relationship flag. A
+// provided flag with no IDs is a usage error, so it is never dropped silently.
+func parseCreateRelationshipIDs(d *shared.Deps, value *shared.OnceCSVValue, flagName string) ([]string, error) {
+	ids := shared.SplitUniqueCSV(value.String())
+	if value.Provided() && len(ids) == 0 {
+		fmt.Fprintf(d.IO.ErrOut, "Error: %s must include at least one ID\n", flagName)
+		return nil, shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, flagName)
+	}
+	return ids, nil
 }
 
 func resolveBetaGroupID(ctx context.Context, client *asc.Client, appID, group string) (string, error) {
@@ -44,12 +56,12 @@ func resolveBetaGroupIDs(ctx context.Context, client *asc.Client, appID, rawGrou
 		return nil, fmt.Errorf("beta group name is required")
 	}
 
-	groups, err := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
+	groups, err := client.GetBetaGroups(ctx, appID, asc.Limit[asc.BetaGroupsOption](200))
 	if err != nil {
 		return nil, err
 	}
 	for groups.Links.Next != "" {
-		page, err := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsNextURL(groups.Links.Next))
+		page, err := client.GetBetaGroups(ctx, appID, asc.NextURL[asc.BetaGroupsOption](groups.Links.Next))
 		if err != nil {
 			return nil, err
 		}
@@ -94,15 +106,9 @@ func matchBetaGroupID(groups *asc.BetaGroupsResponse, group string) (string, err
 		}
 	}
 
-	matches := make([]shared.AmbiguousCandidate, 0, 1)
-	for _, item := range groups.Data {
-		if strings.EqualFold(strings.TrimSpace(item.Attributes.Name), group) {
-			kind := "external"
-			if item.Attributes.IsInternalGroup {
-				kind = "internal"
-			}
-			matches = append(matches, shared.AmbiguousCandidate{ID: strings.TrimSpace(item.ID), Label: strings.TrimSpace(item.Attributes.Name), Extra: kind})
-		}
+	matches := betaGroupNameMatches(groups, group, strings.TrimSpace)
+	if len(matches) == 0 {
+		matches = betaGroupNameMatches(groups, group, shared.NormalizeBetaGroupName)
 	}
 
 	switch len(matches) {
@@ -113,6 +119,21 @@ func matchBetaGroupID(groups *asc.BetaGroupsResponse, group string) (string, err
 	default:
 		return "", shared.AmbiguousError("beta group", "--group", group, matches)
 	}
+}
+
+func betaGroupNameMatches(groups *asc.BetaGroupsResponse, group string, normalize func(string) string) []shared.AmbiguousCandidate {
+	name := normalize(group)
+	matches := make([]shared.AmbiguousCandidate, 0, 1)
+	for _, item := range groups.Data {
+		if strings.EqualFold(normalize(item.Attributes.Name), name) {
+			kind := "external"
+			if item.Attributes.IsInternalGroup {
+				kind = "internal"
+			}
+			matches = append(matches, shared.AmbiguousCandidate{ID: strings.TrimSpace(item.ID), Label: strings.TrimSpace(item.Attributes.Name), Extra: kind})
+		}
+	}
+	return matches
 }
 
 func findBetaTesterIDByEmail(ctx context.Context, client *asc.Client, appID, email string) (string, error) {

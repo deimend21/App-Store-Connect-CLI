@@ -7,6 +7,8 @@ import (
 	"os"
 	"path"
 	"strings"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type distributionRunLeaseContextKey struct{}
@@ -54,20 +56,6 @@ type distributionVerifyLease interface {
 	Close() error
 }
 
-type noopDistributionVerifyLease struct{}
-
-func (noopDistributionVerifyLease) PinSubtrees(...string) error { return nil }
-func (noopDistributionVerifyLease) Verify() error               { return nil }
-func (noopDistributionVerifyLease) Close() error                { return nil }
-
-func acquireDistributionRunPathLease(stateDir, runID string) (func() error, func() error, error) {
-	lease, err := openDistributionRunPathLease(stateDir, runID)
-	if err != nil {
-		return nil, nil, err
-	}
-	return lease.verify, lease.close, nil
-}
-
 func openDistributionRunPathLease(stateDir, runID string) (*distributionRunPathLease, error) {
 	if !distributionRunIDPattern.MatchString(runID) {
 		return nil, fmt.Errorf("invalid distribution run identifier")
@@ -89,12 +77,12 @@ func openDistributionRunPathLease(stateDir, runID string) (*distributionRunPathL
 	return lease, nil
 }
 
-func acquireDistributionRunLease(ctx context.Context, stateDir, runID string) (func() error, func() error, error) {
+func acquireDistributionRunLease(ctx context.Context, d *shared.Deps, stateDir, runID string) (func() error, func() error, error) {
 	lease, err := openDistributionRunPathLease(stateDir, runID)
 	if err != nil {
 		return nil, nil, err
 	}
-	verifyLock, releaseLock, err := acquireDistributionRunLockLease(ctx, stateDir, runID)
+	verifyLock, releaseLock, err := acquireDistributionRunLockLease(ctx, d, stateDir, runID)
 	if err != nil {
 		_ = lease.close()
 		return nil, nil, err

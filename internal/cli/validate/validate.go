@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 type validateOptions struct {
@@ -31,25 +31,24 @@ type validateOptions struct {
 }
 
 var (
-	clientFactory          = shared.GetASCClient
 	fetchScreenshotSetsFn  = fetchScreenshotSets
-	buildReadinessReportFn = BuildReadinessReport
+	buildReadinessReportFn = BuildReadinessReportWith
 )
 
-// ValidateCommand returns the asc validate command.
-func ValidateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("validate", flag.ExitOnError)
+// NewValidateCommand returns the asc validate command built on d.
+func NewValidateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("validate", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
 	platform := fs.String("platform", "", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
 	strict := fs.Bool("strict", false, "Treat warnings as errors (exit non-zero)")
-	deep := fs.Bool("deep", false, "Verify blockers that require a cached Apple web session")
+	deep := fs.Bool("deep", false, "Verify IAP attachment through the public API and blockers through a cached Apple web session")
 	checkURLs := fs.Bool("check-urls", false, "Check metadata URL destinations with bounded public HTTP requests")
 	appleID := fs.String("apple-id", "", "Cached Apple web session to use with --deep")
-	ipaPath := fs.String("ipa", "", "Path to the version's .ipa; its UIDeviceFamily decides whether iPad screenshots are required")
-	output := shared.BindOutputFlags(fs)
+	ipaPath := fs.String("ipa", "", "Path to the version's .ipa; its UIDeviceFamily decides whether iPad screenshots are required, and its DTSDKName proves the SDK")
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "validate",
@@ -69,6 +68,8 @@ reported.
 Checks:
   - Metadata length limits
   - Placeholder copy in localized listing fields (warning; --strict to block)
+  - Other-platform and test/debug wording in listing fields (warning; --strict to block)
+  - Unfinished-feature wording in listing fields and stale copyright year ranges (info)
   - Deterministic metadata content and keyword hygiene warnings
   - Optional bounded checks for public metadata URL destinations (--check-urls)
   - Required fields and localizations
@@ -76,15 +77,21 @@ Checks:
   - Primary category configured
   - Build attached and processed
   - Build encryption declaration readiness
+  - Attached build against the upload requirement Apple announced for April 2027
   - App content rights declaration
   - Pricing schedule, base territory price (Free counts), and territory availability
   - Screenshot presence and size compatibility
+  - Screenshot, app preview, and asset library placement delivery per locale
   - Required iPad screenshots for builds that run on iPad (--ipa)
   - Subscription review readiness and promotional image guidance
+  - Custom product page search keywords missing from this version's keywords
   - Age rating completeness
 
 Deep validation:
-  --deep adds read-only checks from an existing cached Apple web session for
+  --deep verifies first-of-type consumable, non-consumable, and non-renewing
+  IAP attachment to the selected app version through the public API. Missing
+  required attachment blocks; incomplete evidence remains unverified. It also
+  adds read-only checks from an existing cached Apple web session for
   App Privacy publication, required agreements, and first-of-type subscription
   attachment. It also classifies every actionable finding as api-fixable,
   web-fixable, or manual and returns exact available commands and App Store
@@ -129,42 +136,47 @@ In-App Purchases:
 Subscriptions:
   asc validate subscriptions --app "APP_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			ValidateTestFlightCommand(),
-			ValidateIAPCommand(),
-			ValidateSubscriptionsCommand(),
+			newValidateTestFlightCommand(d),
+			newValidateIAPCommand(d),
+			newValidateSubscriptionsCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			if len(args) > 0 {
-				fmt.Fprintf(os.Stderr, "Error: unknown subcommand %q\n\n", args[0])
+				fmt.Fprintf(d.IO.ErrOut, "Error: unknown subcommand %q\n\n", args[0])
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "")
 			}
 			trimmedVersion := strings.TrimSpace(*version)
 			trimmedVersionID := strings.TrimSpace(*versionID)
 			if trimmedVersion != "" && trimmedVersionID != "" {
-				return shared.WithDiagnostic(shared.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "--version-id")
+				return shared.WithDiagnostic(d.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "--version-id")
 			}
 			trimmedAppleID := strings.TrimSpace(*appleID)
 			if trimmedAppleID != "" && !*deep {
-				return shared.WithDiagnostic(shared.UsageError("--apple-id requires --deep"), shared.DiagnosticInvalidInput, "--apple-id")
+				return shared.WithDiagnostic(d.UsageError("--apple-id requires --deep"), shared.DiagnosticInvalidInput, "--apple-id")
+			}
+			if *deep {
+				if _, _, err := webcore.BrokerFromEnv(); err != nil {
+					return d.UsageError(err.Error())
+				}
 			}
 
-			resolvedAppID := shared.ResolveAppID(*appID)
+			resolvedAppID := d.ResolveAppID(*appID)
 			if resolvedAppID == "" {
-				return shared.WithDiagnostic(shared.UsageError("--app is required (or set ASC_APP_ID)"), shared.DiagnosticRequiredInputMissing, "--app")
+				return shared.WithDiagnostic(d.UsageError("--app is required (or set ASC_APP_ID)"), shared.DiagnosticRequiredInputMissing, "--app")
 			}
 
 			var normalizedPlatform string
 			if strings.TrimSpace(*platform) != "" {
 				value, err := shared.NormalizeAppStoreVersionPlatform(*platform)
 				if err != nil {
-					return shared.WithDiagnostic(fmt.Errorf("validate: %w", err), shared.DiagnosticInvalidInput, "--platform")
+					return shared.WithDiagnostic(d.UsageErrorf("validate: %v", err), shared.DiagnosticInvalidInput, "--platform")
 				}
 				normalizedPlatform = value
 			}
 
-			return runValidate(ctx, validateOptions{
+			return runValidate(ctx, d, validateOptions{
 				AppID:     resolvedAppID,
 				Version:   trimmedVersion,
 				VersionID: trimmedVersionID,
@@ -181,7 +193,8 @@ Subscriptions:
 	}
 }
 
-func runValidate(ctx context.Context, opts validateOptions) error {
+func runValidate(ctx context.Context, d *shared.Deps, opts validateOptions) error {
+	ctx = withReadinessRequestTimeout(ctx, d.Timeout)
 	var localIPA *LocalIPA
 	if opts.IPAPath != "" {
 		loaded, loadErr := loadLocalIPA(opts.IPAPath)
@@ -194,12 +207,12 @@ func runValidate(ctx context.Context, opts validateOptions) error {
 	var report validation.Report
 	var err error
 	if strings.TrimSpace(opts.Version) == "" && strings.TrimSpace(opts.VersionID) == "" {
-		client, clientErr := clientFactory()
+		client, clientErr := d.Client()
 		if clientErr != nil {
 			err = clientErr
 		} else {
-			resolveCtx, cancel := shared.ContextWithTimeout(ctx)
-			resolved, resolveErr := shared.ResolveAndAnnounceDefaultAppStoreVersion(resolveCtx, client, opts.AppID, opts.Platform, "--version")
+			resolveCtx, cancel := d.Timeout(ctx)
+			resolved, resolveErr := d.ResolveAndAnnounceDefaultAppStoreVersion(resolveCtx, client, opts.AppID, opts.Platform, "--version")
 			cancel()
 			if resolveErr != nil {
 				err = resolveErr
@@ -211,7 +224,7 @@ func runValidate(ctx context.Context, opts validateOptions) error {
 		}
 	}
 	if err == nil {
-		report, err = buildReadinessReportFn(ctx, ReadinessOptions{
+		report, err = buildReadinessReportFn(ctx, d, ReadinessOptions{
 			AppID:     opts.AppID,
 			Version:   opts.Version,
 			VersionID: opts.VersionID,
@@ -223,7 +236,7 @@ func runValidate(ctx context.Context, opts validateOptions) error {
 		})
 		if ambiguous, ok := errors.AsType[*shared.AmbiguousSelectionError](err); ok {
 			message := "validate: " + err.Error()
-			fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+			fmt.Fprintf(d.IO.ErrOut, "Error: %s\n", message)
 			reported := shared.WithDiagnostic(shared.NewReportedUsageError(shared.UsageErrorInvalidValue, message), shared.DiagnosticInvalidInput, ambiguous.Flag)
 			return shared.NewErrorWithCause(reported, err)
 		}
@@ -235,14 +248,14 @@ func runValidate(ctx context.Context, opts validateOptions) error {
 		report = requiredAgreementFallbackReport(opts)
 	}
 	if opts.Deep {
-		deep, findings, deepErr := collectDeepValidation(ctx, report, opts.AppleID)
+		deep, findings, deepErr := collectDeepValidation(ctx, d, report, opts.AppleID)
 		if deepErr != nil {
 			return fmt.Errorf("validate: deep validation: %w", deepErr)
 		}
 		report = validation.ApplyDeepValidation(report, deep, findings)
 	}
 
-	if err := shared.PrintOutput(&report, opts.Output, opts.Pretty); err != nil {
+	if err := d.PrintOutput(&report, opts.Output, opts.Pretty); err != nil {
 		return err
 	}
 
@@ -285,7 +298,7 @@ func requiredAgreementFallbackReport(opts validateOptions) validation.Report {
 			ResourceID:   strings.TrimSpace(opts.VersionID),
 		},
 	}
-	return validation.Report{
+	report := validation.Report{
 		AppID:         strings.TrimSpace(opts.AppID),
 		VersionID:     strings.TrimSpace(opts.VersionID),
 		VersionString: strings.TrimSpace(opts.Version),
@@ -295,12 +308,14 @@ func requiredAgreementFallbackReport(opts validateOptions) validation.Report {
 		Checks:        checks,
 		Strict:        opts.Strict,
 	}
+	iapCheck, iapFinding := collectIAPAttachmentDeepCheck(context.Background(), nil, report, nil, "First-of-type IAP attachment could not be verified because required agreements block public API access")
+	return validation.ApplyDeepValidation(report, validation.DeepReport{Checks: []validation.DeepCheck{iapCheck}}, []validation.CheckResult{*iapFinding})
 }
 
 func resolveVersionID(ctx context.Context, client *asc.Client, appID, version, platform string) (string, error) {
 	opts := []asc.AppStoreVersionsOption{
 		asc.WithAppStoreVersionsVersionStrings([]string{version}),
-		asc.WithAppStoreVersionsLimit(20),
+		asc.Limit[asc.AppStoreVersionsOption](20),
 	}
 	if strings.TrimSpace(platform) != "" {
 		opts = append(opts, asc.WithAppStoreVersionsPlatforms([]string{platform}))
@@ -396,11 +411,14 @@ func fetchScreenshotSets(ctx context.Context, client *asc.Client, localizations 
 					width = shot.Attributes.ImageAsset.Width
 					height = shot.Attributes.ImageAsset.Height
 				}
+				deliveryState, deliveryErrors := screenshotDeliveryState(shot.Attributes.AssetDeliveryState)
 				screenshots = append(screenshots, validation.Screenshot{
-					ID:       shot.ID,
-					FileName: shot.Attributes.FileName,
-					Width:    width,
-					Height:   height,
+					ID:             shot.ID,
+					FileName:       shot.Attributes.FileName,
+					Width:          width,
+					Height:         height,
+					DeliveryState:  deliveryState,
+					DeliveryErrors: deliveryErrors,
 				})
 			}
 			sort.SliceStable(screenshots, func(i, j int) bool {
@@ -452,7 +470,7 @@ func fetchAllScreenshotSetsForValidation(ctx context.Context, client *asc.Client
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		return doReadinessRequest(ctx, func(requestCtx context.Context) (asc.PaginatedResponse, error) {
-			return client.GetAppScreenshotSets(requestCtx, "", asc.WithAppScreenshotSetsNextURL(nextURL))
+			return client.GetAppScreenshotSets(requestCtx, "", asc.NextURL[asc.AppScreenshotSetsOption](nextURL))
 		})
 	})
 	if err != nil {
@@ -476,7 +494,7 @@ func fetchAllScreenshotsForValidation(ctx context.Context, client *asc.Client, s
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		return doReadinessRequest(ctx, func(requestCtx context.Context) (asc.PaginatedResponse, error) {
-			return client.GetAppScreenshots(requestCtx, "", asc.WithAppScreenshotsNextURL(nextURL))
+			return client.GetAppScreenshots(requestCtx, "", asc.NextURL[asc.AppScreenshotsOption](nextURL))
 		})
 	})
 	if err != nil {

@@ -15,10 +15,18 @@
 A fast, lightweight, and scriptable CLI for the App Store Connect API.
 Automate iOS, macOS, tvOS, and visionOS release workflows from your terminal, IDE, or CI/CD pipeline.
 
+<p align="center">
+  <a href="https://rork.com/">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/rork-logo-dark.svg">
+      <img src="docs/images/rork-logo.svg" alt="Rork" width="120">
+    </picture>
+  </a>
+</p>
+
 ## Table of Contents
 
 - [asc skills](#asc-skills)
-- [Sponsors](#sponsors)
 - [Quick Start](#quick-start)
 - [Troubleshooting](#troubleshooting)
 - [Privacy and telemetry](#privacy-and-telemetry)
@@ -27,6 +35,7 @@ Automate iOS, macOS, tvOS, and visionOS release workflows from your terminal, ID
 - [Common Workflows](#common-workflows)
 - [Commands and Reference](#commands-and-reference)
 - [Documentation](#documentation)
+- [Acknowledgements](#acknowledgements)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -41,20 +50,9 @@ Install them globally so they are available across projects:
 asc install-skills
 ```
 
-`asc install-skills` checks out reviewed commit
-`f52c4f04323bb2dfb21ca8be82e6494e9cd0b4d8` and copies its 25 skills directly
-into the standard global agent-skills directory. It verifies the complete pack
-and every installed file before succeeding, preserves unrelated skills and
-unrelated lock entries, and pins the 25 ASC lock entries to the same reviewed
-commit so external checks cannot update them from a mutable branch. It rolls
-back the pack if any replacement fails. Only
-`git` is required; the command does not execute Node.js, `npx`, an npm package,
-or repository scripts.
-
-```bash
-git --version
-asc install-skills
-```
+The command installs the 25 skills from pinned, reviewed commit
+`f52c4f04323bb2dfb21ca8be82e6494e9cd0b4d8` and requires only `git`; it runs no Node.js, `npx`, npm package, or repository script. See
+[Agent skills](website/src/content/docs/installation.mdx#agent-skills) for what it verifies and changes.
 
 ## Quick Start
 
@@ -85,9 +83,21 @@ winget install --id Rorkai.ASC --exact
 
 The WinGet package is tracked in
 [GitHub Discussion #1552](https://github.com/rorkai/App-Store-Connect-CLI/discussions/1552).
-Until it appears in `winget search asc`, Windows users can download the signed
+Until it appears in `winget search asc`, Windows users can download the
 release binaries directly from the
 [GitHub releases page](https://github.com/rorkai/App-Store-Connect-CLI/releases/latest).
+
+With Nix:
+
+```bash
+# Run without installing
+nix run github:rorkai/App-Store-Connect-CLI -- --version
+
+# Install into your profile
+nix profile install github:rorkai/App-Store-Connect-CLI
+```
+
+The flake builds the latest source on `main`.
 
 For source builds and contributor setup, see [CONTRIBUTING.md](CONTRIBUTING.md).
 Released binaries are self-contained and do not require a Go installation;
@@ -118,6 +128,8 @@ asc auth login \
 
 Generate API keys at:
 https://appstoreconnect.apple.com/access/integrations/api
+
+If a service holds the private key and signs App Store Connect tokens for you, set `ASC_BEARER_TOKEN` to such a token instead of configuring a key; `asc` sends it until it expires (Apple's maximum is 20 minutes). For longer runs, set `ASC_BEARER_TOKEN_COMMAND` to a command that prints a new token, and `asc` renews the token before it expires. See [Authentication](https://docs.asccli.sh/authentication#option-4-a-token-signed-elsewhere).
 
 If you are running in CI, a headless shell, or a machine where keychain access is not available, use config-backed auth instead:
 
@@ -200,10 +212,8 @@ available migration path and the command's long-term replacement.
 
 ### Output
 
-- `asc` defaults to `table` in an interactive terminal and `json` in pipes, files, and CI
 - Use an explicit format when scripting or sharing repro steps: `--output json`, `--output table`, or `--output markdown`
-- Use `--pretty` with JSON when you want readable output in terminals or bug reports
-- Set a personal default with `ASC_DEFAULT_OUTPUT`, but remember `--output` always wins
+- Add `--pretty` to JSON output for bug reports
 
 ## Privacy and telemetry
 
@@ -216,10 +226,13 @@ or machine identifier.
 Telemetry includes the CLI version, operating system and architecture,
 registered command path, duration, runtime context, invocation source, a
 bounded outcome class, and the HTTP status when an API request fails. It may
-include a sanitized public flag name. It does **not** include raw arguments,
-stderr, error messages, flag values, response bodies, credentials, private
-keys, Apple account, team, or issuer IDs, app or bundle IDs, usernames,
-hostnames, repository names, or file paths.
+include a sanitized public flag name. For `asc api`, it also includes the HTTP
+method, the request path with every identifier replaced by `{id}` (or `other`
+when the path is not in the CLI's embedded API schema), and the names of the
+query parameters; never their values, identifiers, headers, or bodies. It does
+**not** include raw arguments, stderr, error messages, flag values, response
+bodies, credentials, private keys, Apple account, team, or issuer IDs, app or
+bundle IDs, usernames, hostnames, repository names, or file paths.
 
 Review or change telemetry at any time:
 
@@ -230,7 +243,7 @@ asc telemetry reset-id
 ```
 
 `ASC_TELEMETRY_DISABLED=1` and `DO_NOT_TRACK=1` also disable telemetry. See the
-[telemetry reference](commands/telemetry.mdx) for the exact event payload,
+[telemetry reference](website/src/content/docs/commands/telemetry.mdx) for the exact event payload,
 runtime handling, collector endpoint, and all controls.
 
 ## Support
@@ -305,42 +318,28 @@ asc submit status --version-id "VERSION_ID"
 asc submit cancel --version-id "VERSION_ID" --confirm
 ```
 
-Readiness validation also warns when localized app names, subtitles,
-descriptions, keywords, promotional text, or What's New copy still contains an
-unmistakable template marker such as `Lorem ipsum`, `TODO`, `TBD`, or `FIXME`.
-`Lorem ipsum` matches in any letter case. `TODO`, `TBD`, and `FIXME` match only
-in uppercase because their lowercase spellings can be ordinary product wording.
-The warning includes the locale, field, matched text, resource ID, and a
-remediation step. It is advisory by default and becomes blocking only with
-`--strict`:
+`asc validate` also flags placeholder text, other-platform and test-build
+wording, and outdated copyright ranges in localized metadata. Warnings are
+advisory unless you pass `--strict`:
 
 ```bash
 asc validate --app "123456789" --version "1.2.3" --output json
 asc validate --app "123456789" --version "1.2.3" --strict
 ```
 
-Add the `--deep` mode when a release needs checks that Apple
-exposes only through its signed-in web app:
+Add `--deep` for the checks Apple exposes only through its signed-in web app
+(App Privacy publication, agreements, and first-subscription attachment). It
+reuses a cached web session and never prompts; a check it cannot verify reports
+`unverified`, which fails only with `--strict`:
 
 ```bash
 asc web auth login --apple-id "user@example.com"
 asc validate --app "123456789" --version "1.2.3" --deep
 ```
 
-Deep validation reuses the file-backed cache without opening a login, Keychain,
-password, or 2FA prompt. It checks App Privacy publication, relevant agreements,
-and the first auto-renewable subscription attachment; availability and required
-App Review fields still come from the public API. Paid-agreement relevance also
-uses the app's current public price so an upfront-paid app isn't mistaken for a
-free one. The private Apple endpoints can change without notice, so an
-unavailable or changed response is `unverified`, not a false blocker. Add
-`--strict` if CI must fail when a requested deep check can't be verified.
-
-This lint intentionally does not judge platform names, roadmap language, or
-beta/demo wording because those phrases can be legitimate product copy and
-cannot be classified reliably offline. It also leaves shorter Lorem Ipsum
-product wording and ordinary localized `TODO` copy without marker punctuation
-unflagged; only template-like residue is reported.
+macOS release builds support USB security keys for web login with
+`--two-factor-method security-key`; see [Security key login](website/src/content/docs/commands/web.mdx#security-key-login).
+See [commands/validate.mdx](website/src/content/docs/commands/validate.mdx) for every check and finding ID.
 
 ### Review status and blockers
 
@@ -419,7 +418,7 @@ device/profile changes. `signing run` provides a temporary macOS keychain only
 for single-target archives. Multi-target exports must import the identity into
 a job-scoped keychain and install every reconciled profile for the job-exclusive
 macOS user. See the
-[signing guide](guides/code-signing.mdx) for setup, CI, rotation, security
+[signing guide](website/src/content/docs/guides/code-signing.mdx) for setup, CI, rotation, security
 boundaries, and troubleshooting.
 
 ### Workflow automation
@@ -443,19 +442,14 @@ See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for local compile validation with
 `asc xcode build` and a copyable `.asc/deployment.json`, `.asc/workflow.json`,
 and `ExportOptions.plist` that use `asc builds next-build-number`,
 `asc xcode inject`, `asc xcode archive`, `asc xcode export --timeout 10m`, and
-`asc publish testflight --group ... --wait`.
-Add `--submit --confirm` when
+`asc publish testflight --group ... --wait`. Add `--submit --confirm` when
 distributing to an external TestFlight group that needs beta app review submission.
-
-The `asc xcode test` command provides local unit/UI test execution
-with structured results and preserved `.xcresult` bundles; see the same workflow
-guide for an invocation.
+`asc xcode test` runs unit and UI tests with structured results and keeps the
+`.xcresult` bundles; the same guide has an invocation.
 
 ```bash
-asc workflow validate --output json
 asc xcode inject --manifest .asc/deployment.json --set version=1.2.3 --set build_number=42 --dry-run --output json
 asc xcode build --project App.xcodeproj --scheme App --destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=27.0' --no-code-signing --output json
-asc workflow run --dry-run testflight_beta VERSION:1.2.3
 asc workflow run testflight_beta VERSION:1.2.3
 ```
 
@@ -485,7 +479,7 @@ asc ads campaigns find --ad-account "987654" --file query.json --output json
 asc ads reports apps campaigns --ad-account "987654" --file report.json --output json
 ```
 
-See [guides/apple-ads-playbooks.mdx](guides/apple-ads-playbooks.mdx) for
+See [guides/apple-ads-playbooks.mdx](website/src/content/docs/guides/apple-ads-playbooks.mdx) for
 operator playbooks covering credential safety, org inspection, read-only smoke
 tests, reporting, raw API usage, and guarded mutations.
 
@@ -524,21 +518,18 @@ asc <command> <subcommand> --help
 Reference hierarchy:
 
 - `asc --help`: authoritative command and flag surface
-- `docs/COMMANDS.md`: generated top-level taxonomy map
+- [docs/COMMANDS.md](docs/COMMANDS.md): generated top-level taxonomy map
 - `asc docs show workflows`: curated workflow recipes
 - `asc docs show reference`: repo-local quick reference template used by `asc init`
-
-For full command families, flags, and discovery patterns, see:
-- [docs/COMMANDS.md](docs/COMMANDS.md)
 
 ## Documentation
 
 - [docs/CI_CD.md](docs/CI_CD.md) - CI/CD integration guides (GitHub Actions, GitLab, Bitrise, CircleCI)
-- [commands/signing.mdx](commands/signing.mdx) - signing identities, encrypted sync, CI, and release-testing profiles
+- [commands/signing.mdx](website/src/content/docs/commands/signing.mdx) - signing identities, encrypted sync, CI, and release-testing profiles
 - [docs/COMMANDS.md](docs/COMMANDS.md) - Command families and reference navigation
-- [docs/PARITY.md](docs/PARITY.md) - Remaining parity areas and intentional non-goals
 - [docs/WORKFLOWS.md](docs/WORKFLOWS.md) - Reusable workflow patterns, including local Xcode to TestFlight
-- [guides/apple-ads-playbooks.mdx](guides/apple-ads-playbooks.mdx) - Apple Ads operator playbooks
+- [docs/linux-ios.md](docs/linux-ios.md) - Portable Linux iOS builds and IPA packaging with xtool and rcodesign
+- [guides/apple-ads-playbooks.mdx](website/src/content/docs/guides/apple-ads-playbooks.mdx) - Apple Ads operator playbooks
 - [docs/architecture/storekit-retention-messaging.md](docs/architecture/storekit-retention-messaging.md) - Retention Messaging setup and sandbox verification
 - [docs/API_NOTES.md](docs/API_NOTES.md) - API quirks and behaviors
 - [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) - CLI development and testing notes
@@ -558,10 +549,6 @@ The keyword difficulty methodology used by `asc optimize keywords score` is adap
 GitHub: https://github.com/semihcihan/App-Store-Optimization-CLI
 
 ## Contributing
-
-For portable Linux iOS builds and local IPA packaging with xtool and rcodesign,
-see [the Linux iOS workflow](docs/linux-ios.md). Native simulator execution still
-requires a Mac host; existing Xcode archive/export helpers retain their contracts.
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 

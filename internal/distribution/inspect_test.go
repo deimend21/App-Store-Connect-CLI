@@ -23,6 +23,8 @@ import (
 
 	"go.mozilla.org/pkcs7"
 	"howett.net/plist"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/deviceset"
 )
 
 func TestInspectIPAAdHocOmitsDevicesByDefault(t *testing.T) {
@@ -153,8 +155,8 @@ func TestInspectIPAValidatesApplicationIdentifierPrefixDeclaration(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "application identifier prefix") {
-				t.Fatalf("InspectIPA() error = %v, want prefix declaration rejection", err)
+			if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "application identifier prefix") {
+				t.Fatalf("InspectIPAContext() error = %v, want prefix declaration rejection", err)
 			}
 		})
 	}
@@ -182,7 +184,7 @@ func TestInspectIPARejectsUnsafeAndAmbiguousArchives(t *testing.T) {
 			}
 			defer file.Close()
 			info, _ := file.Stat()
-			if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil {
+			if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil {
 				t.Fatal("expected inspection error")
 			}
 		})
@@ -258,8 +260,8 @@ func TestInspectIPAAcceptsExplicitDirectoriesAndSimilarlyPrefixedSiblings(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err != nil {
-		t.Fatalf("InspectIPA() error = %v, want valid explicit directories and sibling", err)
+	if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err != nil {
+		t.Fatalf("InspectIPAContext() error = %v, want valid explicit directories and sibling", err)
 	}
 }
 
@@ -487,8 +489,8 @@ func TestInspectIPARejectsArchiveWideDeclaredExpansionFromCompressedNonMainMembe
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "declared expansion") {
-				t.Fatalf("InspectIPA() error = %v, want archive-wide declared expansion rejection", err)
+			if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "declared expansion") {
+				t.Fatalf("InspectIPAContext() error = %v, want archive-wide declared expansion rejection", err)
 			}
 		})
 	}
@@ -504,7 +506,7 @@ func TestInspectIPATamperedProfileFailsCMSVerification(t *testing.T) {
 	file, _ := os.Open(path)
 	defer file.Close()
 	info, _ := file.Stat()
-	if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil {
+	if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil {
 		t.Fatal("expected tampered profile to fail")
 	}
 }
@@ -555,7 +557,7 @@ func TestInspectIPARejectsFileOverSupportedSizeBeforeZIPWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectIPA(file, MaxIPABytes+1, InspectOptions{}); err == nil {
+	if _, err := InspectIPAContext(context.Background(), file, MaxIPABytes+1, InspectOptions{}); err == nil {
 		t.Fatal("expected IPA size limit rejection")
 	}
 	if err := file.Close(); err != nil {
@@ -618,7 +620,7 @@ func TestInspectIPARejectsUnsafeAppMetadataBeforeDescriptorUse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil {
+			if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil {
 				t.Fatal("expected unsafe app metadata rejection")
 			}
 		})
@@ -707,8 +709,8 @@ func TestInspectIPARequiresMainAppIOSPlatformEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "iOS platform") {
-				t.Fatalf("InspectIPA() error = %v, want iOS platform rejection", err)
+			if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), "iOS platform") {
+				t.Fatalf("InspectIPAContext() error = %v, want iOS platform rejection", err)
 			}
 		})
 	}
@@ -760,9 +762,9 @@ func inspectPath(t *testing.T, path string, devices bool) Inspection {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := InspectIPA(file, info.Size(), InspectOptions{IncludeDevices: devices, Now: time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)})
+	got, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{IncludeDevices: devices, Now: time.Date(2028, 1, 1, 0, 0, 0, 0, time.UTC)})
 	if err != nil {
-		t.Fatalf("InspectIPA() error = %v", err)
+		t.Fatalf("InspectIPAContext() error = %v", err)
 	}
 	return got
 }
@@ -838,8 +840,8 @@ func assertInspectErrorContains(t *testing.T, path, want string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectIPA(file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("InspectIPA() error = %v, want member %q rejection", err, want)
+	if _, err := InspectIPAContext(context.Background(), file, info.Size(), InspectOptions{}); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("InspectIPAContext() error = %v, want member %q rejection", err, want)
 	}
 }
 
@@ -1217,8 +1219,8 @@ func renameZipMember(t *testing.T, path, oldName, newName string) {
 }
 
 func TestHashSetDeterministic(t *testing.T) {
-	a := hashSet([]string{"b", "a", "a"})
-	b := hashSet([]string{"a", "b"})
+	a := deviceset.Digest([]string{"b", "a", "a"}).SHA256
+	b := deviceset.Digest([]string{"a", "b"}).SHA256
 	if !bytes.Equal([]byte(a), []byte(b)) {
 		t.Fatalf("hashes differ: %q %q", a, b)
 	}

@@ -1,0 +1,209 @@
+package web
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
+)
+
+func stubWebAppBundleSession(t *testing.T) {
+	t.Helper()
+	restoreSession := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode, twoFactorCodeCommand string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{}, "cache", nil
+	})
+	origNewWebClient := newWebClientFn
+	t.Cleanup(func() {
+		restoreSession()
+		newWebClientFn = origNewWebClient
+	})
+	newWebClientFn = func(session *webcore.AuthSession) *webcore.Client { return &webcore.Client{} }
+}
+
+func TestWebAppBundlesViewPrintsAppsInOrder(t *testing.T) {
+	stubWebAppBundleSession(t)
+	orig := getWebAppBundleFn
+	t.Cleanup(func() { getWebAppBundleFn = orig })
+	getWebAppBundleFn = func(ctx context.Context, client *webcore.Client, bundleID string) (*webcore.AppBundleDetail, error) {
+		if bundleID != "1501593771" {
+			t.Fatalf("bundle ID = %q", bundleID)
+		}
+		return &webcore.AppBundleDetail{
+			ID: bundleID, State: "Ready for Sale", CanSubmit: true,
+			Apps: []webcore.AppBundleApp{{ID: "2", Name: "First"}, {ID: "1", Name: "Second"}},
+		}, nil
+	}
+
+	for _, test := range []struct {
+		output string
+		check  func(t *testing.T, stdout string)
+	}{
+		{"json", func(t *testing.T, stdout string) {
+			var got webcore.AppBundleDetail
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+				t.Fatalf("stdout is not JSON: %v: %q", err, stdout)
+			}
+			if len(got.Apps) != 2 || got.Apps[0].ID != "2" {
+				t.Fatalf("unexpected payload: %+v", got)
+			}
+		}},
+		{"table", func(t *testing.T, stdout string) {
+			first, second := strings.Index(stdout, "First"), strings.Index(stdout, "Second")
+			if !strings.Contains(stdout, "Ready for Sale") || first < 0 || second < first {
+				t.Fatalf("table must show state and apps in order: %q", stdout)
+			}
+		}},
+	} {
+		t.Run(test.output, func(t *testing.T) {
+			d, depsStdout, depsStderr := newWebTestDeps()
+			cmd := newWebAppBundlesViewCommand(d)
+			if err := cmd.FlagSet.Parse([]string{"--id", "1501593771", "--output", test.output}); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
+				if err := cmd.Exec(context.Background(), nil); err != nil {
+					t.Fatalf("Exec: %v", err)
+				}
+			})
+			if stderr != "" {
+				t.Fatalf("stderr = %q", stderr)
+			}
+			test.check(t, stdout)
+		})
+	}
+}
+
+func TestWebAppBundlesListPrintsStatus(t *testing.T) {
+	stubWebAppBundleSession(t)
+	orig := listWebAppBundlesFn
+	t.Cleanup(func() { listWebAppBundlesFn = orig })
+	listWebAppBundlesFn = func(ctx context.Context, client *webcore.Client) (*webcore.AppBundlesListResponse, error) {
+		return &webcore.AppBundlesListResponse{Data: []webcore.AppBundle{{
+			ID: "1501593771", Name: "Colorway", Platforms: []string{"IOS", "MAC_OS"}, Status: "IN_REVIEW",
+		}}}, nil
+	}
+
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppBundlesListCommand(d)
+	if err := cmd.FlagSet.Parse([]string{"--output", "table"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := cmd.Exec(context.Background(), nil); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+	})
+	for _, want := range []string{"1501593771", "Colorway", "IOS,MAC_OS", "IN_REVIEW"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("table missing %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestWebAppBundlesRejectsBadUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  func(*shared.Deps) *ffcli.Command
+		args []string
+		want string
+	}{
+		{"view needs id", newWebAppBundlesViewCommand, nil, "--id is required"},
+		{"set needs id", newWebAppBundlesAppsSetCommand, []string{"--apps", "1,2", "--confirm"}, "--id is required"},
+		{"set needs apps", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--confirm"}, "--apps is required"},
+		{"set needs confirm", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--apps", "1,2"}, "--confirm is required"},
+		{"set rejects duplicates", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--apps", "1,2,1", "--confirm"}, "lists app 1 twice"},
+		{"set rejects names", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--apps", "1,two", "--confirm"}, "numeric app IDs"},
+		{"set rejects leading zeros", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--apps", "1,01", "--confirm"}, "numeric app IDs"},
+		{"set rejects an empty entry", newWebAppBundlesAppsSetCommand, []string{"--id", "1", "--apps", "1,,2", "--confirm"}, "numeric app IDs"},
+		{"create needs name", newWebAppBundlesCreateCommand, []string{"--sku", "S", "--apps", "1,2", "--confirm"}, "--name is required"},
+		{"create needs sku", newWebAppBundlesCreateCommand, []string{"--name", "N", "--apps", "1,2", "--confirm"}, "--sku is required"},
+		{"create needs confirm", newWebAppBundlesCreateCommand, []string{"--name", "N", "--sku", "S", "--apps", "1,2"}, "--confirm is required"},
+		{"submit needs id", func(d *shared.Deps) *ffcli.Command {
+			return webAppBundleReviewCommand(d, "submit", "", "", submitWebAppBundleFn)
+		}, []string{"--confirm"}, "--id is required"},
+		{"submit needs confirm", func(d *shared.Deps) *ffcli.Command {
+			return webAppBundleReviewCommand(d, "submit", "", "", submitWebAppBundleFn)
+		}, []string{"--id", "1"}, "--confirm is required"},
+		{"remove needs confirm", func(d *shared.Deps) *ffcli.Command {
+			return webAppBundleReviewCommand(d, "remove-from-review", "", "", removeWebAppBundleFromReviewFn)
+		}, []string{"--id", "1"}, "--confirm is required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, depsStdout, depsStderr := newWebTestDeps()
+			cmd := test.cmd(d)
+			if err := cmd.FlagSet.Parse(test.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			var err error
+			_, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
+				err = cmd.Exec(context.Background(), nil)
+			})
+			if !errors.Is(err, flag.ErrHelp) || !strings.Contains(stderr, test.want) {
+				t.Fatalf("error = %v, stderr = %q, want usage error %q", err, stderr, test.want)
+			}
+		})
+	}
+}
+
+func TestWebAppBundlesAppsSetPrintsReceipt(t *testing.T) {
+	stubWebAppBundleSession(t)
+	orig := setWebAppBundleAppsFn
+	t.Cleanup(func() { setWebAppBundleAppsFn = orig })
+	setWebAppBundleAppsFn = func(ctx context.Context, client *webcore.Client, bundleID string, appIDs []string) (*asc.WebAppBundleAppsResult, error) {
+		if bundleID != "1501593771" || !slices.Equal(appIDs, []string{"2", "1"}) {
+			t.Fatalf("bundle %q apps %v", bundleID, appIDs)
+		}
+		return &asc.WebAppBundleAppsResult{BundleID: bundleID, PreviousApps: []string{"1", "2"}, Apps: appIDs, Changed: true}, nil
+	}
+
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppBundlesAppsSetCommand(d)
+	if err := cmd.FlagSet.Parse([]string{"--id", "1501593771", "--apps", " 2, 1 ", "--confirm", "--output", "json"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := cmd.Exec(context.Background(), nil); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+	})
+	var got asc.WebAppBundleAppsResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not JSON: %v: %q", err, stdout)
+	}
+	if !got.Changed || got.BundleID != "1501593771" {
+		t.Fatalf("unexpected receipt: %+v", got)
+	}
+}
+
+func TestWebAppBundlesAppsEligiblePrintsApps(t *testing.T) {
+	stubWebAppBundleSession(t)
+	orig := listWebAppBundleEligibleAppsFn
+	t.Cleanup(func() { listWebAppBundleEligibleAppsFn = orig })
+	listWebAppBundleEligibleAppsFn = func(ctx context.Context, client *webcore.Client) (*webcore.AppBundleEligibleAppsResponse, error) {
+		return &webcore.AppBundleEligibleAppsResponse{Data: []webcore.AppBundleEligibleApp{{ID: "3", Name: "Three"}}}, nil
+	}
+
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppBundlesAppsEligibleCommand(d)
+	if err := cmd.FlagSet.Parse([]string{"--output", "table"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := cmd.Exec(context.Background(), nil); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "Three") {
+		t.Fatalf("table missing app: %q", stdout)
+	}
+}

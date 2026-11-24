@@ -19,8 +19,17 @@ import (
 )
 
 const (
+	ascAPIHost        = "api.appstoreconnect.apple.com"
+	enterpriseAPIHost = "api.enterprise.developer.apple.com"
+
 	// BaseURL is the App Store Connect API base URL
-	BaseURL = "https://api.appstoreconnect.apple.com"
+	BaseURL = "https://" + ascAPIHost
+	// EnterpriseBaseURL is the Apple Developer Enterprise Program API base URL
+	EnterpriseBaseURL = "https://" + enterpriseAPIHost
+
+	ascJWTAudience        = "appstoreconnect-v1"
+	enterpriseJWTAudience = "apple-developer-enterprise-v1"
+
 	// DefaultTimeout is the default request timeout
 	DefaultTimeout = 30 * time.Second
 	// DefaultUploadTimeout is the default timeout for upload operations.
@@ -187,7 +196,7 @@ func resolveDebugValue(value string) debugSettings {
 	}
 	normalized := strings.ToLower(trimmed)
 	switch normalized {
-	case "0", "false", "no":
+	case "0", "f", "false", "no", "n", "off":
 		return debugSettings{}
 	}
 	return debugSettings{
@@ -196,6 +205,8 @@ func resolveDebugValue(value string) debugSettings {
 	}
 }
 
+// loadConfig caches the first successful load for the process lifetime,
+// including a missing config file. Tests that change config must reset it.
 func loadConfig() *config.Config {
 	loadConfigMu.Lock()
 	defer loadConfigMu.Unlock()
@@ -205,7 +216,7 @@ func loadConfig() *config.Config {
 	}
 
 	cfg, err := loadConfigFn()
-	if err != nil {
+	if err != nil && !errors.Is(err, config.ErrNotFound) {
 		return nil
 	}
 	cachedConfig = cfg
@@ -540,6 +551,7 @@ func withRetry[T any](ctx context.Context, fn func() (T, error), opts RetryOptio
 			)
 		}
 
+		observeRequestRetry(ctx, err)
 		retryCount++
 
 		// Wait with context cancellation support
@@ -648,11 +660,16 @@ type Client struct {
 	keyID         string
 	issuerID      string
 	privateKey    *ecdsa.PrivateKey
+	enterprise    bool
 	notaryBaseURL string // override for testing; empty uses NotaryBaseURL constant
 
 	jwtMu              sync.Mutex
 	cachedJWT          string
 	cachedJWTExpiresAt time.Time
+
+	// bearer holds a token signed elsewhere (ASC_BEARER_TOKEN); when set,
+	// the client has no private key.
+	bearer *bearerTokenSource
 
 	mutatingRequestLimiterOnce sync.Once
 	mutatingRequestLimiter     chan struct{}
@@ -713,13 +730,9 @@ func newDefaultHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func newClientWithHTTPClient(keyID, issuerID, privateKeyPath string, httpClient *http.Client) (*Client, error) {
-	if err := auth.ValidateKeyFile(privateKeyPath); err != nil {
-		return nil, fmt.Errorf("invalid private key: %w", err)
-	}
-
-	key, err := auth.LoadPrivateKey(privateKeyPath)
+	key, err := auth.LoadValidatedPrivateKey(privateKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load private key: %w", err)
+		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
 	return newClientWithPrivateKey(keyID, issuerID, key, httpClient), nil
@@ -741,6 +754,26 @@ func newClientWithPrivateKey(keyID, issuerID string, privateKey *ecdsa.PrivateKe
 		issuerID:   issuerID,
 		privateKey: privateKey,
 	}
+}
+
+// UseEnterpriseProgramAPI points the client at the Enterprise Program API, which
+// takes its own host and token audience. Call it before the first request.
+func (c *Client) UseEnterpriseProgramAPI() {
+	c.enterprise = true
+	c.httpClient = clientWithoutRedirects(c.httpClient)
+}
+
+// IsAPIHost reports whether host serves the App Store Connect or Enterprise
+// Program API. A *Client still only sends requests to its own host.
+func IsAPIHost(host string) bool {
+	return host == ascAPIHost || host == enterpriseAPIHost
+}
+
+func (c *Client) apiBaseURL() string {
+	if c.enterprise {
+		return EnterpriseBaseURL
+	}
+	return BaseURL
 }
 
 func (c *Client) getMutatingRequestLimiter() chan struct{} {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -126,8 +127,10 @@ func TestVersionQueryVariants(t *testing.T) {
 		{name: "two segments", input: "1.2", want: []string{"1.2", "1.2.0"}},
 		{name: "two segments with zero minor", input: "1.0", want: []string{"1.0", "1.0.0"}},
 		{name: "three significant segments", input: "1.2.3", want: []string{"1.2.3"}},
-		{name: "leading zero segment preserved", input: "1.02.0", want: []string{"1.02.0", "1.02"}},
-		{name: "leading zero without counterpart preserved", input: "1.02.3", want: []string{"1.02.3"}},
+		{name: "leading zero segment", input: "1.02.0", want: []string{"1.02.0", "1.02", "1.2.0", "1.2"}},
+		{name: "leading zero without trailing zero", input: "1.02.3", want: []string{"1.02.3", "1.2.3"}},
+		{name: "leading zero major two segments", input: "01.3", want: []string{"01.3", "01.3.0", "1.3", "1.3.0"}},
+		{name: "all zero segment keeps zero", input: "1.00.0", want: []string{"1.00.0", "1.00", "1.0.0", "1.0"}},
 		{name: "single segment", input: "1", want: []string{"1"}},
 		{name: "surrounding whitespace", input: "  1.2  ", want: []string{"1.2", "1.2.0"}},
 		{name: "four segments", input: "1.2.3.4", want: []string{"1.2.3.4"}},
@@ -178,7 +181,7 @@ func TestFindPreReleaseVersionIDsMatchesEquivalentVersionFormat(t *testing.T) {
 	var ids []string
 	var err error
 	stderr := captureStderr(t, func() {
-		ids, err = FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
+		ids, err = DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
 	})
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
@@ -203,7 +206,7 @@ func TestFindPreReleaseVersionIDsPrefersRequestedVersionFormat(t *testing.T) {
 	var ids []string
 	var err error
 	stderr := captureStderr(t, func() {
-		ids, err = FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
+		ids, err = DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
 	})
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
@@ -240,7 +243,7 @@ func TestFindPreReleaseVersionIDsCollectsEquivalentFormatsAcrossPlatforms(t *tes
 		}
 	})
 
-	ids, err := FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "")
+	ids, err := DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "")
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
 	}
@@ -260,7 +263,7 @@ func TestFindPreReleaseVersionIDsNotesEquivalentMatchOnlyOnce(t *testing.T) {
 
 	stderr := captureStderr(t, func() {
 		for range 3 {
-			if _, err := FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS"); err != nil {
+			if _, err := DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS"); err != nil {
 				t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
 			}
 		}
@@ -279,7 +282,7 @@ func TestFindPreReleaseVersionIDsReportsNoMatchWithoutNote(t *testing.T) {
 	var ids []string
 	var err error
 	stderr := captureStderr(t, func() {
-		ids, err = FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
+		ids, err = DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.0", "IOS")
 	})
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
@@ -301,7 +304,7 @@ func TestFindPreReleaseVersionIDsWithoutVersionFilterQueriesOnce(t *testing.T) {
 	var calls []string
 	client := newPreReleaseVersionLookupClient(t, "", &calls)
 
-	ids, err := FindPreReleaseVersionIDs(context.Background(), client, "app-1", "", "IOS")
+	ids, err := DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "", "IOS")
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
 	}
@@ -330,7 +333,7 @@ func TestFindPreReleaseVersionIDsDeduplicatesAndSkipsBlankIDs(t *testing.T) {
 		}`)
 	})
 
-	ids, err := FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.3", "IOS")
+	ids, err := DefaultDeps().FindPreReleaseVersionIDs(context.Background(), client, "app-1", "1.2.3", "IOS")
 	if err != nil {
 		t.Fatalf("FindPreReleaseVersionIDs() error: %v", err)
 	}
@@ -352,7 +355,7 @@ func TestFindPreReleaseVersionIDsWithMaxPagesStopsBeforeFetchingBeyondLimit(t *t
 		))
 	})
 
-	_, err := FindPreReleaseVersionIDsWithMaxPages(
+	_, err := DefaultDeps().FindPreReleaseVersionIDsWithMaxPages(
 		context.Background(), client, "app-1", "1.2.3", "IOS", 2,
 	)
 	if err == nil || !strings.Contains(err.Error(), "page 3") || !strings.Contains(err.Error(), "2-page safety limit") {
@@ -388,7 +391,7 @@ func TestResolveLatestBuildSelectionCarriesEveryEquivalentUploadVersion(t *testi
 				}
 			})
 
-			selection, err := resolveLatestBuildSelection(context.Background(), client, LatestBuildSelectionOptions{
+			selection, err := resolveLatestBuildSelection(context.Background(), os.Stderr, ResolveAppID, client, LatestBuildSelectionOptions{
 				AppID:    "123456789",
 				Version:  "1.2.0",
 				Platform: "IOS",
@@ -440,5 +443,61 @@ func TestFindMostRecentlyUploadedBuildPropagatesLaterHTTPErrorAfterOrderingAnoma
 	}
 	if got != nil {
 		t.Fatalf("expected no build alongside pagination error, got %#v", got)
+	}
+}
+
+func TestFindMostRecentlyUploadedBuildFollowsEmptyPages(t *testing.T) {
+	const (
+		empty = `[]`
+		older = `[{"type":"builds","id":"older","attributes":{"uploadedDate":"2026-09-01T00:00:00Z"}}]`
+		newer = `[{"type":"builds","id":"newer","attributes":{"uploadedDate":"2026-09-02T00:00:00Z"}}]`
+	)
+	for _, tc := range []struct {
+		name   string
+		pages  []string
+		wantID string
+	}{
+		{name: "empty first page", pages: []string{empty, newer}, wantID: "newer"},
+		{name: "empty ordering probe", pages: []string{older, empty, newer}, wantID: "newer"},
+		{name: "empty collection", pages: []string{empty, empty}},
+		{name: "failure before any build", pages: []string{empty, ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := newBuildWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+				calls++
+				if calls > len(tc.pages) {
+					t.Fatalf("unexpected request %s", req.URL)
+				}
+				if calls > 1 && req.URL.Query().Get("cursor") != fmt.Sprint(calls) {
+					t.Fatalf("unexpected cursor on request %d: %s", calls, req.URL)
+				}
+				data := tc.pages[calls-1]
+				if data == "" {
+					return buildWaitJSONStatusResponse(http.StatusBadRequest, `{"errors":[{"code":"BAD_REQUEST","detail":"continuation failed"}]}`)
+				}
+				links := "{}"
+				if calls < len(tc.pages) {
+					links = fmt.Sprintf(`{"next":"https://api.appstoreconnect.apple.com/v1/builds?cursor=%d"}`, calls+1)
+				}
+				return buildWaitJSONResponse(fmt.Sprintf(`{"data":%s,"links":%s}`, data, links))
+			})
+
+			got, err := findMostRecentlyUploadedBuild(context.Background(), client, "app-1")
+			if tc.pages[len(tc.pages)-1] == "" {
+				if err == nil || !strings.Contains(err.Error(), "continuation failed") {
+					t.Fatalf("error = %v, want continuation failure", err)
+				}
+			} else if err != nil {
+				t.Fatalf("findMostRecentlyUploadedBuild() error: %v", err)
+			}
+			id := ""
+			if got != nil {
+				id = got.Data.ID
+			}
+			if id != tc.wantID || calls != len(tc.pages) {
+				t.Fatalf("selected %q after %d requests, want %q after %d requests", id, calls, tc.wantID, len(tc.pages))
+			}
+		})
 	}
 }

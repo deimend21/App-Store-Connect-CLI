@@ -11,6 +11,7 @@ import (
 	"github.com/99designs/keyring"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/config"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/testguard"
 )
 
 const (
@@ -63,11 +64,29 @@ func StoreCredentials(name string, credentials Credentials) error {
 }
 
 func StoreCredentialsConfig(name string, credentials Credentials) error {
-	path, err := config.Path()
+	path, err := storeKitConfigPath()
 	if err != nil {
 		return err
 	}
 	return StoreCredentialsConfigAt(name, credentials, path)
+}
+
+// storeKitConfigPath returns the config that StoreKit credentials and the
+// default profile are written to: the active config when it has StoreKit
+// config, otherwise the config DefaultWritePath chooses.
+func storeKitConfigPath() (string, error) {
+	path, err := config.Path()
+	if err != nil {
+		return "", err
+	}
+	cfg, err := config.LoadAt(path)
+	if err != nil && !errors.Is(err, config.ErrNotFound) {
+		return "", err
+	}
+	if hasStoreKitConfig(cfg) {
+		return path, nil
+	}
+	return config.DefaultWritePath()
 }
 
 func StoreCredentialsConfigAt(name string, credentials Credentials, path string) error {
@@ -257,7 +276,7 @@ func keyringConfig() keyring.Config {
 }
 
 var openStoreKitKeyring = func() (keyring.Keyring, error) {
-	return keyring.Open(keyringConfig())
+	return testguard.OpenKeyring(keyringConfig())
 }
 
 func storeInKeychain(name string, payload credentialPayload) error {
@@ -452,7 +471,7 @@ func clearConfigCredentials() error {
 }
 
 func saveDefaultName(name string) error {
-	path, err := config.Path()
+	path, err := storeKitConfigPath()
 	if err != nil {
 		return err
 	}

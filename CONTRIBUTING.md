@@ -34,6 +34,14 @@ make format  # gofumpt (requires gofumpt; install with make tools)
 After a Go toolchain upgrade, rerun `make tools` to rebuild the pinned formatter
 and linter with the version selected by `go.mod`.
 
+With Nix flakes, `nix develop` provides Go, Python, and on macOS the libfido2
+build inputs. When `go.mod` or `go.sum` changes, run
+`nix run .#update-vendor-hash` to refresh `vendorHash` in `package.nix`.
+
+The `autofix.ci` workflow applies `make format`, `nix fmt`, and the
+`vendorHash` refresh to every pull request and pushes any resulting changes
+back to its branch.
+
 ## Integration Tests (Opt-in)
 
 Integration tests hit the real App Store Connect API and are skipped by default.
@@ -45,13 +53,12 @@ export ASC_ISSUER_ID="YOUR_ISSUER_ID"
 export ASC_PRIVATE_KEY_PATH="/path/to/AuthKey.p8"
 export ASC_APP_ID="YOUR_APP_ID"
 
-make test-integration
+ASC_BYPASS_KEYCHAIN=1 make test-integration
 ```
 
-Headless alternative (write the key to a temp file at runtime):
-```bash
-export ASC_PRIVATE_KEY_B64="BASE64_KEY"
-```
+The integration tests read only `ASC_PRIVATE_KEY_PATH`, not `ASC_PRIVATE_KEY_B64`.
+In headless CI, decode the key secret to a restricted temporary `.p8` file and
+export its path.
 
 ## Local API Testing (Optional)
 
@@ -133,8 +140,8 @@ exactly one type, priority, and difficulty. Follow the authority rules in `AGENT
 
 ## Security
 
-If you find a security issue, please report it responsibly by opening a private issue
-or contacting the maintainer directly.
+Report security issues privately as described in [SECURITY.md](SECURITY.md), not in a
+public issue.
 
 ## Wall of Apps
 

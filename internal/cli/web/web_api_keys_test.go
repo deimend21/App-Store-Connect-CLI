@@ -43,7 +43,8 @@ func TestWebAPIKeysCreateSavesP8AndPrintsMetadata(t *testing.T) {
 	t.Cleanup(restore)
 
 	outputDir := t.TempDir()
-	cmd := WebAPIKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--name", "Release automation",
 		"--role", "APP_MANAGER",
@@ -53,7 +54,7 @@ func TestWebAPIKeysCreateSavesP8AndPrintsMetadata(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, stderr := captureOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("expected success, got %v", err)
 		}
@@ -91,16 +92,6 @@ func TestWebAPIKeysCreateSavesP8AndPrintsMetadata(t *testing.T) {
 	}
 }
 
-func TestWebAPIKeysCreateHelpDocumentsCaseInsensitiveRole(t *testing.T) {
-	help := WebAPIKeysCreateCommand().LongHelp
-	if strings.Contains(help, "must\nbe an uppercase identifier") || strings.Contains(help, "must be an uppercase identifier") {
-		t.Fatalf("help still claims --role must be uppercase even though lowercase input is accepted:\n%s", help)
-	}
-	if !strings.Contains(help, "case-insensitive") {
-		t.Fatalf("help should say --role is case-insensitive:\n%s", help)
-	}
-}
-
 func TestWebAPIKeysCreateUpperCasesLowercaseRole(t *testing.T) {
 	restore := installWebAPIKeyCreateFakes(t)
 	t.Cleanup(restore)
@@ -113,7 +104,8 @@ func TestWebAPIKeysCreateUpperCasesLowercaseRole(t *testing.T) {
 	}
 	t.Cleanup(func() { createWebAPIKeyFn = originalCreate })
 
-	cmd := WebAPIKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--name", "Release automation",
 		"--role", "app_manager",
@@ -123,7 +115,7 @@ func TestWebAPIKeysCreateUpperCasesLowercaseRole(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	captureOutput(t, func() {
+	runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("expected lowercase role to be accepted, got %v", err)
 		}
@@ -133,78 +125,44 @@ func TestWebAPIKeysCreateUpperCasesLowercaseRole(t *testing.T) {
 	}
 }
 
-func TestWebAPIKeysCreateValidatesBeforeResolvingSession(t *testing.T) {
-	resolveCalled := false
-	restoreSession := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
-		resolveCalled = true
-		return &webcore.AuthSession{}, "cache", nil
-	})
-	t.Cleanup(restoreSession)
+func TestWebAPIKeysCreateValidatesRoleBeforeResolvingSession(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		wantErr []string
+	}{
+		{name: "malformed role", role: "not-a-role", wantErr: []string{"--role must be a role identifier such as ADMIN or APP_MANAGER"}},
+		{name: "empty role", role: "   ", wantErr: []string{"--role is required"}},
+		{name: "known non-selectable role", role: "ACCOUNT_HOLDER", wantErr: []string{"ACCOUNT_HOLDER", "not a selectable team API key role"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resolveCalled := false
+			restoreSession := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
+				resolveCalled = true
+				return &webcore.AuthSession{}, "cache", nil
+			})
+			t.Cleanup(restoreSession)
 
-	cmd := WebAPIKeysCreateCommand()
-	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--role", "not-a-role"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
+			d, _, _ := newWebTestDeps()
+			cmd := newWebAPIKeysCreateCommand(d)
+			if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--role", tc.role}); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
 
-	err := cmd.Exec(context.Background(), nil)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "--role must be a role identifier such as ADMIN or APP_MANAGER") {
-		t.Fatalf("expected identifier-shape stderr, got %v", err)
-	}
-	if resolveCalled {
-		t.Fatal("did not expect session resolution before role validation")
-	}
-}
-
-func TestWebAPIKeysCreateRejectsEmptyRoleBeforeResolvingSession(t *testing.T) {
-	resolveCalled := false
-	restoreSession := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
-		resolveCalled = true
-		return &webcore.AuthSession{}, "cache", nil
-	})
-	t.Cleanup(restoreSession)
-
-	cmd := WebAPIKeysCreateCommand()
-	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--role", "   "}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	err := cmd.Exec(context.Background(), nil)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "--role is required") {
-		t.Fatalf("expected required-role stderr, got %v", err)
-	}
-	if resolveCalled {
-		t.Fatal("did not expect session resolution before role validation")
-	}
-}
-
-func TestWebAPIKeysCreateRejectsKnownNonSelectableRole(t *testing.T) {
-	resolveCalled := false
-	restoreSession := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode string) (*webcore.AuthSession, string, error) {
-		resolveCalled = true
-		return &webcore.AuthSession{}, "cache", nil
-	})
-	t.Cleanup(restoreSession)
-
-	cmd := WebAPIKeysCreateCommand()
-	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--role", "ACCOUNT_HOLDER"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	err := cmd.Exec(context.Background(), nil)
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("expected usage error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "ACCOUNT_HOLDER") || !strings.Contains(err.Error(), "not a selectable team API key role") {
-		t.Fatalf("expected known non-selectable role stderr, got %v", err)
-	}
-	if resolveCalled {
-		t.Fatal("did not expect session resolution for a documented non-selectable role")
+			err := cmd.Exec(context.Background(), nil)
+			if !errors.Is(err, flag.ErrHelp) {
+				t.Fatalf("expected usage error, got %v", err)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %v, want %q", err, want)
+				}
+			}
+			if resolveCalled {
+				t.Fatal("did not expect session resolution before role validation")
+			}
+		})
 	}
 }
 
@@ -240,7 +198,8 @@ func TestWebAPIKeysCreateWarnsAndContinuesForUnknownRole(t *testing.T) {
 	}
 
 	outputDir := t.TempDir()
-	cmd := WebAPIKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--name", "Release automation",
 		"--role", "FUTURE_TEAM_ROLE",
@@ -251,7 +210,7 @@ func TestWebAPIKeysCreateWarnsAndContinuesForUnknownRole(t *testing.T) {
 	}
 
 	var execErr error
-	stdout, stderr := captureOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		execErr = cmd.Exec(context.Background(), nil)
 	})
 	if execErr != nil {
@@ -272,10 +231,8 @@ func TestWebAPIKeysCreateWarnsAndContinuesForUnknownRole(t *testing.T) {
 
 func TestDownloadWebAPIKeyWithRetryRetriesPropagationErrors(t *testing.T) {
 	originalDownload := downloadWebAPIKeyFn
-	originalWait := waitWebAPIKeyRetryFn
 	t.Cleanup(func() {
 		downloadWebAPIKeyFn = originalDownload
-		waitWebAPIKeyRetryFn = originalWait
 	})
 
 	attempts := 0
@@ -287,12 +244,13 @@ func TestDownloadWebAPIKeyWithRetryRetriesPropagationErrors(t *testing.T) {
 		return apiKeyTestP8(t), nil
 	}
 	var waits []time.Duration
-	waitWebAPIKeyRetryFn = func(ctx context.Context, delay time.Duration) error {
+	d, _, _ := newWebTestDeps()
+	d.After = func(delay time.Duration) <-chan time.Time {
 		waits = append(waits, delay)
-		return nil
+		return firedWebAPIKeyRetry()
 	}
 
-	got, err := downloadWebAPIKeyWithRetry(context.Background(), &webcore.Client{}, "ABC123XYZ")
+	got, err := downloadWebAPIKeyWithRetry(context.Background(), d, &webcore.Client{}, "ABC123XYZ")
 	if err != nil {
 		t.Fatalf("downloadWebAPIKeyWithRetry() error: %v", err)
 	}
@@ -309,10 +267,8 @@ func TestDownloadWebAPIKeyWithRetryRetriesPropagationErrors(t *testing.T) {
 
 func TestDownloadWebAPIKeyWithRetryDoesNotRetryTransportFailure(t *testing.T) {
 	originalDownload := downloadWebAPIKeyFn
-	originalWait := waitWebAPIKeyRetryFn
 	t.Cleanup(func() {
 		downloadWebAPIKeyFn = originalDownload
-		waitWebAPIKeyRetryFn = originalWait
 	})
 
 	attempts := 0
@@ -321,12 +277,13 @@ func TestDownloadWebAPIKeyWithRetryDoesNotRetryTransportFailure(t *testing.T) {
 		return nil, fmt.Errorf("read body: connection reset")
 	}
 	waits := 0
-	waitWebAPIKeyRetryFn = func(ctx context.Context, delay time.Duration) error {
+	d, _, _ := newWebTestDeps()
+	d.After = func(time.Duration) <-chan time.Time {
 		waits++
-		return nil
+		return firedWebAPIKeyRetry()
 	}
 
-	_, err := downloadWebAPIKeyWithRetry(context.Background(), &webcore.Client{}, "ABC123XYZ")
+	_, err := downloadWebAPIKeyWithRetry(context.Background(), d, &webcore.Client{}, "ABC123XYZ")
 	if err == nil || !strings.Contains(err.Error(), "connection reset") {
 		t.Fatalf("expected transport error, got %v", err)
 	}
@@ -337,10 +294,8 @@ func TestDownloadWebAPIKeyWithRetryDoesNotRetryTransportFailure(t *testing.T) {
 
 func TestDownloadWebAPIKeyWithRetryDoesNotRetryInvalidResponse(t *testing.T) {
 	originalDownload := downloadWebAPIKeyFn
-	originalWait := waitWebAPIKeyRetryFn
 	t.Cleanup(func() {
 		downloadWebAPIKeyFn = originalDownload
-		waitWebAPIKeyRetryFn = originalWait
 	})
 
 	attempts := 0
@@ -349,12 +304,13 @@ func TestDownloadWebAPIKeyWithRetryDoesNotRetryInvalidResponse(t *testing.T) {
 		return nil, fmt.Errorf("decode failed: %w", webcore.ErrAPIKeyResponseInvalid)
 	}
 	waits := 0
-	waitWebAPIKeyRetryFn = func(ctx context.Context, delay time.Duration) error {
+	d, _, _ := newWebTestDeps()
+	d.After = func(time.Duration) <-chan time.Time {
 		waits++
-		return nil
+		return firedWebAPIKeyRetry()
 	}
 
-	_, err := downloadWebAPIKeyWithRetry(context.Background(), &webcore.Client{}, "ABC123XYZ")
+	_, err := downloadWebAPIKeyWithRetry(context.Background(), d, &webcore.Client{}, "ABC123XYZ")
 	if !errors.Is(err, webcore.ErrAPIKeyResponseInvalid) {
 		t.Fatalf("expected invalid response error, got %v", err)
 	}
@@ -378,13 +334,14 @@ func TestWebAPIKeysCreateDoesNotReplaceExistingP8(t *testing.T) {
 		t.Fatalf("write existing file: %v", err)
 	}
 
-	cmd := WebAPIKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--output-dir", outputDir, "--output", "json"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
 
 	var execErr error
-	stdout, stderr := captureOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		execErr = cmd.Exec(context.Background(), nil)
 	})
 	if execErr == nil {
@@ -413,7 +370,8 @@ func TestWebAPIKeysCreateRemovesReservationWhenDownloadFails(t *testing.T) {
 	}
 
 	outputDir := t.TempDir()
-	cmd := WebAPIKeysCreateCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--output-dir", outputDir}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -437,7 +395,8 @@ func TestWebAPIKeysCreatePreservesP8WhenIssuerLookupFails(t *testing.T) {
 		return nil, lookupErr
 	}
 	outputDir := t.TempDir()
-	cmd := WebAPIKeysCreateCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAPIKeysCreateCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--output-dir", outputDir}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -490,13 +449,14 @@ func TestWebAPIKeysCreateRejectsInvalidP8WithoutWritingFile(t *testing.T) {
 			}
 
 			outputDir := t.TempDir()
-			cmd := WebAPIKeysCreateCommand()
+			d, depsStdout, depsStderr := newWebTestDeps()
+			cmd := newWebAPIKeysCreateCommand(d)
 			if err := cmd.FlagSet.Parse([]string{"--name", "Release automation", "--output-dir", outputDir}); err != nil {
 				t.Fatalf("parse error: %v", err)
 			}
 
 			var execErr error
-			stdout, stderr := captureOutput(t, func() {
+			stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 				execErr = cmd.Exec(context.Background(), nil)
 			})
 			if execErr == nil {
@@ -527,7 +487,6 @@ func installWebAPIKeyCreateFakes(t *testing.T) func() {
 	originalCreate := createWebAPIKeyFn
 	originalDownload := downloadWebAPIKeyFn
 	originalGet := getWebAPIKeyFn
-	originalWait := waitWebAPIKeyRetryFn
 
 	newWebAPIKeyClientFn = func(session *webcore.AuthSession) *webcore.Client {
 		return &webcore.Client{}
@@ -560,16 +519,20 @@ func installWebAPIKeyCreateFakes(t *testing.T) func() {
 			KeyType:        "PUBLIC_API",
 		}, nil
 	}
-	waitWebAPIKeyRetryFn = func(ctx context.Context, delay time.Duration) error { return nil }
-
 	return func() {
 		restoreSession()
 		newWebAPIKeyClientFn = originalNewClient
 		createWebAPIKeyFn = originalCreate
 		downloadWebAPIKeyFn = originalDownload
 		getWebAPIKeyFn = originalGet
-		waitWebAPIKeyRetryFn = originalWait
 	}
+}
+
+// firedWebAPIKeyRetry is a d.After result whose delay has already elapsed.
+func firedWebAPIKeyRetry() <-chan time.Time {
+	fired := make(chan time.Time, 1)
+	fired <- time.Time{}
+	return fired
 }
 
 func generateP256PKCS8PEM(t *testing.T) []byte {

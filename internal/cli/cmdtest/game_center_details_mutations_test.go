@@ -1,92 +1,70 @@
 package cmdtest
 
 import (
-	"context"
-	"errors"
-	"flag"
-	"io"
-	"strings"
+	"net/http"
+	"path/filepath"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
-func TestGameCenterDetailsCreateValidationErrors(t *testing.T) {
-	t.Setenv("ASC_APP_ID", "")
-
-	tests := []struct {
-		name         string
-		args         []string
-		stderrSubstr string
-	}{
-		{
-			name:         "missing app",
-			args:         []string{"game-center", "details", "create"},
-			stderrSubstr: "Error: --app is required (or set ASC_APP_ID)",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
-
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(test.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				err := root.Run(context.Background())
-				if !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %v", err)
-				}
-			})
-
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			if !strings.Contains(stderr, test.stderrSubstr) {
-				t.Fatalf("expected stderr to contain %q, got %q", test.stderrSubstr, stderr)
-			}
-		})
-	}
+func TestGameCenterDetailsMutationValidationErrors(t *testing.T) {
+	runGameCenterUsageCasesWithDeps(t, []gameCenterUsageCase{
+		{[]string{"game-center", "details", "create"}, "--app is required (or set ASC_APP_ID)"},
+		{[]string{"game-center", "details", "update", "--game-center-group-id", "GROUP_ID"}, "--id is required"},
+		{[]string{"game-center", "details", "update", "--id", "DETAIL_ID"}, "at least one update flag is required (--game-center-group-id, --default-leaderboard-id, --default-leaderboard-v2-id, --default-group-leaderboard-id, --default-group-leaderboard-v2-id)"},
+		{[]string{"game-center", "details", "update", "--id", "DETAIL_ID", "--default-leaderboard-id", "LB_V1", "--default-leaderboard-v2-id", "LB_V2"}, "--default-leaderboard-id and --default-leaderboard-v2-id set the same default; pass one"},
+		{[]string{"game-center", "details", "update", "--id", "DETAIL_ID", "--default-group-leaderboard-id", "GROUP_LB_V1", "--default-group-leaderboard-v2-id", "GROUP_LB_V2"}, "--default-group-leaderboard-id and --default-group-leaderboard-v2-id set the same default; pass one"},
+	})
 }
 
-func TestGameCenterDetailsUpdateValidationErrors(t *testing.T) {
+func TestGameCenterDetailsUpdateSendsOnlyRequestedRelationships(t *testing.T) {
 	tests := []struct {
-		name         string
-		args         []string
-		stderrSubstr string
+		name string
+		args []string
+		want string
 	}{
 		{
-			name:         "missing id",
-			args:         []string{"game-center", "details", "update", "--game-center-group-id", "GROUP_ID"},
-			stderrSubstr: "Error: --id is required",
+			name: "group with v2 default and v1 group default",
+			args: []string{
+				"--game-center-group-id", "GROUP_ID",
+				"--default-leaderboard-v2-id", "https://api.appstoreconnect.apple.com/v2/gameCenterLeaderboards/LB_V2",
+				"--default-group-leaderboard-id", "GROUP_LB_V1",
+			},
+			want: `{
+				"gameCenterGroup": {"data": {"type": "gameCenterGroups", "id": "GROUP_ID"}},
+				"defaultLeaderboardV2": {"data": {"type": "gameCenterLeaderboards", "id": "LB_V2"}},
+				"defaultGroupLeaderboard": {"data": {"type": "gameCenterLeaderboards", "id": "GROUP_LB_V1"}}
+			}`,
 		},
 		{
-			name:         "no update flags",
-			args:         []string{"game-center", "details", "update", "--id", "DETAIL_ID"},
-			stderrSubstr: "Error: at least one update flag is required (--game-center-group-id, --default-leaderboard-id)",
+			name: "one v2 default leaves the others out",
+			args: []string{"--default-group-leaderboard-v2-id", "GROUP_LB_V2"},
+			want: `{"defaultGroupLeaderboardV2": {"data": {"type": "gameCenterLeaderboards", "id": "GROUP_LB_V2"}}}`,
+		},
+		{
+			name: "existing flag request is unchanged",
+			args: []string{"--default-leaderboard-id", "LB_V1"},
+			want: `{"defaultLeaderboard": {"data": {"type": "gameCenterLeaderboards", "id": "LB_V1"}}}`,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			root := RootCommand("1.2.3")
-			root.FlagSet.SetOutput(io.Discard)
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-			stdout, stderr := captureOutput(t, func() {
-				if err := root.Parse(test.args); err != nil {
-					t.Fatalf("parse error: %v", err)
-				}
-				err := root.Run(context.Background())
-				if !errors.Is(err, flag.ErrHelp) {
-					t.Fatalf("expected ErrHelp, got %v", err)
-				}
-			})
+			reg := asctest.NewRegistry(t)
+			reg.Register(asctest.PATCH("/v1/gameCenterDetails/DETAIL_ID").JSONBody(`{"data":{"type":"gameCenterDetails","id":"DETAIL_ID","relationships":`+test.want+`}}`),
+				asctest.JSON(http.StatusOK, `{"data":{"type":"gameCenterDetails","id":"DETAIL_ID"}}`))
 
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
+			args := append([]string{"game-center", "details", "update", "--id", "DETAIL_ID", "--output", "json"}, test.args...)
+			if _, _, err := runRootWithDeps(t, stubClient(t, reg), args...); err != nil {
+				t.Fatalf("run error: %v", err)
 			}
-			if !strings.Contains(stderr, test.stderrSubstr) {
-				t.Fatalf("expected stderr to contain %q, got %q", test.stderrSubstr, stderr)
+
+			if requests := len(reg.Requests()); requests != 1 {
+				t.Fatalf("expected 1 request, got %d", requests)
 			}
 		})
 	}

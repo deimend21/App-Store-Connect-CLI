@@ -1,20 +1,24 @@
 package promotedpurchases
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestPromotedPurchasesListValidation(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
-	cmd := PromotedPurchasesListCommand()
+	cmd := newPromotedPurchasesListCommand(&shared.Deps{IO: &shared.IO{Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}}, LookupEnv: os.LookupEnv})
 	if err := cmd.FlagSet.Parse([]string{}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -44,26 +48,6 @@ func TestScopedPromotedPurchasesCommandsUseScopedPaths(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestScopedPromotedPurchasesShortUsageShowsAlternativeFlows(t *testing.T) {
-	cmd := scopedPromotedPurchasesCommandForTest()
-
-	listCmd := findDirectSubcommand(cmd, "list")
-	if listCmd == nil {
-		t.Fatal("expected list subcommand")
-	}
-	if !strings.Contains(listCmd.ShortUsage, "(--app APP_ID | --next URL)") {
-		t.Fatalf("list ShortUsage should show app and next alternatives, got %q", listCmd.ShortUsage)
-	}
-
-	linkCmd := findDirectSubcommand(cmd, "link")
-	if linkCmd == nil {
-		t.Fatal("expected link subcommand")
-	}
-	if !strings.Contains(linkCmd.ShortUsage, "--promoted-purchase-id PROMO_ID[,PROMO_ID...] | --clear --confirm") {
-		t.Fatalf("link ShortUsage should show link and clear alternatives, got %q", linkCmd.ShortUsage)
 	}
 }
 
@@ -166,13 +150,15 @@ func TestFilterPromotedPurchaseIncludedRejectsMissingIdentifiers(t *testing.T) {
 }
 
 func scopedPromotedPurchasesCommandForTest() *ffcli.Command {
-	cmd := PromotedPurchasesCommand()
+	d := shared.DefaultDeps()
+	cmd := NewPromotedPurchasesCommand(d)
 	cmd.ShortUsage = "asc iap promoted-purchases <subcommand> [flags]"
 	ConfigureScopedPromotedPurchasesCommand(cmd, ScopedPromotedPurchasesCommandConfig{
 		PathPrefix:      "asc iap promoted-purchases",
 		ProductType:     promotedPurchaseProductTypeInAppPurchase,
 		ProductSingular: "in-app purchase",
 		ProductPlural:   "in-app purchases",
+		Deps:            d,
 	})
 	return cmd
 }

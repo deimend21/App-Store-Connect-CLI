@@ -5,7 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"time"
 
@@ -17,6 +17,7 @@ import (
 // an explicit --build-id, or --build-number or --latest within the version's
 // train, optionally waiting for processing with --wait.
 type VersionBuildSelector struct {
+	d            *shared.Deps
 	fs           *flag.FlagSet
 	buildID      *string
 	buildNumber  *string
@@ -34,8 +35,12 @@ type VersionBuildScope struct {
 	Platform string
 }
 
-func BindVersionBuildSelector(fs *flag.FlagSet) *VersionBuildSelector {
-	return &VersionBuildSelector{
+// BindVersionBuildSelectorWith binds the build selector flags to fs. The
+// selector writes its errors and notes to d's streams and bounds its lookup
+// with d's timeout.
+func BindVersionBuildSelectorWith(d *shared.Deps, fs *flag.FlagSet) *VersionBuildSelector {
+	selector := &VersionBuildSelector{
+		d:            d,
 		fs:           fs,
 		buildID:      shared.BindResourceIDFlag(fs, "build-id", "builds", "Build ID to attach"),
 		buildNumber:  fs.String("build-number", "", "Build number (CFBundleVersion) to attach from the version's app, version string, and platform"),
@@ -44,6 +49,8 @@ func BindVersionBuildSelector(fs *flag.FlagSet) *VersionBuildSelector {
 		timeout:      fs.Duration("timeout", buildsWaitDefaultTimeout, "Maximum time to wait with --wait"),
 		pollInterval: fs.Duration("poll-interval", buildsWaitDefaultPollInterval, "Polling interval for --wait"),
 	}
+	shared.BindBuildFlagAlias(fs)
+	return selector
 }
 
 func (s *VersionBuildSelector) Validate() error {
@@ -54,12 +61,12 @@ func (s *VersionBuildSelector) Validate() error {
 		}
 	}
 	if selected == 0 {
-		fmt.Fprintln(os.Stderr, "Error: --build-id, --build-number, or --latest is required")
+		fmt.Fprintln(s.d.IO.ErrOut, "Error: --build-id, --build-number, or --latest is required")
 		return shared.MissingRequiredUsageError("--build-id")
 	}
 	if selected > 1 {
 		return shared.WithDiagnostic(
-			shared.UsageError("--build-id, --build-number, and --latest are mutually exclusive"),
+			s.d.UsageError("--build-id, --build-number, and --latest are mutually exclusive"),
 			shared.DiagnosticConflictingInput,
 			"",
 		)
@@ -73,15 +80,15 @@ func (s *VersionBuildSelector) Validate() error {
 			}
 		})
 		if waitFlagSet {
-			return shared.UsageError("--timeout and --poll-interval require --wait")
+			return s.d.UsageError("--timeout and --poll-interval require --wait")
 		}
 		return nil
 	}
 	if *s.timeout <= 0 {
-		return shared.UsageError("--timeout must be greater than 0")
+		return s.d.UsageError("--timeout must be greater than 0")
 	}
 	if *s.pollInterval <= 0 {
-		return shared.UsageError("--poll-interval must be greater than 0")
+		return s.d.UsageError("--poll-interval must be greater than 0")
 	}
 	return nil
 }
@@ -109,13 +116,13 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 	}
 
 	if !*s.wait {
-		lookupCtx, cancel := shared.ContextWithTimeout(ctx)
+		lookupCtx, cancel := s.d.Timeout(ctx)
 		defer cancel()
-		buildResp, err := resolveBuildForAppWait(lookupCtx, client, selector, false)
+		buildResp, err := resolveBuildForAppWait(lookupCtx, s.d, client, selector, false)
 		if err != nil {
 			return "", err
 		}
-		reportSelectedVersionBuild(buildResp, selector)
+		reportSelectedVersionBuild(s.d.IO.ErrOut, buildResp, selector)
 		if err := requireValidBuild(buildResp); err != nil {
 			return "", err
 		}
@@ -126,14 +133,14 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 	defer cancel()
 
 	if buildID == "" {
-		buildResp, err := waitForBuildDiscovery(waitCtx, client, selector, *s.pollInterval, nil)
+		buildResp, err := waitForBuildDiscovery(waitCtx, s.d, client, selector, *s.pollInterval, nil)
 		if err != nil {
 			return "", s.waitError(waitCtx, err, "a matching build to appear")
 		}
-		if err := requireAppStoreBuildAudience(buildResp); err != nil {
+		if err := shared.RequireAppStoreBuildAudience(buildResp); err != nil {
 			return "", err
 		}
-		reportSelectedVersionBuild(buildResp, selector)
+		reportSelectedVersionBuild(s.d.IO.ErrOut, buildResp, selector)
 		buildID = strings.TrimSpace(buildResp.Data.ID)
 	}
 
@@ -142,11 +149,11 @@ func (s *VersionBuildSelector) Resolve(ctx context.Context, client *asc.Client, 
 		ShortVersion: selector.Version,
 		Platform:     selector.Platform,
 	}
-	buildResp, err := waitForBuildProcessingState(waitCtx, client, buildID, *s.pollInterval, true, failure, nil)
+	buildResp, err := waitForBuildProcessingState(waitCtx, s.d, client, buildID, *s.pollInterval, true, failure, nil)
 	if err != nil {
 		return "", s.waitError(waitCtx, err, fmt.Sprintf("build %s to finish processing", buildID))
 	}
-	if err := requireAppStoreBuildAudience(buildResp); err != nil {
+	if err := shared.RequireAppStoreBuildAudience(buildResp); err != nil {
 		return "", err
 	}
 	return buildID, nil
@@ -167,9 +174,9 @@ func (s *VersionBuildSelector) buildNumberValue() string {
 	return strings.TrimSpace(*s.buildNumber)
 }
 
-func reportSelectedVersionBuild(buildResp *asc.BuildResponse, selector appBuildWaitSelector) {
+func reportSelectedVersionBuild(stderr io.Writer, buildResp *asc.BuildResponse, selector appBuildWaitSelector) {
 	fmt.Fprintf(
-		os.Stderr,
+		stderr,
 		"Selected build %s (%s) for version %s on %s\n",
 		strings.TrimSpace(buildResp.Data.Attributes.Version),
 		strings.TrimSpace(buildResp.Data.ID),
@@ -178,15 +185,8 @@ func reportSelectedVersionBuild(buildResp *asc.BuildResponse, selector appBuildW
 	)
 }
 
-func requireAppStoreBuildAudience(buildResp *asc.BuildResponse) error {
-	if strings.EqualFold(strings.TrimSpace(string(buildResp.Data.Attributes.BuildAudienceType)), string(asc.BuildAudienceTypeInternalOnly)) {
-		return shared.WithDiagnostic(shared.NewValidationError(fmt.Errorf("build %s (%s) is INTERNAL_ONLY and cannot be attached to an App Store version", buildResp.Data.Attributes.Version, buildResp.Data.ID)), shared.DiagnosticStateNotReady, "--build-id")
-	}
-	return nil
-}
-
 func requireValidBuild(buildResp *asc.BuildResponse) error {
-	if err := requireAppStoreBuildAudience(buildResp); err != nil {
+	if err := shared.RequireAppStoreBuildAudience(buildResp); err != nil {
 		return err
 	}
 	state := strings.ToUpper(strings.TrimSpace(buildResp.Data.Attributes.ProcessingState))

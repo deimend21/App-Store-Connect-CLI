@@ -3,10 +3,15 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
 
 const (
@@ -205,34 +210,121 @@ func TestEnsureDeveloperPortalSessionReusesPersistedTeam(t *testing.T) {
 	}
 }
 
-func TestSelectDeveloperPortalTeamPrefixRequiresUniqueMatch(t *testing.T) {
-	t.Run("unique prefix match", func(t *testing.T) {
-		teams := []developerPortalTeam{
-			{TeamID: "ACME123", Name: "Acme"},
-			{TeamID: "OTHER456", Name: "Other"},
+func TestEnsureDeveloperPortalSessionFollowsSelectedProviderOverCachedTeam(t *testing.T) {
+	t.Run("switched provider", func(t *testing.T) {
+		assertPortalFollowsSelectedProvider(t, `{"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"}`)
+	})
+	t.Run("already on the selected provider", func(t *testing.T) {
+		assertPortalFollowsSelectedProvider(t, `{"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"}`)
+	})
+}
+
+func assertPortalFollowsSelectedProvider(t *testing.T, currentProvider string) {
+	t.Helper()
+	session := &AuthSession{DeveloperTeamID: "TEAM111"}
+	session.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.String() == olympusSessionURL && r.Method == http.MethodPost:
+			currentProvider = `{"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"}`
+			return developerPortalTestResponse(http.StatusOK, `{}`, nil), nil
+		case r.URL.String() == olympusSessionURL:
+			return developerPortalTestResponse(http.StatusOK, `{"provider": `+currentProvider+`, "availableProviders": [
+				{"providerId": 111, "publicProviderId": "TEAM111", "name": "Old Team"},
+				{"providerId": 222, "publicProviderId": "TEAM222", "name": "New Team"}
+			], "user": {"emailAddress": "user@example.com"}}`, nil), nil
+		case r.URL.Path == developerPortalTeamsPath:
+			return developerPortalTestResponse(http.StatusOK, `{"teams":[{"teamId":"TEAM111","name":"Old Team"},{"teamId":"TEAM222","name":"New Team"}]}`, nil), nil
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL)
+			return nil, nil
 		}
-		team, err := selectDeveloperPortalTeam(teams, "", "Acme Inc")
-		if err != nil {
-			t.Fatalf("selectDeveloperPortalTeam() error: %v", err)
+	})}
+
+	if err := SelectProvider(context.Background(), session, ProviderSelection{ProviderID: 222}); err != nil {
+		t.Fatalf("SelectProvider() error: %v", err)
+	}
+	client := NewClient(session)
+	if err := client.ensureDeveloperPortalSession(context.Background()); err != nil {
+		t.Fatalf("ensureDeveloperPortalSession() error: %v", err)
+	}
+	if got := client.developerPortalTeamID(); got != "TEAM222" {
+		t.Fatalf("developer portal team = %q, want TEAM222", got)
+	}
+}
+
+func TestDeveloperPortalForbiddenKeepsAppleCodesAndNeverSuggestsLogout(t *testing.T) {
+	client := developerPortalTestClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == developerPortalTeamsPath {
+			return developerPortalTestResponse(http.StatusOK, developerPortalTeamsFixture(), nil), nil
 		}
-		if team.TeamID != "ACME123" {
-			t.Fatalf("team = %+v", team)
-		}
+		return developerPortalTestResponse(http.StatusForbidden, `{"errors":[{"code":"FORBIDDEN_ERROR.INSUFFICIENT_ROLE"}]}`, nil), nil
 	})
 
-	t.Run("ambiguous prefix match fails closed", func(t *testing.T) {
-		teams := []developerPortalTeam{
-			{TeamID: "TEAMONE123", Name: "Example"},
-			{TeamID: "TEAMTWO456", Name: "Example Company"},
-		}
-		_, err := selectDeveloperPortalTeam(teams, "", "Example Company (App Store Connect)")
-		if err == nil {
-			t.Fatal("expected ambiguous prefix match to fail closed")
-		}
-		if !strings.Contains(err.Error(), "--developer-team") {
-			t.Fatalf("error %q does not mention --developer-team", err)
-		}
+	_, err := client.EnableDeveloperBundleIDCapability(context.Background(), DeveloperBundleIDCapabilityEnableRequest{
+		BundleID:   "bundle-1",
+		Capability: "PRIVATE_CLOUD_COMPUTE",
 	})
+	if err == nil {
+		t.Fatal("expected forbidden error")
+	}
+	for _, want := range []string{"FORBIDDEN_ERROR.INSUFFICIENT_ROLE", "permission", "expired", "asc web auth status"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "logout") {
+		t.Fatalf("error %q must not suggest logout for a 403", err)
+	}
+}
+
+func TestEnsureDeveloperPortalSessionReportsTeamsResultCodeInsteadOfNoTeam(t *testing.T) {
+	var portalHits int
+	client := developerPortalTestClient(t, func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == developerPortalTeamsPath {
+			return developerPortalTestResponse(http.StatusOK, `{"resultCode":1100,"resultString":"Your session has expired.  Please log in.","userString":"Your session has expired.  Please log in.","requestId":"req-1"}`, nil), nil
+		}
+		portalHits++
+		return developerPortalTestResponse(http.StatusInternalServerError, `{}`, nil), nil
+	})
+
+	_, err := client.EnableDeveloperBundleIDCapability(context.Background(), DeveloperBundleIDCapabilityEnableRequest{
+		BundleID:   "bundle-1",
+		Capability: "PRIVATE_CLOUD_COMPUTE",
+	})
+	var resultErr *DeveloperPortalResultError
+	if !errors.As(err, &resultErr) || resultErr.ResultCode != 1100 {
+		t.Fatalf("error = %v, want DeveloperPortalResultError with result code 1100", err)
+	}
+	if !strings.Contains(err.Error(), "Your session has expired") {
+		t.Fatalf("error %q does not carry Apple's message", err)
+	}
+	if strings.Contains(err.Error(), "no Developer Portal team") {
+		t.Fatalf("error %q misreports a refused teams request as a missing team", err)
+	}
+	if portalHits != 0 {
+		t.Fatalf("portal requests after refused teams request = %d, want 0", portalHits)
+	}
+}
+
+func selectDeveloperPortalTeam(teams []developerPortalTeam, publicProviderID, providerName string) (developerPortalTeam, error) {
+	return resolveDeveloperPortalTeam(teams, developerPortalTeamSelection{
+		PublicProviderID: publicProviderID,
+		ProviderName:     providerName,
+	})
+}
+
+func TestSelectDeveloperPortalTeamAmbiguousPrefixFailsClosed(t *testing.T) {
+	teams := []developerPortalTeam{
+		{TeamID: "TEAMONE123", Name: "Example"},
+		{TeamID: "TEAMTWO456", Name: "Example Company"},
+	}
+	_, err := selectDeveloperPortalTeam(teams, "", "Example Company (App Store Connect)")
+	if err == nil {
+		t.Fatal("expected ambiguous prefix match to fail closed")
+	}
+	if !strings.Contains(err.Error(), "--developer-team") {
+		t.Fatalf("error %q does not mention --developer-team", err)
+	}
 }
 
 func developerPortalMultiTeamFixture() string {
@@ -293,5 +385,31 @@ func assertDeveloperPortalErrorHasNoSecrets(t *testing.T, err error) {
 		if strings.Contains(message, secret) {
 			t.Fatalf("error %q leaked secret %q", message, secret)
 		}
+	}
+}
+
+func TestListDeveloperPortalTeamsReturnsEveryTeamWithoutSelecting(t *testing.T) {
+	t.Setenv(readonly.EnvVar, "1")
+
+	var requests []string
+	client := developerPortalTestClient(t, func(r *http.Request) (*http.Response, error) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		return developerPortalTestResponse(http.StatusOK, `{"teams":[{"teamId":" TEAMTWO456 ","name":" Example Two ","status":"active"},{"teamId":" ","name":"No ID"},{"teamId":"TEAMONE123","name":"Example One","status":"expired"}]}`, nil), nil
+	})
+	client.SetDeveloperTeamSelector("UNKNOWN")
+
+	result, err := client.ListDeveloperPortalTeams(context.Background())
+	if err != nil {
+		t.Fatalf("ListDeveloperPortalTeams() error: %v", err)
+	}
+	want := []asc.WebDeveloperTeam{
+		{TeamID: "TEAMTWO456", Name: "Example Two", Status: "active"},
+		{TeamID: "TEAMONE123", Name: "Example One", Status: "expired"},
+	}
+	if result == nil || !reflect.DeepEqual(result.Teams, want) {
+		t.Fatalf("teams = %+v, want %+v", result, want)
+	}
+	if got := strings.Join(requests, ","); got != "POST "+developerPortalTeamsPath {
+		t.Fatalf("requests = %q, want one teams POST", got)
 	}
 }

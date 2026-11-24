@@ -45,9 +45,10 @@ GOVULNCHECK_VERSION ?= v1.6.0
 # checkout inside the home directory reaches ~/.asc/config.json. The directory
 # is read-only so a test that writes config without choosing its own path fails
 # (root bypasses the mode, but the directory is still private to the run).
-# Tests that need any of these inputs set them with t.Setenv.
+# Tests that need any of these inputs set them with t.Setenv. TEST_AFFECTED_BY
+# and MAKEFLAGS are unset too, so tests that run make get the whole suite.
 TEST_ENV_PASSTHROUGH := ASC_UPDATE_GOLDEN ASC_SIGNING_RUN_LIVE_TEST ASC_SIGNING_KEYCHAIN_INSTALL_LIVE_TEST
-TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK ASC_BYPASS_KEYCHAIN=1
+TEST_ENV = env $(foreach var,$(sort $(filter-out $(TEST_ENV_PASSTHROUGH),$(filter ASC_%,$(.VARIABLES)))),-u $(var)) -u DO_NOT_TRACK -u TEST_AFFECTED_BY -u MAKEFLAGS ASC_BYPASS_KEYCHAIN=1 ASC_TEST_ENV_ISOLATED=1
 
 # $(call run_isolated_tests,<go test arguments>[,<test command>])
 # The test command defaults to `go test`.
@@ -106,6 +107,11 @@ build-all: clean
 	done
 	@echo "$(GREEN)✓ Release binaries written to $(RELEASE_DIR)/$(NC)"
 
+# Build the same self-contained Intel/Apple Silicon binaries as macOS releases.
+.PHONY: build-native-macos
+build-native-macos: clean
+	VERSION="$(VERSION)" RELEASE_DIR="$(RELEASE_DIR)" sh scripts/build_release_macos.sh
+
 # Build with debug symbols
 .PHONY: build-debug
 build-debug:
@@ -116,8 +122,9 @@ build-debug:
 # The slowest packages run as concurrent test shards beside the rest of ./...;
 # TEST_JOBS sets the CPU budget (default: GOMAXPROCS, else the CPU count). It is
 # a soft budget: it sizes shard and package fan-out, not a hard CPU limit.
+# TEST_AFFECTED_BY=<Go files> tests only the packages those files reach.
 TEST_JOBS ?=
-LOCAL_TEST = GO="$(GO)" python3 scripts/go_test_shard.py local --split ./internal/cli/cmdtest --split ./internal/cli/web $(if $(TEST_JOBS),--jobs $(TEST_JOBS)) --
+LOCAL_TEST = GO="$(GO)" python3 scripts/go_test_shard.py local --split ./internal/cli/cmdtest --split ./internal/cli/web $(if $(TEST_JOBS),--jobs $(TEST_JOBS)) $(if $(TEST_AFFECTED_BY),--affected-by $(TEST_AFFECTED_BY)) --
 
 # Run tests
 .PHONY: test
@@ -250,6 +257,12 @@ update-schema-index:
 	@echo "$(BLUE)Updating schema index...$(NC)"
 	python3 scripts/generate-schema-index.py
 
+# Regenerate the client code in internal/asc from the OpenAPI snapshot
+.PHONY: generate-client
+generate-client:
+	@echo "$(BLUE)Generating API client code...$(NC)"
+	$(GO) generate ./internal/asc
+
 # Generate docs/COMMANDS.md from live CLI help
 .PHONY: generate-command-docs
 generate-command-docs:
@@ -270,7 +283,7 @@ check-repo-docs:
 
 .PHONY: check-website-docs
 check-website-docs:
-	@echo "$(BLUE)Checking Mintlify website docs...$(NC)"
+	@echo "$(BLUE)Checking website docs...$(NC)"
 	python3 ./scripts/check_website_docs.py
 	python3 ./scripts/check_website_commands.py
 
@@ -287,6 +300,7 @@ check-openapi:
 	python3 ./scripts/test_generate_schema_index.py
 	python3 ./scripts/update-openapi-index.py --check
 	python3 ./scripts/generate-schema-index.py --check
+	cd internal/asc && $(GO) run ../openapigen -check
 
 .PHONY: check-docs
 check-docs: check-repo-docs check-agent-skills check-openapi
@@ -336,11 +350,11 @@ release: clean
 # Run the non-publishing checks used by the release rehearsal workflow
 .PHONY: release-guardrails
 release-guardrails:
+	python3 scripts/test_build_macos_release.py
 	python3 scripts/test_release_rehearsal.py
 	python3 scripts/test_check_docs.py
 	$(MAKE) format-check
 	$(MAKE) check-docs
-	$(MAKE) check-wall-of-apps
 	$(MAKE) lint
 	ASC_BYPASS_KEYCHAIN=1 $(MAKE) test
 
@@ -352,7 +366,8 @@ help:
 	@echo ""
 	@echo "Targets:"
 	@echo "  build          Build the binary"
-	@echo "  build-all      Build release binaries for supported platforms"
+	@echo "  build-all      Build cross-platform rehearsal binaries"
+	@echo "  build-native-macos Build self-contained macOS releases"
 	@echo "  build-debug    Build with debug symbols"
 	@echo "  test           Run tests (TEST_JOBS=<n> sets a soft CPU budget)"
 	@echo "  test-short     Run the short test suite (TEST_JOBS=<n> sets a soft CPU budget)"
@@ -369,12 +384,13 @@ help:
 	@echo "  update-deps    Update dependencies"
 	@echo "  update-openapi Update OpenAPI paths index"
 	@echo "  update-schema-index Update runtime schema index"
+	@echo "  generate-client Regenerate API client code from the OpenAPI snapshot"
 	@echo "  generate-command-docs Generate docs/COMMANDS.md from live CLI help"
 	@echo "  check-command-docs Validate docs command lists against live CLI help"
 	@echo "  check-repo-docs Validate local links in repository markdown docs"
-	@echo "  check-website-docs Validate Mintlify website navigation, links, and CLI examples"
+	@echo "  check-website-docs Validate website navigation, links, and CLI examples"
 	@echo "  check-agent-skills Validate repository-scoped Codex skills"
-	@echo "  check-openapi  Validate generated OpenAPI indexes"
+	@echo "  check-openapi  Validate generated OpenAPI indexes and client code"
 	@echo "  check-docs     Run all documentation checks"
 	@echo "  release-guardrails Run non-publishing release checks"
 	@echo "  clean          Clean build artifacts"

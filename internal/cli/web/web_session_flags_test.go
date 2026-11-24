@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
@@ -34,6 +35,7 @@ func TestBindWebSessionFlagsOmitsRemovedTwoFactorCodeAlias(t *testing.T) {
 }
 
 func TestResolveWebSessionForCommandPassesTwoFactorCodeCommand(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	restoreResolve := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode, twoFactorCodeCommand string) (*webcore.AuthSession, string, error) {
 		if appleID != "user@example.com" {
 			t.Fatalf("appleID = %q, want %q", appleID, "user@example.com")
@@ -53,10 +55,10 @@ func TestResolveWebSessionForCommandPassesTwoFactorCodeCommand(t *testing.T) {
 		twoFactorCodeCommand: ptrTo("osascript /tmp/get-apple-2fa-code.scpt"),
 	}
 
-	session, _, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
+	session, _, cancel, err := resolveWebSessionForCommandWith(context.Background(), d, flags)
 	defer cancel()
 	if err != nil {
-		t.Fatalf("resolveWebSessionForCommand() error = %v", err)
+		t.Fatalf("resolveWebSessionForCommandWith() error = %v", err)
 	}
 	if session == nil {
 		t.Fatal("expected session")
@@ -64,6 +66,7 @@ func TestResolveWebSessionForCommandPassesTwoFactorCodeCommand(t *testing.T) {
 }
 
 func TestResolveWebSessionForCommandSelectsProvider(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	expected := &webcore.AuthSession{UserEmail: "user@example.com"}
 	restoreResolve := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode, twoFactorCodeCommand string) (*webcore.AuthSession, string, error) {
 		return expected, "cache", nil
@@ -110,10 +113,10 @@ func TestResolveWebSessionForCommandSelectsProvider(t *testing.T) {
 		publicProviderID:     ptrTo("TEAM123"),
 	}
 
-	session, _, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
+	session, _, cancel, err := resolveWebSessionForCommandWith(context.Background(), d, flags)
 	defer cancel()
 	if err != nil {
-		t.Fatalf("resolveWebSessionForCommand() error = %v", err)
+		t.Fatalf("resolveWebSessionForCommandWith() error = %v", err)
 	}
 	if session != expected {
 		t.Fatal("expected selected session")
@@ -127,6 +130,7 @@ func TestResolveWebSessionForCommandSelectsProvider(t *testing.T) {
 }
 
 func TestResolveWebSessionForCommandDoesNotPersistBeforeProviderSelection(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	origTryResume := tryResumeSessionFn
 	origTryResumeLast := tryResumeLastFn
 	origLoadCachedSession := loadCachedSessionFn
@@ -180,7 +184,7 @@ func TestResolveWebSessionForCommandDoesNotPersistBeforeProviderSelection(t *tes
 			return &webcore.AuthSession{UserEmail: creds.Username}, nil
 		}
 
-		_, _, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
+		_, _, cancel, err := resolveWebSessionForCommandWith(context.Background(), d, flags)
 		defer cancel()
 		if !errors.Is(err, selectErr) {
 			t.Fatalf("expected provider selection error, got %v", err)
@@ -210,7 +214,7 @@ func TestResolveWebSessionForCommandDoesNotPersistBeforeProviderSelection(t *tes
 			return &webcore.AuthSession{Client: client, UserEmail: creds.Username}, nil
 		}
 
-		_, _, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
+		_, _, cancel, err := resolveWebSessionForCommandWith(context.Background(), d, flags)
 		defer cancel()
 		if !errors.Is(err, selectErr) {
 			t.Fatalf("expected provider selection error, got %v", err)
@@ -223,7 +227,6 @@ func ptrTo(value string) *string {
 }
 
 func TestWebCommandOperationSurvivesSlowInteractiveAuthentication(t *testing.T) {
-	_ = stubWebProgressLabels(t)
 	t.Setenv("ASC_TIMEOUT", "150ms")
 
 	origResolveSession := resolveSessionFn
@@ -246,7 +249,8 @@ func TestWebCommandOperationSurvivesSlowInteractiveAuthentication(t *testing.T) 
 		return &webcore.AnalyticsOverview{AppID: appID, StartDate: startDate, EndDate: endDate}, nil
 	}
 
-	cmd := WebAnalyticsOverviewCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAnalyticsOverviewCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--apple-id", "user@example.com",
 		"--app", "app-1",
@@ -258,8 +262,10 @@ func TestWebCommandOperationSurvivesSlowInteractiveAuthentication(t *testing.T) 
 	}
 
 	captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), nil); err != nil {
-			t.Fatalf("exec error: %v", err)
+		var execErr error
+		synctest.Test(t, func(*testing.T) { execErr = cmd.Exec(context.Background(), nil) })
+		if execErr != nil {
+			t.Fatalf("exec error: %v", execErr)
 		}
 	})
 
@@ -269,6 +275,7 @@ func TestWebCommandOperationSurvivesSlowInteractiveAuthentication(t *testing.T) 
 }
 
 func TestResolveWebSessionForCommandStartsRequestBudgetAfterAuthentication(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	t.Setenv("ASC_TIMEOUT", "150ms")
 
 	restoreResolve := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode, twoFactorCodeCommand string) (*webcore.AuthSession, string, error) {
@@ -285,27 +292,30 @@ func TestResolveWebSessionForCommandStartsRequestBudgetAfterAuthentication(t *te
 		twoFactorCodeCommand: ptrTo(""),
 	}
 
-	session, requestCtx, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
-	defer cancel()
-	if err != nil {
-		t.Fatalf("resolveWebSessionForCommand() error = %v", err)
-	}
-	if session == nil {
-		t.Fatal("expected session")
-	}
-	if err := requestCtx.Err(); err != nil {
-		t.Fatalf("request context expired during authentication: %v", err)
-	}
-	deadline, ok := requestCtx.Deadline()
-	if !ok {
-		t.Fatal("expected the request context to be bounded")
-	}
-	if remaining := time.Until(deadline); remaining <= 0 {
-		t.Fatalf("expected a positive request budget, got %v", remaining)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		session, requestCtx, cancel, err := resolveWebSessionForCommandWith(context.Background(), d, flags)
+		defer cancel()
+		if err != nil {
+			t.Fatalf("resolveWebSessionForCommandWith() error = %v", err)
+		}
+		if session == nil {
+			t.Fatal("expected session")
+		}
+		if err := requestCtx.Err(); err != nil {
+			t.Fatalf("request context expired during authentication: %v", err)
+		}
+		deadline, ok := requestCtx.Deadline()
+		if !ok {
+			t.Fatal("expected the request context to be bounded")
+		}
+		if remaining := time.Until(deadline); remaining != 150*time.Millisecond {
+			t.Fatalf("expected the full 150ms request budget, got %v", remaining)
+		}
+	})
 }
 
 func TestResolveWebSessionForCommandSelectsProviderOnRefreshedContext(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	t.Setenv("ASC_TIMEOUT", "150ms")
 
 	expected := &webcore.AuthSession{UserEmail: "user@example.com"}
@@ -336,10 +346,14 @@ func TestResolveWebSessionForCommandSelectsProviderOnRefreshedContext(t *testing
 		providerID:           &providerID,
 	}
 
-	_, _, cancel, err := resolveWebSessionForCommand(context.Background(), flags)
-	defer cancel()
+	var err error
+	synctest.Test(t, func(*testing.T) {
+		var cancel context.CancelFunc
+		_, _, cancel, err = resolveWebSessionForCommandWith(context.Background(), d, flags)
+		cancel()
+	})
 	if err != nil {
-		t.Fatalf("resolveWebSessionForCommand() error = %v", err)
+		t.Fatalf("resolveWebSessionForCommandWith() error = %v", err)
 	}
 	if selectionCtxErr != nil {
 		t.Fatalf("provider selection ran on an expired context: %v", selectionCtxErr)
@@ -347,6 +361,7 @@ func TestResolveWebSessionForCommandSelectsProviderOnRefreshedContext(t *testing
 }
 
 func TestResolveWebSessionForCommandRequestContextFollowsParentCancellation(t *testing.T) {
+	d, _, _ := newWebTestDeps()
 	restoreResolve := SetResolveWebSession(func(ctx context.Context, appleID, password, twoFactorCode, twoFactorCodeCommand string) (*webcore.AuthSession, string, error) {
 		return &webcore.AuthSession{}, "cache", nil
 	})
@@ -358,10 +373,10 @@ func TestResolveWebSessionForCommandRequestContextFollowsParentCancellation(t *t
 		twoFactorCodeCommand: ptrTo(""),
 	}
 
-	_, requestCtx, cancel, err := resolveWebSessionForCommand(parent, flags)
+	_, requestCtx, cancel, err := resolveWebSessionForCommandWith(parent, d, flags)
 	defer cancel()
 	if err != nil {
-		t.Fatalf("resolveWebSessionForCommand() error = %v", err)
+		t.Fatalf("resolveWebSessionForCommandWith() error = %v", err)
 	}
 
 	cancelParent()
@@ -386,6 +401,22 @@ func TestWithWebAuthHintCoversSessionInfoAuthStatus(t *testing.T) {
 		}
 		if got := withWebAuthHint(err, "web apps list").Error(); !strings.Contains(got, "run 'asc web auth login'") {
 			t.Fatalf("withWebAuthHint() = %q, want the web auth login hint for status %d", got, status)
+		}
+	}
+}
+
+func TestWithWebAuthHintDoesNotRepeatDeveloperPortalSessionGuidance(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		session := &webcore.AuthSession{Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Body: http.NoBody, Header: http.Header{}}, nil
+		})}}
+		_, err := webcore.NewClient(session).AssignDeveloperAppGroup(context.Background(), webcore.DeveloperAppGroupAssignRequest{BundleID: "bundle-1", GroupID: "GROUP1"})
+		if err == nil {
+			t.Fatalf("AssignDeveloperAppGroup() error = nil, want Developer Portal status %d", status)
+		}
+		got := withWebAuthHint(err, "web app-groups assign").Error()
+		if want := "web app-groups assign failed: " + err.Error(); got != want {
+			t.Fatalf("withWebAuthHint() = %q, want %q", got, want)
 		}
 	}
 }

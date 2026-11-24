@@ -103,9 +103,57 @@ func TestGetCertificates_SendsQuerySurface(t *testing.T) {
 		WithCertificatesFields([]string{"displayName", "serialNumber"}),
 		WithCertificatesPassTypeIDFields([]string{"name", "identifier"}),
 		WithCertificatesInclude([]string{"passTypeId"}),
-		WithCertificatesLimit(5),
+		Limit[CertificatesOption](5),
 	); err != nil {
 		t.Fatalf("GetCertificates() error: %v", err)
+	}
+}
+
+func TestCertificateSerialFiltersIncludeFormWithoutLeadingZeros(t *testing.T) {
+	const response = `{"data":[]}`
+	lists := []struct {
+		name string
+		list func(*Client, []string) error
+	}{
+		{name: "certificates", list: func(client *Client, serials []string) error {
+			_, err := client.GetCertificates(context.Background(), WithCertificatesFilterSerialNumbers(serials))
+			return err
+		}},
+		{name: "pass type ID certificates", list: func(client *Client, serials []string) error {
+			_, err := client.GetPassTypeIDCertificates(context.Background(), "p1", WithPassTypeIDCertificatesFilterSerialNumbers(serials))
+			return err
+		}},
+		{name: "merchant ID certificates", list: func(client *Client, serials []string) error {
+			_, err := client.GetMerchantIDCertificates(context.Background(), "m1", WithMerchantIDCertificatesFilterSerialNumbers(strings.Join(serials, ",")))
+			return err
+		}},
+	}
+	tests := []struct {
+		name    string
+		serials []string
+		want    string
+	}{
+		{name: "no leading zero", serials: []string{"E41"}, want: "E41"},
+		{name: "repeated value without leading zero", serials: []string{"E41", "E41"}, want: "E41,E41"},
+		{name: "leading zero", serials: []string{"0E41"}, want: "0E41,E41"},
+		{name: "several leading zeros", serials: []string{"000e41"}, want: "000e41,e41"},
+		{name: "both forms given", serials: []string{"E41", "0E41", "00E41"}, want: "E41,0E41,00E41"},
+		{name: "mixed values", serials: []string{"0E41", "A7"}, want: "0E41,E41,A7"},
+		{name: "only zeros", serials: []string{"00"}, want: "00"},
+	}
+	for _, list := range lists {
+		for _, test := range tests {
+			t.Run(list.name+"/"+test.name, func(t *testing.T) {
+				client := newTestClient(t, func(req *http.Request) {
+					if got := req.URL.Query().Get("filter[serialNumber]"); got != test.want {
+						t.Errorf("filter[serialNumber] = %q, want %q", got, test.want)
+					}
+				}, jsonResponse(http.StatusOK, response))
+				if err := list.list(client, test.serials); err != nil {
+					t.Fatalf("list error: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -115,8 +163,8 @@ func TestGetCertificate_RejectsCollectionQueryOptionsBeforeRequest(t *testing.T)
 		option CertificatesOption
 		want   string
 	}{
-		{name: "limit", option: WithCertificatesLimit(5), want: "limit option cannot be used with GetCertificate"},
-		{name: "next URL", option: WithCertificatesNextURL("https://api.appstoreconnect.apple.com/v1/certificates?cursor=next"), want: "next URL option cannot be used with GetCertificate"},
+		{name: "limit", option: Limit[CertificatesOption](5), want: "limit option cannot be used with GetCertificate"},
+		{name: "next URL", option: NextURL[CertificatesOption]("https://api.appstoreconnect.apple.com/v1/certificates?cursor=next"), want: "next URL option cannot be used with GetCertificate"},
 		{name: "certificate type", option: WithCertificatesTypes([]string{"IOS_DISTRIBUTION"}), want: "certificate type option cannot be used with GetCertificate"},
 		{name: "display name", option: WithCertificatesFilterDisplayNames([]string{"Alpha"}), want: "display name option cannot be used with GetCertificate"},
 		{name: "serial number", option: WithCertificatesFilterSerialNumbers([]string{"SN1"}), want: "serial number option cannot be used with GetCertificate"},

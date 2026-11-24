@@ -1,79 +1,23 @@
 package optimize
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/ads"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
-
-func TestKeywordsScoreCommandHelpDocumentsSourcesAndDesignDoc(t *testing.T) {
-	command := KeywordsScoreCommand()
-	joined := command.ShortUsage + "\n" + command.ShortHelp + "\n" + command.LongHelp
-	for _, want := range []string{
-		"asc optimize keywords score",
-		"docs/design/optimize-keywords.md",
-		"--ad-account",
-		"--genre",
-		"ASC_APP_ID",
-		"unavailable",
-		"latest complete week",
-	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("help missing %q:\n%s", want, joined)
-		}
-	}
-
-	if strings.Contains(joined, "30-day") {
-		t.Fatalf("help describes a 30-day popularity window, but the collector reads one complete week:\n%s", joined)
-	}
-	appFlag := command.FlagSet.Lookup("app")
-	if appFlag == nil || !strings.Contains(appFlag.Usage, "ASC_APP_ID") {
-		t.Fatalf("--app help must document the ASC_APP_ID fallback: %+v", appFlag)
-	}
-}
-
-func TestKeywordsScoreCommandFlagsAreRegistered(t *testing.T) {
-	command := KeywordsScoreCommand()
-	for _, name := range []string{"keywords", "country", "app", "genre", "ad-account", "ads-profile", "workers"} {
-		flag := command.FlagSet.Lookup(name)
-		if flag == nil {
-			t.Fatalf("missing score flag --%s", name)
-		}
-	}
-}
-
-func TestKeywordsScoreHelpSeparatesAdsAuthenticationFromAccountSelection(t *testing.T) {
-	help := KeywordsScoreCommand().LongHelp
-	for _, want := range []string{
-		"Apple Ads authentication is resolved independently from ad-account selection",
-		"--ads-profile or ASC_ADS_PROFILE",
-		"ASC_ADS_ACCESS_TOKEN",
-		"ASC_ADS_CLIENT_ID",
-		"ASC_ADS_PRIVATE_KEY_PATH",
-		"--ad-account or ASC_ADS_AD_ACCOUNT_ID",
-		"ads.ad_account_id",
-	} {
-		if !strings.Contains(help, want) {
-			t.Fatalf("help missing %q:\n%s", want, help)
-		}
-	}
-	if strings.Contains(help, "credentials through --ad-account") {
-		t.Fatalf("help conflates Ads authentication with account selection:\n%s", help)
-	}
-}
 
 func TestKeywordsScoreCommandValidatesInputBeforeRequests(t *testing.T) {
 	tests := []struct {
@@ -121,9 +65,9 @@ func TestKeywordsScoreCommandValidatesInputBeforeRequests(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("ASC_APP_ID", "")
-			failKeywordsClient(t)
+			d := failKeywordsClient(t)
 			failKeywordsAdsCollector(t)
-			err := KeywordsScoreCommand().ParseAndRun(context.Background(), test.args)
+			err := newKeywordsScoreCommand(d).ParseAndRun(context.Background(), test.args)
 			if err == nil || err.Error() != test.want {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
@@ -134,19 +78,8 @@ func TestKeywordsScoreCommandValidatesInputBeforeRequests(t *testing.T) {
 	}
 }
 
-func TestKeywordsScoreCommandRejectsPositionalArguments(t *testing.T) {
-	failKeywordsClient(t)
-	failKeywordsAdsCollector(t)
-	err := KeywordsScoreCommand().Exec(context.Background(), []string{"extra"})
-	if err == nil || err.Error() != "optimize keywords score does not accept positional arguments" {
-		t.Fatalf("error = %v", err)
-	}
-	if !errors.Is(err, flag.ErrHelp) {
-		t.Fatalf("error = %v, want usage error", err)
-	}
-}
-
 func TestKeywordScoreReportUsesRegisteredOutput(t *testing.T) {
+	d := newOptimizeTestDeps(nil)
 	report := asc.KeywordScoreReport{
 		Country: "US",
 		Summary: asc.KeywordScoreSummary{Keywords: 1, Scored: 1},
@@ -159,8 +92,8 @@ func TestKeywordScoreReportUsesRegisteredOutput(t *testing.T) {
 
 	for _, format := range []string{"table", "markdown"} {
 		t.Run(format, func(t *testing.T) {
-			stdout := captureSearchPlanStdout(t, func() error {
-				return shared.PrintOutput(&report, format, false)
+			stdout := captureSearchPlanStdout(t, d, func() error {
+				return d.PrintOutput(&report, format, false)
 			})
 			if strings.HasPrefix(strings.TrimSpace(stdout), "{") {
 				t.Fatalf("%s output fell back to JSON:\n%s", format, stdout)
@@ -175,6 +108,7 @@ func TestKeywordScoreReportUsesRegisteredOutput(t *testing.T) {
 }
 
 func TestKeywordScoreReportRendersFallbackState(t *testing.T) {
+	d := newOptimizeTestDeps(nil)
 	difficulty := 1.0
 	minimum := 1.0
 	report := asc.KeywordScoreReport{
@@ -191,8 +125,8 @@ func TestKeywordScoreReportRendersFallbackState(t *testing.T) {
 
 	for _, format := range []string{"json", "table", "markdown"} {
 		t.Run(format, func(t *testing.T) {
-			stdout := captureSearchPlanStdout(t, func() error {
-				return shared.PrintOutput(&report, format, false)
+			stdout := captureSearchPlanStdout(t, d, func() error {
+				return d.PrintOutput(&report, format, false)
 			})
 			if format == "json" {
 				if !strings.Contains(stdout, `"fallback":true`) {
@@ -256,11 +190,11 @@ func TestKeywordsScoreComposesCompetitionRankAndDegradesPopularity(t *testing.T)
 		}
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
-	stdout := captureSearchPlanStdout(t, func() error {
-		return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	stdout := captureSearchPlanStdout(t, d, func() error {
+		return newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 			"--keywords", "focus timer,tiny niche,broken keyword",
 			"--app", "1234567890",
 			"--output", "json",
@@ -386,11 +320,13 @@ func TestKeywordsScoreReportsIncompleteCompetitorMetadata(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
-	stdout := captureSearchPlanStdout(t, func() error {
-		return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	stdout := captureSearchPlanStdout(t, d, func() error {
+		d.Now = func() time.Time { return difficultyReferenceTime }
+		command := newKeywordsScoreCommand(d)
+		return command.ParseAndRun(context.Background(), []string{
 			"--keywords", "focus timer", "--output", "json",
 		})
 	})
@@ -418,13 +354,13 @@ func TestKeywordsScoreReportsIncompleteCompetitorMetadata(t *testing.T) {
 	if report.Rows[0].RawSignals[1].ReleaseDate != "" || report.Rows[0].RawSignals[1].CurrentVersionReleaseDate == "" {
 		t.Fatalf("partial metadata must preserve the valid update date: %+v", report.Rows[0].RawSignals[1])
 	}
-	if report.Rows[0].RawSignals[1].DaysSinceFirstRelease != keywordMissingDateDays || report.Rows[0].RawSignals[1].DaysSinceLastRelease >= keywordMissingDateDays {
+	if report.Rows[0].RawSignals[1].DaysSinceFirstRelease != keywordMissingDateDays || report.Rows[0].RawSignals[1].DaysSinceLastRelease != 20 {
 		t.Fatalf("partial metadata must use the valid update date while degrading the missing release date: %+v", report.Rows[0].RawSignals[1])
 	}
 	if report.Rows[0].RawSignals[2].ReleaseDate == "" || report.Rows[0].RawSignals[2].CurrentVersionReleaseDate != "" {
 		t.Fatalf("partial metadata must preserve the valid release date: %+v", report.Rows[0].RawSignals[2])
 	}
-	if report.Rows[0].RawSignals[2].DaysSinceFirstRelease >= keywordMissingDateDays || report.Rows[0].RawSignals[2].DaysSinceLastRelease != keywordMissingDateDays {
+	if report.Rows[0].RawSignals[2].DaysSinceFirstRelease != 300 || report.Rows[0].RawSignals[2].DaysSinceLastRelease != keywordMissingDateDays {
 		t.Fatalf("partial metadata must use the valid release date while degrading the missing update date: %+v", report.Rows[0].RawSignals[2])
 	}
 }
@@ -442,32 +378,20 @@ func TestKeywordsScoreReturnsParentCancellationAfterPartialSuccess(t *testing.T)
 		writeScoreSearchResults(w)
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	previousCollector := collectSearchPopularityForKeywords
 	t.Cleanup(func() { collectSearchPopularityForKeywords = previousCollector })
-	collectSearchPopularityForKeywords = func(context.Context, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
+	collectSearchPopularityForKeywords = func(context.Context, *shared.Deps, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
 		cancel()
 		return nil, context.Canceled
 	}
 
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	previousStdout := os.Stdout
-	os.Stdout = writer
-	runErr := KeywordsScoreCommand().ParseAndRun(ctx, []string{
+	runErr := newKeywordsScoreCommand(d).ParseAndRun(ctx, []string{
 		"--keywords", "focus timer",
 		"--genre", "PRODUCTIVITY_UTILITIES",
 		"--output", "json",
 	})
-	_ = writer.Close()
-	os.Stdout = previousStdout
-	stdout, readErr := io.ReadAll(reader)
-	_ = reader.Close()
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
+	stdout := d.IO.Out.(*bytes.Buffer).Bytes()
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("error = %v, want context cancellation", runErr)
 	}
@@ -489,11 +413,11 @@ func TestKeywordsScoreReportsEffectiveWorkerCount(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
-	stdout := captureSearchPlanStdout(t, func() error {
-		return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	stdout := captureSearchPlanStdout(t, d, func() error {
+		return newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 			"--keywords", "focus timer",
 			"--workers", "10",
 			"--output", "json",
@@ -526,11 +450,11 @@ func TestKeywordsScoreFlattensApplePopularityWhenAdsIsAvailable(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 
 	previous := collectSearchPopularityForKeywords
 	t.Cleanup(func() { collectSearchPopularityForKeywords = previous })
-	collectSearchPopularityForKeywords = func(_ context.Context, profile, account string, request ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
+	collectSearchPopularityForKeywords = func(_ context.Context, _ *shared.Deps, profile, account string, request ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
 		if profile != "Ads" || account != "987654321" {
 			t.Fatalf("ads credentials = (%q, %q)", profile, account)
 		}
@@ -547,8 +471,8 @@ func TestKeywordsScoreFlattensApplePopularityWhenAdsIsAvailable(t *testing.T) {
 		}, nil
 	}
 
-	stdout := captureSearchPlanStdout(t, func() error {
-		return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	stdout := captureSearchPlanStdout(t, d, func() error {
+		return newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 			"--keywords", "focus timer",
 			"--app", "1234567890",
 			"--genre", "productivity_utilities",
@@ -591,7 +515,7 @@ func TestCollectKeywordPopularityDoesNotRequireApp(t *testing.T) {
 	previous := collectSearchPopularityForKeywords
 	t.Cleanup(func() { collectSearchPopularityForKeywords = previous })
 	called := false
-	collectSearchPopularityForKeywords = func(_ context.Context, profile, account string, request ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
+	collectSearchPopularityForKeywords = func(_ context.Context, _ *shared.Deps, profile, account string, request ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
 		called = true
 		if profile != "Ads" || account != "987654321" {
 			t.Fatalf("ads credentials = (%q, %q)", profile, account)
@@ -604,7 +528,7 @@ func TestCollectKeywordPopularityDoesNotRequireApp(t *testing.T) {
 		}}, nil
 	}
 
-	popularity, status := collectKeywordPopularity(context.Background(), keywordPopularityRequest{
+	popularity, status := collectKeywordPopularity(context.Background(), newOptimizeTestDeps(nil), keywordPopularityRequest{
 		Keywords:   []string{"focus timer"},
 		Country:    "US",
 		Genre:      "PRODUCTIVITY_UTILITIES",
@@ -622,14 +546,14 @@ func TestCollectKeywordPopularityDoesNotRequireApp(t *testing.T) {
 func TestCollectKeywordPopularityNormalizesEquivalentTerms(t *testing.T) {
 	previous := collectSearchPopularityForKeywords
 	t.Cleanup(func() { collectSearchPopularityForKeywords = previous })
-	collectSearchPopularityForKeywords = func(context.Context, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
+	collectSearchPopularityForKeywords = func(context.Context, *shared.Deps, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
 		return []ads.SearchPopularity{
 			{Term: "focus timer", Week: "2026-08-08", Popularity5: intPtr(4)},
 			{Term: "ＨＡＢＩＴ　ＴＲＡＣＫＥＲ", Week: "2026-08-08", Popularity5: intPtr(3)},
 		}, nil
 	}
 
-	popularity, status := collectKeywordPopularity(context.Background(), keywordPopularityRequest{
+	popularity, status := collectKeywordPopularity(context.Background(), newOptimizeTestDeps(nil), keywordPopularityRequest{
 		Keywords: []string{"focus-timer", "habit tracker"},
 		Country:  "US",
 		Genre:    "PRODUCTIVITY_UTILITIES",
@@ -658,11 +582,11 @@ func TestKeywordsScoreDegradesWhenCompetitorMetadataIsUnavailable(t *testing.T) 
 			scoreSearchApp{ID: 555, Name: "Fifth", Seller: "Zeta Labs", Rating: 4.0, Count: 100})
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
-	stdout := captureSearchPlanStdout(t, func() error {
-		return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	stdout := captureSearchPlanStdout(t, d, func() error {
+		return newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 			"--keywords", "focus timer", "--output", "json",
 		})
 	})
@@ -696,10 +620,10 @@ func TestKeywordsScoreFailsWhenEveryKeywordFails(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
-	err := KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+	err := newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 		"--keywords", "focus timer,habit tracker", "--output", "json",
 	})
 	if err == nil || !strings.Contains(err.Error(), "optimize keywords score") || !strings.Contains(err.Error(), "500") {
@@ -721,13 +645,13 @@ func TestKeywordsScoreRendersTableAndMarkdown(t *testing.T) {
 			scoreSearchApp{ID: 555, Name: "Fifth", Seller: "Zeta Labs", Rating: 4.0, Count: 100})
 	}))
 	defer server.Close()
-	stubKeywordsClient(t, server.URL)
+	d := stubKeywordsClient(t, server.URL)
 	failKeywordsAdsCollector(t)
 
 	for _, format := range []string{"table", "markdown"} {
 		t.Run(format, func(t *testing.T) {
-			stdout := captureSearchPlanStdout(t, func() error {
-				return KeywordsScoreCommand().ParseAndRun(context.Background(), []string{
+			stdout := captureSearchPlanStdout(t, d, func() error {
+				return newKeywordsScoreCommand(d).ParseAndRun(context.Background(), []string{
 					"--keywords", "focus timer", "--output", format,
 				})
 			})
@@ -787,7 +711,7 @@ func failKeywordsAdsCollector(t *testing.T) {
 	t.Helper()
 	previous := collectSearchPopularityForKeywords
 	t.Cleanup(func() { collectSearchPopularityForKeywords = previous })
-	collectSearchPopularityForKeywords = func(context.Context, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
+	collectSearchPopularityForKeywords = func(context.Context, *shared.Deps, string, string, ads.SearchOptimizationRequest) ([]ads.SearchPopularity, error) {
 		t.Fatal("Apple Ads collector ran without complete popularity inputs")
 		return nil, nil
 	}

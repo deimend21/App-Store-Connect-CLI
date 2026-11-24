@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"go.mozilla.org/pkcs7"
@@ -455,14 +456,16 @@ func TestRunCodeSignInvocationUsesIndependentDeadlines(t *testing.T) {
 	}
 	t.Cleanup(func() { runCodeSignTool = runBoundedTool })
 
-	if _, err := runCodeSignInvocation(context.Background(), "codesign", "--verify"); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(2 * time.Millisecond)
-	if _, err := runCodeSignInvocation(context.Background(), "lipo", "-archs"); err != nil {
-		t.Fatal(err)
-	}
-	if len(deadlines) != 2 || !deadlines[1].After(deadlines[0]) {
+	synctest.Test(t, func(t *testing.T) {
+		if _, err := runCodeSignInvocation(context.Background(), "codesign", "--verify"); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+		if _, err := runCodeSignInvocation(context.Background(), "lipo", "-archs"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(deadlines) != 2 || deadlines[1].Sub(deadlines[0]) != 2*time.Millisecond {
 		t.Fatalf("invocation deadlines = %#v, want a fresh deadline for every tool call", deadlines)
 	}
 }
@@ -606,13 +609,13 @@ func TestEnumerateMachOFilesIgnoresJavaClassMagicCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := enumerateMachOFiles(appPath)
+	got, err := enumerateMachOFilesContext(context.Background(), appPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{mainPath, fatPath}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("enumerateMachOFiles() = %#v, want %#v", got, want)
+		t.Fatalf("enumerateMachOFilesContext() = %#v, want %#v", got, want)
 	}
 }
 
@@ -627,12 +630,12 @@ func TestEnumerateMachOFilesIgnoresNonLoadableObjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := enumerateMachOFiles(appPath)
+	got, err := enumerateMachOFilesContext(context.Background(), appPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0] != mainPath {
-		t.Fatalf("enumerateMachOFiles() = %#v, want only %q", got, mainPath)
+		t.Fatalf("enumerateMachOFilesContext() = %#v, want only %q", got, mainPath)
 	}
 }
 
@@ -656,12 +659,12 @@ func TestEnumerateMachOFilesIncludesOnlyLoadableThinImageTypes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := enumerateMachOFiles(appPath)
+	got, err := enumerateMachOFilesContext(context.Background(), appPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
-		t.Fatalf("enumerateMachOFiles() = %#v, want %#v", got, want)
+		t.Fatalf("enumerateMachOFilesContext() = %#v, want %#v", got, want)
 	}
 }
 
@@ -675,12 +678,12 @@ func TestEnumerateMachOFilesClassifiesFatImageTypesSafely(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(appPath, "Resource.o"), fatMachOWithTypes(1), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, err := enumerateMachOFiles(appPath)
+		got, err := enumerateMachOFilesContext(context.Background(), appPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(got) != 1 || got[0] != mainPath {
-			t.Fatalf("enumerateMachOFiles() = %#v, want only %q", got, mainPath)
+			t.Fatalf("enumerateMachOFilesContext() = %#v, want only %q", got, mainPath)
 		}
 	})
 
@@ -689,8 +692,8 @@ func TestEnumerateMachOFilesClassifiesFatImageTypesSafely(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(appPath, "Mixed"), fatMachOWithTypes(2, 1), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := enumerateMachOFiles(appPath); err == nil || !strings.Contains(err.Error(), "mixes loadable and non-loadable") {
-			t.Fatalf("enumerateMachOFiles() error = %v, want mixed-type rejection", err)
+		if _, err := enumerateMachOFilesContext(context.Background(), appPath); err == nil || !strings.Contains(err.Error(), "mixes loadable and non-loadable") {
+			t.Fatalf("enumerateMachOFilesContext() error = %v, want mixed-type rejection", err)
 		}
 	})
 
@@ -702,8 +705,8 @@ func TestEnumerateMachOFilesClassifiesFatImageTypesSafely(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(appPath, "Malformed"), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := enumerateMachOFiles(appPath); err == nil || !strings.Contains(err.Error(), "malformed architecture slice") {
-			t.Fatalf("enumerateMachOFiles() error = %v, want malformed-slice rejection", err)
+		if _, err := enumerateMachOFilesContext(context.Background(), appPath); err == nil || !strings.Contains(err.Error(), "malformed architecture slice") {
+			t.Fatalf("enumerateMachOFilesContext() error = %v, want malformed-slice rejection", err)
 		}
 	})
 }

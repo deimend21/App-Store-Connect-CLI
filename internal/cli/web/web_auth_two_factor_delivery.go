@@ -27,14 +27,22 @@ type twoFactorDeliveryFlags struct {
 func bindTwoFactorDeliveryFlags(fs *flag.FlagSet) twoFactorDeliveryFlags {
 	return twoFactorDeliveryFlags{
 		flagSet: fs,
-		method:  fs.String("two-factor-method", "", "2FA code delivery: auto (trusted devices first) or sms (text a trusted phone number); defaults to "+webTwoFactorMethodEnv+", then auto"),
+		method:  fs.String("two-factor-method", "", "2FA method: auto, sms, or security-key (requires a macOS fido2 build); defaults to "+webTwoFactorMethodEnv+", then auto"),
 		phoneID: fs.Int("two-factor-phone-id", 0, "Trusted phone number ID for --two-factor-method sms when the account has several; defaults to "+webTwoFactorPhoneIDEnv),
 	}
 }
 
-// resolve merges the flags with their environment fallbacks and validates the
-// result before any sign-in side effect.
-func (f twoFactorDeliveryFlags) resolve() (appleauth.TwoFactorPreference, error) {
+// resolveWith merges the flags with their environment fallbacks and validates
+// the result before any sign-in side effect, writing usage errors to d's stderr.
+func (f twoFactorDeliveryFlags) resolveWith(d *shared.Deps) (appleauth.TwoFactorPreference, error) {
+	// Under a broker asc never signs in, so a sign-in flag is refused and the
+	// environment's sign-in settings, valid or not, play no part.
+	if _, brokered, err := webBrokerFromEnv(d); brokered {
+		if err == nil {
+			err = refuseSignInFlagsUnderWebBroker(d, f.flagSet)
+		}
+		return appleauth.TwoFactorPreference{}, err
+	}
 	method := ""
 	if f.method != nil {
 		method = *f.method
@@ -53,10 +61,10 @@ func (f twoFactorDeliveryFlags) resolve() (appleauth.TwoFactorPreference, error)
 			}
 		})
 	}
-	return resolveTwoFactorPreference(method, phoneID, phoneIDSet)
+	return resolveTwoFactorPreferenceWith(d, method, phoneID, phoneIDSet)
 }
 
-func resolveTwoFactorPreference(methodFlag string, phoneIDFlag int, phoneIDFlagSet bool) (appleauth.TwoFactorPreference, error) {
+func resolveTwoFactorPreferenceWith(d *shared.Deps, methodFlag string, phoneIDFlag int, phoneIDFlagSet bool) (appleauth.TwoFactorPreference, error) {
 	method := strings.ToLower(strings.TrimSpace(methodFlag))
 	methodSource := "--two-factor-method"
 	if method == "" {
@@ -64,22 +72,22 @@ func resolveTwoFactorPreference(methodFlag string, phoneIDFlag int, phoneIDFlagS
 		methodSource = webTwoFactorMethodEnv
 	}
 	switch method {
-	case "", twoFactorMethodAuto, appleauth.TwoFactorDeliverySMS:
+	case "", twoFactorMethodAuto, appleauth.TwoFactorDeliverySMS, appleauth.TwoFactorMethodSecurityKey:
 	default:
-		return appleauth.TwoFactorPreference{}, shared.UsageError(methodSource + " must be one of: auto, sms")
+		return appleauth.TwoFactorPreference{}, d.UsageError(methodSource + " must be one of: auto, sms, security-key")
 	}
 
 	phoneID := phoneIDFlag
 	phoneIDSource := "--two-factor-phone-id"
 	if phoneID < 0 || (phoneIDFlagSet && phoneID == 0) {
-		return appleauth.TwoFactorPreference{}, shared.UsageError(phoneIDSource + " must be a positive trusted phone number ID")
+		return appleauth.TwoFactorPreference{}, d.UsageError(phoneIDSource + " must be a positive trusted phone number ID")
 	}
 	if phoneID == 0 {
 		if value := strings.TrimSpace(os.Getenv(webTwoFactorPhoneIDEnv)); value != "" {
 			phoneIDSource = webTwoFactorPhoneIDEnv
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed <= 0 {
-				return appleauth.TwoFactorPreference{}, shared.UsageError(phoneIDSource + " must be a positive trusted phone number ID")
+				return appleauth.TwoFactorPreference{}, d.UsageError(phoneIDSource + " must be a positive trusted phone number ID")
 			}
 			phoneID = parsed
 		}
@@ -87,7 +95,10 @@ func resolveTwoFactorPreference(methodFlag string, phoneIDFlag int, phoneIDFlagS
 
 	if method != appleauth.TwoFactorDeliverySMS {
 		if phoneID != 0 {
-			return appleauth.TwoFactorPreference{}, shared.UsageError(phoneIDSource + " requires --two-factor-method sms")
+			return appleauth.TwoFactorPreference{}, d.UsageError(phoneIDSource + " requires --two-factor-method sms")
+		}
+		if method == appleauth.TwoFactorMethodSecurityKey {
+			return appleauth.TwoFactorPreference{Delivery: method}, nil
 		}
 		return appleauth.TwoFactorPreference{}, nil
 	}
@@ -104,9 +115,9 @@ func contextWithTwoFactorPreference(ctx context.Context, preference appleauth.Tw
 
 // twoFactorPreferenceForSignIn returns the flag-resolved preference, falling
 // back to the environment for callers without delivery flags.
-func twoFactorPreferenceForSignIn(ctx context.Context) (appleauth.TwoFactorPreference, error) {
+func twoFactorPreferenceForSignIn(ctx context.Context, d *shared.Deps) (appleauth.TwoFactorPreference, error) {
 	if preference, ok := ctx.Value(twoFactorPreferenceContextKey{}).(appleauth.TwoFactorPreference); ok {
 		return preference, nil
 	}
-	return resolveTwoFactorPreference("", 0, false)
+	return resolveTwoFactorPreferenceWith(d, "", 0, false)
 }

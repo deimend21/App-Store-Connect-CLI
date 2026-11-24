@@ -17,11 +17,12 @@ import (
 )
 
 func TestWebSignInKeysCreateRequiresBundleID(t *testing.T) {
-	command := WebSignInKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysCreateCommand(d)
 	if err := command.FlagSet.Parse([]string{"--name", "Sway", "--output-dir", t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected usage error, got %v", err)
 		}
@@ -40,7 +41,8 @@ func TestWebSignInKeysCreateRequiresConfirmBeforeSessionResolution(t *testing.T)
 		return nil, "", errors.New("session resolution must not run without confirmation")
 	}
 
-	command := WebSignInKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysCreateCommand(d)
 	if err := command.FlagSet.Parse([]string{
 		"--name", "Sway",
 		"--bundle-id", "BUNDLE123",
@@ -48,7 +50,7 @@ func TestWebSignInKeysCreateRequiresConfirmBeforeSessionResolution(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected usage error, got %v", err)
 		}
@@ -70,14 +72,15 @@ func TestWebSignInKeysDownloadRequiresConfirmBeforeSessionResolution(t *testing.
 		return nil, "", errors.New("session resolution must not run without confirmation")
 	}
 
-	command := WebSignInKeysDownloadCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysDownloadCommand(d)
 	if err := command.FlagSet.Parse([]string{
 		"--key-id", "KEY123",
 		"--output-dir", t.TempDir(),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected usage error, got %v", err)
 		}
@@ -122,11 +125,12 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 		calls++
 		return []byte("PRIVATE-TEST-MATERIAL"), nil
 	}
-	command := WebSignInKeysCreateCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysCreateCommand(d)
 	if err := command.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory, "--confirm", "--output", "json"}); err != nil {
 		t.Fatal(err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		err := command.Exec(context.Background(), nil)
 		if runtime.GOOS == "windows" {
 			if !errors.Is(err, rootfs.ErrFileIdentityMutationUnsupported) {
@@ -165,7 +169,8 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 	if err != nil || string(saved) != "PRIVATE-TEST-MATERIAL" {
 		t.Fatal("key not saved")
 	}
-	download := WebSignInKeysDownloadCommand()
+	d, _, _ = newWebTestDeps()
+	download := newWebSignInKeysDownloadCommand(d)
 	if err := download.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", directory, "--confirm"}); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +180,8 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 	if calls != 1 {
 		t.Fatal("consumed download despite existing destination")
 	}
-	createCollision := WebSignInKeysCreateCommand()
+	d, _, _ = newWebTestDeps()
+	createCollision := newWebSignInKeysCreateCommand(d)
 	if err := createCollision.FlagSet.Parse([]string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", directory, "--confirm"}); err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +211,8 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 				}
 				return []byte("PRIVATE-TEST-MATERIAL"), nil
 			}
-			command := WebSignInKeysDownloadCommand()
+			d, _, _ := newWebTestDeps()
+			command := newWebSignInKeysDownloadCommand(d)
 			if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", racedDir, "--confirm"}); err != nil {
 				t.Fatal(err)
 			}
@@ -231,11 +238,12 @@ func testWebSignInKeysCreateSavesPrivateFileAndReceipt(t *testing.T, directory s
 }
 
 func TestWebSignInKeysDownloadRequiresKeyID(t *testing.T) {
-	command := WebSignInKeysDownloadCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysDownloadCommand(d)
 	if err := command.FlagSet.Parse([]string{"--output-dir", t.TempDir()}); err != nil {
 		t.Fatal(err)
 	}
-	_, stderr := captureWebCommandOutput(t, func() {
+	_, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected usage error, got %v", err)
 		}
@@ -300,17 +308,18 @@ func testWebSignInKeysRetainsMalformed2xxResponse(t *testing.T, create bool) {
 	}
 
 	outputDir := t.TempDir()
-	command := WebSignInKeysDownloadCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysDownloadCommand(d)
 	args := []string{"--key-id", "KEY123", "--output-dir", outputDir, "--confirm", "--output", "json"}
 	if create {
-		command = WebSignInKeysCreateCommand()
+		command = newWebSignInKeysCreateCommand(d)
 		args = []string{"--name", "Sway", "--bundle-id", "BUNDLE123", "--output-dir", outputDir, "--confirm", "--output", "json"}
 	}
 	if err := command.FlagSet.Parse(args); err != nil {
 		t.Fatal(err)
 	}
 	var runErr error
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		runErr = command.Exec(context.Background(), nil)
 	})
 	if runtime.GOOS == "windows" {
@@ -372,12 +381,13 @@ func TestWebSignInKeysDownloadFailureCleansEmptyStage(t *testing.T) {
 		return nil, errors.New("transport failed")
 	}
 	outputDir := t.TempDir()
-	command := WebSignInKeysDownloadCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebSignInKeysDownloadCommand(d)
 	if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--output-dir", outputDir, "--confirm"}); err != nil {
 		t.Fatal(err)
 	}
 	var runErr error
-	captureWebCommandOutput(t, func() { runErr = command.Exec(context.Background(), nil) })
+	runWithWebTestDeps(depsStdout, depsStderr, func() { runErr = command.Exec(context.Background(), nil) })
 	if runtime.GOOS == "windows" {
 		if !errors.Is(runErr, rootfs.ErrFileIdentityMutationUnsupported) {
 			t.Fatalf("expected unsupported private publication: %v", runErr)
@@ -401,4 +411,118 @@ func btoi(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestWebPushKeysCreateUsesAPNsServiceAndSavesKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("private P8 publication is unsupported on Windows")
+	}
+	originalResolve, originalClient, originalPersist := resolveSessionFn, newWebClientFn, persistWebSessionFn
+	originalSignInCreate, originalSignInDownload := createDeveloperSignInKeyFn, downloadDeveloperSignInKeyFn
+	originalCreate, originalDownload := createDeveloperPushKeyFn, downloadDeveloperPushKeyFn
+	t.Cleanup(func() {
+		resolveSessionFn, newWebClientFn, persistWebSessionFn = originalResolve, originalClient, originalPersist
+		createDeveloperSignInKeyFn, downloadDeveloperSignInKeyFn = originalSignInCreate, originalSignInDownload
+		createDeveloperPushKeyFn, downloadDeveloperPushKeyFn = originalCreate, originalDownload
+	})
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		return &webcore.AuthSession{}, "cache", nil
+	}
+	newWebClientFn = func(*webcore.AuthSession) *webcore.Client { return &webcore.Client{} }
+	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
+	createDeveloperSignInKeyFn = func(context.Context, *webcore.Client, string, string) (*webcore.DeveloperSignInKey, error) {
+		t.Fatal("push-keys create used the Sign in with Apple service")
+		return nil, nil
+	}
+	downloadDeveloperSignInKeyFn = func(context.Context, *webcore.Client, string) ([]byte, error) {
+		t.Fatal("push-keys create used the Sign in with Apple download")
+		return nil, nil
+	}
+	createDeveloperPushKeyFn = func(_ context.Context, _ *webcore.Client, name string) (*webcore.DeveloperSignInKey, error) {
+		if name != "Push" {
+			t.Fatalf("name = %q", name)
+		}
+		return &webcore.DeveloperSignInKey{KeyID: "KEY123"}, nil
+	}
+	downloadDeveloperPushKeyFn = func(_ context.Context, _ *webcore.Client, keyID string) ([]byte, error) {
+		if keyID != "KEY123" {
+			t.Fatalf("keyID = %q", keyID)
+		}
+		return []byte("PRIVATE-TEST-MATERIAL"), nil
+	}
+	directory := t.TempDir()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebPushKeysCommand(d).Subcommands[0]
+	if err := command.FlagSet.Parse([]string{"--name", "Push", "--output-dir", directory, "--confirm", "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := command.Exec(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.Contains(stdout+stderr, "PRIVATE-TEST-MATERIAL") {
+		t.Fatal("private key leaked")
+	}
+	want := fmt.Sprintf(`{"keyId":"KEY123","name":"Push","p8Path":%q}`, filepath.Join(directory, "AuthKey_KEY123.p8"))
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("receipt = %s, want %s", stdout, want)
+	}
+	saved, err := os.ReadFile(filepath.Join(directory, "AuthKey_KEY123.p8"))
+	if err != nil || string(saved) != "PRIVATE-TEST-MATERIAL" {
+		t.Fatal("key not saved")
+	}
+}
+
+func TestWebPushKeysRevokeRequiresConfirmThenRevokesAPNsKey(t *testing.T) {
+	originalResolve, originalClient, originalPersist := resolveSessionFn, newWebClientFn, persistWebSessionFn
+	originalSignInRevoke, originalRevoke := revokeDeveloperSignInKeyFn, revokeDeveloperPushKeyFn
+	t.Cleanup(func() {
+		resolveSessionFn, newWebClientFn, persistWebSessionFn = originalResolve, originalClient, originalPersist
+		revokeDeveloperSignInKeyFn, revokeDeveloperPushKeyFn = originalSignInRevoke, originalRevoke
+	})
+	resolveCalls := 0
+	resolveSessionFn = func(context.Context, string, string, string) (*webcore.AuthSession, string, error) {
+		resolveCalls++
+		return &webcore.AuthSession{}, "cache", nil
+	}
+	newWebClientFn = func(*webcore.AuthSession) *webcore.Client { return &webcore.Client{} }
+	persistWebSessionFn = func(*webcore.AuthSession) error { return nil }
+	revokeDeveloperSignInKeyFn = func(context.Context, *webcore.Client, string) error {
+		t.Fatal("push-keys revoke used the Sign in with Apple service")
+		return nil
+	}
+	var revoked []string
+	revokeDeveloperPushKeyFn = func(_ context.Context, _ *webcore.Client, keyID string) error {
+		revoked = append(revoked, keyID)
+		return nil
+	}
+
+	d, depsStdout, depsStderr := newWebTestDeps()
+	command := newWebPushKeysCommand(d).Subcommands[2]
+	if err := command.FlagSet.Parse([]string{"--key-id", "KEY123"}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := command.Exec(context.Background(), nil); !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("expected usage error, got %v", err)
+		}
+	})
+	if resolveCalls != 0 || len(revoked) != 0 || stdout != "" || !strings.Contains(stderr, "--confirm is required") {
+		t.Fatalf("revoked without --confirm: resolves=%d revoked=%v stdout=%q stderr=%q", resolveCalls, revoked, stdout, stderr)
+	}
+
+	d, depsStdout, depsStderr = newWebTestDeps()
+	command = newWebPushKeysCommand(d).Subcommands[2]
+	if err := command.FlagSet.Parse([]string{"--key-id", "KEY123", "--confirm", "--output", "json"}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _ = runWithWebTestDeps(depsStdout, depsStderr, func() {
+		if err := command.Exec(context.Background(), nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(revoked) != 1 || revoked[0] != "KEY123" || strings.TrimSpace(stdout) != `{"keyId":"KEY123","revoked":true}` {
+		t.Fatalf("revoked=%v stdout=%q", revoked, stdout)
+	}
 }

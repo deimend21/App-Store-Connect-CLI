@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -140,10 +139,10 @@ type scoredResult struct {
 	rank   int
 }
 
-// SearchCommand returns the command-discovery search command.
-func SearchCommand(commands func() []*ffcli.Command) *ffcli.Command {
-	fs := flag.NewFlagSet("search", flag.ExitOnError)
-	output := shared.BindOutputFlags(fs)
+// NewSearchCommand returns the command-discovery search command built on d.
+func NewSearchCommand(d *shared.Deps, commands func() []*ffcli.Command) *ffcli.Command {
+	fs := d.NewFlagSet("search", flag.ExitOnError)
+	output := d.BindOutputFlags(fs)
 	limit := fs.Int("limit", defaultLimit, "Maximum number of results to return")
 
 	return &ffcli.Command{
@@ -162,52 +161,47 @@ Examples:
   asc search --output table "upload build"
   asc search --limit 5 "cert profiles"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			_ = ctx
+		UsageFunc: d.DefaultUsageFunc,
+		Exec: func(_ context.Context, args []string) error {
 			defer resetFlagSet(fs)
 
 			args, err := parseInterspersedSearchFlags(fs, args)
 			if err != nil {
 				if errors.Is(err, errRootProfileAfterPositional) {
-					return shared.UsageError(err.Error())
+					return d.UsageError(err.Error())
 				}
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(d.IO.ErrOut, "Error: %v\n", err)
 				return flag.ErrHelp
 			}
 			if len(args) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: search query is required")
+				fmt.Fprintln(d.IO.ErrOut, "Error: search query is required")
 				return shared.MissingRequiredUsageError("")
 			}
 			if *limit <= 0 {
-				fmt.Fprintln(os.Stderr, "Error: --limit must be greater than 0")
+				fmt.Fprintln(d.IO.ErrOut, "Error: --limit must be greater than 0")
 				return flag.ErrHelp
 			}
 
 			query := strings.Join(args, " ")
 			if strings.TrimSpace(query) == "" {
-				fmt.Fprintln(os.Stderr, "Error: search query is required")
+				fmt.Fprintln(d.IO.ErrOut, "Error: search query is required")
 				return shared.MissingRequiredUsageError("")
 			}
-			selectedOutput := *output.Output
-			selectedPretty := *output.Pretty
-			selectedLimit := *limit
-
-			response := SearchCommands(commands(), query, selectedLimit)
-			if err := shared.PrintOutputWithRenderers(
+			response := SearchCommands(commands(), query, *limit)
+			if err := d.PrintOutputWithRenderers(
 				response,
-				selectedOutput,
-				selectedPretty,
+				*output.Output,
+				*output.Pretty,
 				func() error {
-					asc.RenderTable([]string{"score", "command", "summary", "matched"}, searchRows(response.Results))
+					asc.RenderTableTo(d.IO.Out, []string{"score", "command", "summary", "matched"}, searchRows(response.Results))
 					return nil
 				},
 				func() error {
-					asc.RenderMarkdown([]string{"score", "command", "summary", "matched"}, searchRows(response.Results))
+					asc.RenderMarkdownTo(d.IO.Out, []string{"score", "command", "summary", "matched"}, searchRows(response.Results))
 					return nil
 				},
 			); err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 			return nil
 		},
@@ -215,19 +209,13 @@ Examples:
 }
 
 func resetFlagSet(fs *flag.FlagSet) {
-	if fs == nil {
-		return
-	}
 	fs.VisitAll(func(f *flag.Flag) {
-		if f == nil {
-			return
-		}
 		_ = f.Value.Set(f.DefValue)
 	})
 }
 
 func parseInterspersedSearchFlags(fs *flag.FlagSet, args []string) ([]string, error) {
-	if fs == nil || len(args) == 0 {
+	if len(args) == 0 {
 		return args, nil
 	}
 	if args[0] == shared.FlagTerminatorSentinel {
@@ -239,6 +227,7 @@ func parseInterspersedSearchFlags(fs *flag.FlagSet, args []string) ([]string, er
 		return args, nil
 	}
 
+	setter := shared.NewInterspersedFlagSetter(fs)
 	queryArgs := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -263,10 +252,7 @@ func parseInterspersedSearchFlags(fs *flag.FlagSet, args []string) ([]string, er
 		}
 
 		if isBoolSearchFlag(f) && !hasValue {
-			if err := f.Value.Set("true"); err != nil {
-				return nil, fmt.Errorf("invalid value %q for --%s: %w", "true", name, err)
-			}
-			continue
+			value, hasValue = "true", true
 		}
 
 		if !hasValue {
@@ -277,8 +263,8 @@ func parseInterspersedSearchFlags(fs *flag.FlagSet, args []string) ([]string, er
 			value = args[i]
 		}
 
-		if err := f.Value.Set(value); err != nil {
-			return nil, fmt.Errorf("invalid value %q for --%s: %w", value, name, err)
+		if err := setter.Set(f, name, value); err != nil {
+			return nil, err
 		}
 	}
 
@@ -310,9 +296,6 @@ func isBoolSearchFlag(f *flag.Flag) bool {
 		IsBoolFlag() bool
 	}
 
-	if f == nil {
-		return false
-	}
 	boolValue, ok := f.Value.(boolFlag)
 	return ok && boolValue.IsBoolFlag()
 }
@@ -984,7 +967,7 @@ func commandFlags(cmd *ffcli.Command) []string {
 	}
 	flags := make([]string, 0)
 	cmd.FlagSet.VisitAll(func(f *flag.Flag) {
-		if f == nil {
+		if f == nil || shared.IsFlagAlias(f) {
 			return
 		}
 		flags = append(flags, f.Name)

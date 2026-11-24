@@ -3,6 +3,7 @@ package assets
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,23 +13,67 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/uploadlock"
 )
 
-const (
-	assetUploadDefaultTimeout = 10 * time.Minute
-	assetPollInterval         = 2 * time.Second
-)
+var errAssetUploadDeadline = errors.New("asset upload deadline reached")
+
+type assetUploadWorkKey struct{}
+
+type assetUploadWork struct {
+	files int
+	bytes int64
+}
+
+// withAssetUploadWork records the files that the next upload deadline must
+// cover, so contextWithAssetUploadTimeout can size its default to them.
+func withAssetUploadWork(ctx context.Context, files []string) context.Context {
+	work := assetUploadWork{files: len(files)}
+	for _, filePath := range files {
+		if info, err := os.Stat(filePath); err == nil {
+			work.bytes += info.Size()
+		}
+	}
+	return context.WithValue(ctx, assetUploadWorkKey{}, work)
+}
 
 func contextWithAssetUploadTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return contextWithAssetUploadTimeoutResolved(ctx, shared.ResolveTimeoutSetting)
+}
+
+func contextWithAssetUploadTimeoutResolved(ctx context.Context, resolve func(shared.TimeoutSetting, time.Duration) time.Duration) (context.Context, context.CancelFunc) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithTimeout(ctx, asc.ResolveUploadTimeoutWithDefault(assetUploadDefaultTimeout))
+	work, _ := ctx.Value(assetUploadWorkKey{}).(assetUploadWork)
+	return context.WithTimeoutCause(ctx, resolve(shared.UploadTimeoutSetting, shared.MediaUploadTimeoutForWork(work.files, work.bytes)), errAssetUploadDeadline)
+}
+
+// assetUploadContext returns ContextWithAssetUploadTimeoutWith bound to d.
+func assetUploadContext(d *shared.Deps) func(context.Context) (context.Context, context.CancelFunc) {
+	return func(ctx context.Context) (context.Context, context.CancelFunc) {
+		return ContextWithAssetUploadTimeoutWith(ctx, d)
+	}
+}
+
+// acquireAssetUploadLock waits for any other asc upload on this machine to
+// finish. Upload commands take it after validating their input and before
+// they start an upload deadline, so the wait is not charged to the upload.
+func acquireAssetUploadLock(d *shared.Deps) func(context.Context) (func(), error) {
+	return func(ctx context.Context) (func(), error) {
+		return uploadlock.Acquire(ctx, d.IO.ErrOut)
+	}
 }
 
 // ContextWithAssetUploadTimeout returns a context with the asset upload timeout.
 func ContextWithAssetUploadTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return contextWithAssetUploadTimeout(ctx)
+}
+
+// ContextWithAssetUploadTimeoutWith is ContextWithAssetUploadTimeout with the
+// upload timeout setting resolved through d.
+func ContextWithAssetUploadTimeoutWith(ctx context.Context, d *shared.Deps) (context.Context, context.CancelFunc) {
+	return contextWithAssetUploadTimeoutResolved(ctx, d.ResolveTimeout)
 }
 
 // CollectAssetFiles validates and collects files from a path.
@@ -78,9 +123,32 @@ func collectAssetFiles(path string) ([]string, error) {
 	return files, nil
 }
 
+// validateLibraryUploadFlags rejects set-only flags on the Asset Library path.
+func validateLibraryUploadFlags(d *shared.Deps, assetLibrary bool, placementGroup string, skipExisting, replace bool) error {
+	if !assetLibrary {
+		if strings.TrimSpace(placementGroup) != "" {
+			return d.UsageError("--placement-group requires --asset-library")
+		}
+		return nil
+	}
+	if skipExisting {
+		return d.UsageError("--asset-library cannot be combined with --skip-existing")
+	}
+	if replace {
+		return d.UsageError("--asset-library cannot be combined with --replace; remove placements with asc localizations placements delete")
+	}
+	return nil
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) { found = found || f.Name == name })
+	return found
+}
+
 func waitForAssetDeliveryState(ctx context.Context, assetID string, fetch func(context.Context) (*asc.AssetDeliveryState, error)) (string, error) {
 	var lastState string
-	_, err := asc.PollUntil(ctx, assetPollInterval, func(ctx context.Context) (struct{}, bool, error) {
+	_, err := asc.PollMediaUntil(ctx, func(ctx context.Context) (struct{}, bool, error) {
 		state, err := fetch(ctx)
 		if err != nil {
 			return struct{}{}, false, err
@@ -95,7 +163,7 @@ func waitForAssetDeliveryState(ctx context.Context, assetID string, fetch func(c
 			}
 		}
 		return struct{}{}, false, nil
-	})
+	}, asc.PollOptions{})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return lastState, fmt.Errorf("timed out waiting for asset %s delivery: %w", assetID, err)

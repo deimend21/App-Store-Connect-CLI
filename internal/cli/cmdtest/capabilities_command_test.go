@@ -29,12 +29,10 @@ type capabilitiesTestResponse struct {
 func TestRun_CapabilitiesJSONReportsKnownGaps(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	stdout, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--output", "json"}, "1.0.0")
-		if code != cmd.ExitSuccess {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
-		}
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "capabilities", "--output", "json")
+	if code != cmd.ExitSuccess {
+		t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
+	}
 
 	if strings.TrimSpace(stderr) != "" {
 		t.Fatalf("expected empty stderr, got: %s", stderr)
@@ -50,7 +48,7 @@ func TestRun_CapabilitiesJSONReportsKnownGaps(t *testing.T) {
 	if resp.Summary.SchemaEndpointCount == 0 {
 		t.Fatalf("expected embedded schema endpoint count to be populated")
 	}
-	for _, status := range []string{"cli-supported", "web-session", "not-public-api"} {
+	for _, status := range []string{"cli-supported", "web-session"} {
 		if resp.Summary.Statuses[status] == 0 {
 			t.Fatalf("expected status %q to be represented in summary: %+v", status, resp.Summary.Statuses)
 		}
@@ -73,6 +71,7 @@ func TestRun_CapabilitiesJSONReportsKnownGaps(t *testing.T) {
 	}
 	for _, command := range []string{
 		"asc localizations placements list",
+		"asc localizations placements view",
 		"asc localizations placements reorder",
 		"asc localizations placements swap --confirm",
 		"asc product-pages custom-pages localizations placements",
@@ -101,6 +100,7 @@ func TestRun_CapabilitiesJSONReportsKnownGaps(t *testing.T) {
 	assertCapability(t, resp, "App Store Mac and Vision Pro compatibility opt-ins", "web-session", "asc web apps compatibility")
 	assertCapability(t, resp, "Regulated medical device declaration", "web-session", "asc web apps medical-device")
 	assertCapability(t, resp, "Removed apps inspection", "web-session", "asc web removed-apps")
+	assertCapability(t, resp, "App bundle management", "web-session", "asc web app-bundles")
 	assertCapability(t, resp, "Apple Developer Program agreements", "web-session", "asc web agreements")
 	assertCapability(t, resp, "App Store Connect API key web-session management", "web-session", "asc web api-keys")
 	assertCapability(t, resp, "Exact API key role lookup", "web-session", "asc web auth capabilities")
@@ -161,12 +161,10 @@ func assertMonetizationVersionWorkflow(t *testing.T, resp capabilitiesTestRespon
 func TestRun_CapabilitiesFiltersByStatus(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	stdout, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--status", "not-public-api", "--output", "json"}, "1.0.0")
-		if code != cmd.ExitSuccess {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
-		}
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "capabilities", "--status", "web-session", "--output", "json")
+	if code != cmd.ExitSuccess {
+		t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
+	}
 
 	if strings.TrimSpace(stderr) != "" {
 		t.Fatalf("expected empty stderr, got: %s", stderr)
@@ -180,22 +178,20 @@ func TestRun_CapabilitiesFiltersByStatus(t *testing.T) {
 		t.Fatal("expected filtered capabilities")
 	}
 	for _, entry := range resp.Capabilities {
-		if entry.Status != "not-public-api" {
-			t.Fatalf("expected only not-public-api rows, got %+v", entry)
+		if entry.Status != "web-session" {
+			t.Fatalf("expected only web-session rows, got %+v", entry)
 		}
 	}
-	assertCapability(t, resp, "Direct REST build upload", "not-public-api", "")
+	assertCapability(t, resp, "App creation", "web-session", "asc web apps create")
 }
 
 func TestRun_CapabilitiesFiltersByAreaInMarkdown(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	stdout, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--area", "release", "--output", "markdown"}, "1.0.0")
-		if code != cmd.ExitSuccess {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
-		}
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "capabilities", "--area", "release", "--output", "markdown")
+	if code != cmd.ExitSuccess {
+		t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
+	}
 
 	if strings.TrimSpace(stderr) != "" {
 		t.Fatalf("expected empty stderr, got: %s", stderr)
@@ -211,60 +207,37 @@ func TestRun_CapabilitiesFiltersByAreaInMarkdown(t *testing.T) {
 	}
 }
 
-func TestRun_CapabilitiesInvalidStatusReturnsUsage(t *testing.T) {
+func TestRun_CapabilitiesUsageErrors(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	_, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--status", "maybe"}, "1.0.0")
-		if code != cmd.ExitUsage {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
-		}
-	})
+	for _, test := range []struct {
+		args    []string
+		wantErr string
+	}{
+		{args: []string{"capabilities", "--status", "maybe"}, wantErr: "invalid --status"},
+		{args: []string{"capabilities", "--area", "nope"}, wantErr: "invalid --area"},
+		{args: []string{"capabilities", "typo"}, wantErr: `unexpected argument "typo"`},
+	} {
+		t.Run(strings.Join(test.args[1:], " "), func(t *testing.T) {
+			_, stderr, code := runWithDeps(t, nil, test.args...)
+			if code != cmd.ExitUsage {
+				t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
+			}
 
-	if !strings.Contains(stderr, "invalid --status") {
-		t.Fatalf("expected invalid --status error, got stderr: %s", stderr)
-	}
-}
-
-func TestRun_CapabilitiesInvalidAreaReturnsUsage(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	_, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--area", "nope"}, "1.0.0")
-		if code != cmd.ExitUsage {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
-		}
-	})
-
-	if !strings.Contains(stderr, "invalid --area") {
-		t.Fatalf("expected invalid --area error, got stderr: %s", stderr)
-	}
-}
-
-func TestRun_CapabilitiesUnexpectedArgsReturnsUsage(t *testing.T) {
-	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
-
-	_, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "typo"}, "1.0.0")
-		if code != cmd.ExitUsage {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
-		}
-	})
-
-	if !strings.Contains(stderr, `unexpected argument "typo"`) {
-		t.Fatalf("expected unexpected argument error, got stderr: %s", stderr)
+			if !strings.Contains(stderr, test.wantErr) {
+				t.Fatalf("expected %q error, got stderr: %s", test.wantErr, stderr)
+			}
+		})
 	}
 }
 
 func TestRun_CapabilitiesCommandReferencesResolve(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 
-	stdout, stderr := captureOutput(t, func() {
-		code := cmd.Run([]string{"capabilities", "--output", "json"}, "1.0.0")
-		if code != cmd.ExitSuccess {
-			t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
-		}
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "capabilities", "--output", "json")
+	if code != cmd.ExitSuccess {
+		t.Fatalf("expected exit code %d, got %d", cmd.ExitSuccess, code)
+	}
 	if strings.TrimSpace(stderr) != "" {
 		t.Fatalf("expected empty stderr, got: %s", stderr)
 	}

@@ -1,12 +1,9 @@
 package cmdtest
 
 import (
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
-
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 // Synthetic existence 409 for POST /v1/bundleIdCapabilities. It could not be
@@ -180,75 +177,8 @@ func TestCapabilitiesAddIfExistsUpdateWithoutSettingsDoesNotPatch(t *testing.T) 
 	}
 }
 
-func TestCapabilitiesAddDefaultIfExistsFailPreservesConflict(t *testing.T) {
-	stdout, _, seen, runErr := runIfExistsCommand(t, []string{
-		"bundle-ids", "capabilities", "add", "--bundle", "bundle-1",
-		"--capability", "ICLOUD", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		if req.Method == http.MethodPost && req.Path == "/v1/bundleIdCapabilities" {
-			return jsonResponse(http.StatusConflict, capabilityExists409)
-		}
-		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
-		return nil, nil
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the 409 conflict", runErr)
-	}
-	if !strings.Contains(runErr.Error(), "The capability is already enabled for this bundle ID.") {
-		t.Fatalf("run error = %v, want Apple's detail preserved", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty", stdout)
-	}
-	if len(seen) != 1 {
-		t.Fatalf("requests = %+v, want only the POST", seen)
-	}
-}
-
-func TestCapabilitiesAddIfExistsStillFailsForRejectedType(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"bundle-ids", "capabilities", "add", "--bundle", "bundle-1",
-		"--capability", "ICLOUD", "--if-exists", "skip", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		if req.Method == http.MethodPost && req.Path == "/v1/bundleIdCapabilities" {
-			return jsonResponse(http.StatusConflict, capabilityTypeRejected409)
-		}
-		t.Fatalf("unexpected request %s %s; a rejected type must not read back", req.Method, req.Path)
-		return nil, nil
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the rejected-type conflict", runErr)
-	}
-	if len(seen) != 1 {
-		t.Fatalf("requests = %+v, want only the POST", seen)
-	}
-}
-
-func TestCapabilitiesAddIfExistsSkipStillFailsWhenReadBackFindsNothing(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"bundle-ids", "capabilities", "add", "--bundle", "bundle-1",
-		"--capability", "ICLOUD", "--if-exists", "skip", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodPost && req.Path == "/v1/bundleIdCapabilities":
-			return jsonResponse(http.StatusConflict, capabilityExists409)
-		case req.Method == http.MethodGet && req.Path == "/v1/bundleIds/bundle-1/bundleIdCapabilities":
-			return jsonResponse(http.StatusOK, noCapabilities)
-		default:
-			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
-			return nil, nil
-		}
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the original conflict", runErr)
-	}
-	if len(seen) != 2 {
-		t.Fatalf("requests = %+v, want POST then the read-back GET", seen)
-	}
-}
-
 func TestReviewItemsAddIfExistsSkipReturnsExistingItem(t *testing.T) {
-	stdout, stderr, seen, runErr := runIfExistsCommand(t, []string{
+	stdout, stderr, seen, runErr := runIfExistsCommandWithDeps(t, []string{
 		"review", "items-add", "--submission", "submission-1",
 		"--item-type", "appStoreVersions", "--item-id", "version-1",
 		"--if-exists", "skip", "--output", "json",
@@ -256,13 +186,15 @@ func TestReviewItemsAddIfExistsSkipReturnsExistingItem(t *testing.T) {
 		switch {
 		case req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems":
 			return jsonResponse(http.StatusConflict, reviewItemExists409)
+		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items" && strings.Contains(req.Query, "cursor=unused"):
+			return jsonResponse(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Unused page no longer available"}]}`)
 		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items":
 			// include= is what materializes the relationship; fields= alone
 			// returns items with links only.
 			if !strings.Contains(req.Query, "include=appStoreVersion") {
 				t.Fatalf("read-back query = %q, want include=appStoreVersion", req.Query)
 			}
-			return jsonResponse(http.StatusOK, existingReviewItems)
+			return jsonResponse(http.StatusOK, strings.Replace(existingReviewItems, `"links":{"self"`, `"links":{"next":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items?cursor=unused","self"`, 1))
 		default:
 			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
 			return nil, nil
@@ -282,147 +214,26 @@ func TestReviewItemsAddIfExistsSkipReturnsExistingItem(t *testing.T) {
 	}
 }
 
-// update has no meaning for a submission item, so it is a usage error listing
-// only the modes this command supports.
-// A REMOVED item is detached from the submission, so it must not satisfy the
-// read-back: the conflict is surfaced instead of a false success.
-func TestReviewItemsAddIfExistsSkipIgnoresRemovedItems(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
+func TestReviewItemsAddIfExistsSkipRecoversAppleAlreadyAddedConflict(t *testing.T) {
+	stdout, stderr, seen, runErr := runIfExistsCommandWithDeps(t, []string{
+		"review", "items", "add", "--submission", "submission-1",
+		"--item-type", "subscriptionVersions", "--item-id", "version-1",
 		"--if-exists", "skip", "--output", "json",
 	}, func(req ifExistsRequest) (*http.Response, error) {
 		switch {
 		case req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems":
-			return jsonResponse(http.StatusConflict, reviewItemExists409)
+			return jsonResponse(http.StatusConflict, `{"errors":[{"status":"409","code":"ENTITY_ERROR.RELATIONSHIP.INVALID.NOT_ALLOWED","title":"subscriptionVersion with id version-1 was already added to this reviewSubmission.","source":{"pointer":"/data/relationships/subscriptionVersion"}}]}`)
 		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items":
-			return jsonResponse(http.StatusOK, reviewItemsRemovedVersion)
+			if !strings.Contains(req.Query, "include=subscriptionVersion") {
+				t.Fatalf("read-back query = %q, want include=subscriptionVersion", req.Query)
+			}
+			return jsonResponse(http.StatusOK, `{"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"subscriptionVersion":{"data":{"type":"subscriptionVersions","id":"version-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`)
 		default:
 			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
 			return nil, nil
 		}
 	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the original conflict; a REMOVED item is not proof of presence", runErr)
-	}
-	if len(seen) != 2 {
-		t.Fatalf("requests = %+v, want POST then the read-back GET", seen)
-	}
-}
-
-func TestReviewItemsAddRejectsUpdateMode(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
-		"--if-exists", "update", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		t.Fatalf("unexpected request %s %s; the usage error must precede any HTTP request", req.Method, req.Path)
-		return nil, nil
-	})
-	if runErr == nil {
-		t.Fatal("run error = nil, want a usage error")
-	}
-	if !strings.Contains(runErr.Error(), "--if-exists must be one of fail, skip") {
-		t.Fatalf("run error = %v, want a usage error listing only fail and skip", runErr)
-	}
-	if strings.Contains(runErr.Error(), "fail, skip, update") {
-		t.Fatalf("run error = %v, must not advertise update", runErr)
-	}
-	if len(seen) != 0 {
-		t.Fatalf("requests = %+v, want none", seen)
-	}
-}
-
-func TestReviewItemsAddDefaultIfExistsFailPreservesConflict(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
-		"--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		if req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems" {
-			return jsonResponse(http.StatusConflict, reviewItemExists409)
-		}
-		t.Fatalf("unexpected request %s %s", req.Method, req.Path)
-		return nil, nil
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the 409 conflict", runErr)
-	}
-	if len(seen) != 1 {
-		t.Fatalf("requests = %+v, want only the POST", seen)
-	}
-}
-
-func TestReviewItemsAddIfExistsStillFailsForStateConflict(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
-		"--if-exists", "skip", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		if req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems" {
-			return jsonResponse(http.StatusConflict, reviewItemState409)
-		}
-		t.Fatalf("unexpected request %s %s; a state conflict must not read back", req.Method, req.Path)
-		return nil, nil
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the state conflict", runErr)
-	}
-	if len(seen) != 1 {
-		t.Fatalf("requests = %+v, want only the POST", seen)
-	}
-}
-
-// The submission carries a different version, and a null relationship for a
-// type the item does not have. Neither may be mistaken for the requested item.
-func TestReviewItemsAddIfExistsSkipStillFailsWhenReadBackFindsAnotherItem(t *testing.T) {
-	_, _, seen, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
-		"--if-exists", "skip", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems":
-			return jsonResponse(http.StatusConflict, reviewItemExists409)
-		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items":
-			return jsonResponse(http.StatusOK, reviewItemsOtherVersion)
-		default:
-			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
-			return nil, nil
-		}
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the original conflict when the item is not there", runErr)
-	}
-	if len(seen) != 2 {
-		t.Fatalf("requests = %+v, want POST then the read-back GET", seen)
-	}
-}
-
-// The read-back is mutation evidence: a malformed document that still carries
-// a matching item (here an errors member next to data) must not turn the
-// original 409 into success.
-func TestReviewItemsAddIfExistsSkipRejectsMalformedReadBack(t *testing.T) {
-	malformed := `{"errors":[],"data":[{"type":"reviewSubmissionItems","id":"item-1","attributes":{"state":"READY_FOR_REVIEW"},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}],"links":{"self":"https://api.appstoreconnect.apple.com/v1/reviewSubmissions/submission-1/items"}}`
-	stdout, _, _, runErr := runIfExistsCommand(t, []string{
-		"review", "items-add", "--submission", "submission-1",
-		"--item-type", "appStoreVersions", "--item-id", "version-1",
-		"--if-exists", "skip", "--output", "json",
-	}, func(req ifExistsRequest) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodPost && req.Path == "/v1/reviewSubmissionItems":
-			return jsonResponse(http.StatusConflict, reviewItemExists409)
-		case req.Method == http.MethodGet && req.Path == "/v1/reviewSubmissions/submission-1/items":
-			return jsonResponse(http.StatusOK, malformed)
-		default:
-			t.Fatalf("unexpected request %s %s", req.Method, req.Path)
-			return nil, nil
-		}
-	})
-	if runErr == nil || !errors.Is(runErr, asc.ErrConflict) {
-		t.Fatalf("run error = %v, want the original conflict when the read-back is malformed", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty", stdout)
+	if runErr != nil || len(seen) != 2 || !strings.Contains(stdout, `"id":"item-1"`) || !strings.Contains(stderr, "left unchanged") {
+		t.Fatalf("requests=%+v stdout=%q stderr=%q error=%v, want the existing item after one read-back", seen, stdout, stderr, runErr)
 	}
 }

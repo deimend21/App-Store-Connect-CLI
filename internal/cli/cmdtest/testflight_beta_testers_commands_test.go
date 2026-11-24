@@ -1,22 +1,20 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"flag"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func TestTestFlightBetaTestersViewPreservesEmptyAppDevices(t *testing.T) {
-	setupAuth(t)
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet || req.URL.Path != "/v1/betaTesters/tester-1" {
 			t.Errorf("unexpected request: %s %s", req.Method, req.URL.String())
@@ -28,28 +26,10 @@ func TestTestFlightBetaTestersViewPreservesEmptyAppDevices(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	serverURL, err := url.Parse(server.URL)
+	stdout, stderr, err := runRootWithDeps(t, stubServerClient(t, server), "testflight", "testers", "view", "--id", "tester-1", "--output", "json")
 	if err != nil {
-		t.Fatalf("parse server URL: %v", err)
+		t.Fatalf("run error: %v", err)
 	}
-	installDefaultTransport(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		cloned := req.Clone(req.Context())
-		cloned.URL.Scheme = serverURL.Scheme
-		cloned.URL.Host = serverURL.Host
-		return server.Client().Transport.RoundTrip(cloned)
-	}))
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "view", "--id", "tester-1", "--output", "json"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
@@ -69,75 +49,19 @@ func TestTestFlightBetaTestersViewPreservesEmptyAppDevices(t *testing.T) {
 }
 
 func TestTestFlightBetaTestersAddOutput(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/apps/app-1/betaGroups", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Beta"}}]}`))
+	reg.Register(asctest.POST("/v1/betaTesters").JSONBody(`{"data":{"type":"betaTesters","attributes":{"email":"tester@example.com"},"relationships":{"betaGroups":{"data":[{"type":"betaGroups","id":"group-1"}]}}}}`),
+		asctest.JSON(http.StatusCreated, `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com"}}}`))
 
-	callCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/apps/app-1/betaGroups" {
-				t.Fatalf("expected path /v1/apps/app-1/betaGroups, got %s", req.URL.Path)
-			}
-			if req.URL.Query().Get("limit") != "200" {
-				t.Fatalf("expected limit 200, got %q", req.URL.Query().Get("limit"))
-			}
-			body := `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Beta"}}]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodPost {
-				t.Fatalf("expected POST, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesters" {
-				t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
-			}
-			payload, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read body error: %v", err)
-			}
-			if !strings.Contains(string(payload), `"email":"tester@example.com"`) {
-				t.Fatalf("expected email in body, got %s", string(payload))
-			}
-			if !strings.Contains(string(payload), `"id":"group-1"`) {
-				t.Fatalf("expected group id in body, got %s", string(payload))
-			}
-			body := `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com"}}}`
-			return &http.Response{
-				StatusCode: http.StatusCreated,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected request count %d", callCount)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "add", "--app", "app-1", "--email", "tester@example.com", "--group", "Beta"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "testflight", "testers", "add", "--app", "app-1", "--email", "tester@example.com", "--group", "Beta")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -147,69 +71,131 @@ func TestTestFlightBetaTestersAddOutput(t *testing.T) {
 	}
 }
 
-func TestTestFlightBetaTestersRemoveOutput(t *testing.T) {
-	setupAuth(t)
+func TestTestFlightBetaTestersAddSendsRelationshipsInOneCreate(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	const groups = `"betaGroups":{"data":[{"type":"betaGroups","id":"group-1"}]}`
+	const builds = `"builds":{"data":[{"type":"builds","id":"build-1"},{"type":"builds","id":"build-2"}]}`
+	tests := []struct {
+		name         string
+		args         []string
+		wantRequests []string
+		want         string
+	}{
+		{
+			name:         "omitted --build-id sends only groups",
+			args:         []string{"--app", "app-1", "--group", "Beta"},
+			wantRequests: []string{"GET /v1/apps/app-1/betaGroups", "POST /v1/betaTesters"},
+			want:         `{` + groups + `}`,
+		},
+		{
+			name:         "group name and ID resolve to one relationship",
+			args:         []string{"--app", "app-1", "--group", "Beta,group-1"},
+			wantRequests: []string{"GET /v1/apps/app-1/betaGroups", "POST /v1/betaTesters"},
+			want:         `{` + groups + `}`,
+		},
+		{
+			name:         "groups and builds",
+			args:         []string{"--app", "app-1", "--group", "Beta", "--build-id", "build-1, build-2,build-1"},
+			wantRequests: []string{"GET /v1/apps/app-1/betaGroups", "POST /v1/betaTesters"},
+			want:         `{` + groups + `,` + builds + `}`,
+		},
+		{
+			name:         "builds alone need neither a group nor an app",
+			args:         []string{"--build-id", "build-1,build-2"},
+			wantRequests: []string{"POST /v1/betaTesters"},
+			want:         `{` + builds + `}`,
+		},
+	}
 
-	callCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reg := asctest.NewRegistry(t)
+			if len(test.wantRequests) > 1 {
+				reg.Register(asctest.GET("/v1/apps/app-1/betaGroups", "limit=200"),
+					asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Beta"}}]}`))
 			}
-			if req.URL.Path != "/v1/betaTesters" {
-				t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
-			}
-			query := req.URL.Query()
-			if query.Get("filter[apps]") != "app-1" {
-				t.Fatalf("expected app filter app-1, got %q", query.Get("filter[apps]"))
-			}
-			if query.Get("filter[email]") != "tester@example.com" {
-				t.Fatalf("expected email filter tester@example.com, got %q", query.Get("filter[email]"))
-			}
-			body := `{"data":[{"type":"betaTesters","id":"tester-2","attributes":{"email":"tester@example.com"}}]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodDelete {
-				t.Fatalf("expected DELETE, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesters/tester-2" {
-				t.Fatalf("expected path /v1/betaTesters/tester-2, got %s", req.URL.Path)
-			}
-			return &http.Response{
-				StatusCode: http.StatusNoContent,
-				Body:       io.NopCloser(strings.NewReader("")),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected request count %d", callCount)
-			return nil, nil
-		}
-	})
+			reg.Register(asctest.POST("/v1/betaTesters").JSONBody(`{"data":{"type":"betaTesters","attributes":{"email":"tester@example.com"},"relationships":`+test.want+`}}`),
+				asctest.JSON(http.StatusCreated, `{"data":{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com"}}}`))
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
+			args := append([]string{"testflight", "testers", "add", "--email", "tester@example.com"}, test.args...)
+			if _, _, err := runRootWithDeps(t, stubClient(t, reg), args...); err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+			var requests []string
+			for _, req := range reg.Requests() {
+				requests = append(requests, req.Method+" "+req.URL.Path)
+				if req.Method == http.MethodPost {
+					if got := createRequestRelationships(t, req.Body); got != test.want {
+						t.Fatalf("relationships = %s, want %s", got, test.want)
+					}
+				}
+			}
+			if !slices.Equal(requests, test.wantRequests) {
+				t.Fatalf("requests = %v, want %v", requests, test.wantRequests)
+			}
+		})
+	}
+}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "remove", "--app", "app-1", "--email", "tester@example.com", "--confirm"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+func TestBetaCreateRejectsEmptyRelationshipFlagsBeforeRequest(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "group create --build-id",
+			args:    []string{"testflight", "groups", "create", "--app", "app-1", "--name", "Beta", "--build-id", " , "},
+			wantErr: "--build-id must include at least one ID",
+		},
+		{
+			name:    "group create --tester",
+			args:    []string{"testflight", "groups", "create", "--app", "app-1", "--name", "Beta", "--tester", ""},
+			wantErr: "--tester must include at least one ID",
+		},
+		{
+			name:    "tester add --build-id",
+			args:    []string{"testflight", "testers", "add", "--app", "app-1", "--email", "tester@example.com", "--group", "Beta", "--build-id", ","},
+			wantErr: "--build-id must include at least one ID",
+		},
+		{
+			name:    "tester add blank --group beside builds",
+			args:    []string{"testflight", "testers", "add", "--email", "tester@example.com", "--group", " ", "--build-id", "build-1"},
+			wantErr: "--group is required",
+		},
+		{
+			name:    "tester add group without app",
+			args:    []string{"testflight", "testers", "add", "--email", "tester@example.com", "--group", "Beta", "--build-id", "build-1"},
+			wantErr: "--app is required",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertUsageExitWithDeps(t, nil, test.args, test.wantErr)
+		})
+	}
+}
+
+func TestTestFlightBetaTestersRemoveOutput(t *testing.T) {
+	t.Setenv("ASC_APP_ID", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/betaTesters", "filter[apps]=app-1", "filter[email]=tester@example.com"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaTesters","id":"tester-2","attributes":{"email":"tester@example.com"}}]}`))
+	reg.Register(asctest.DELETE("/v1/betaTesters/tester-2"),
+		asctest.JSON(http.StatusNoContent, ""))
+
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "testflight", "testers", "remove", "--app", "app-1", "--email", "tester@example.com", "--confirm")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -220,72 +206,19 @@ func TestTestFlightBetaTestersRemoveOutput(t *testing.T) {
 }
 
 func TestTestFlightBetaTestersListWithGroupUsesOnlyGroupFilter(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/apps/app-1/betaGroups", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Beta"}}]}`))
+	reg.Register(asctest.GET("/v1/betaTesters", "filter[betaGroups]=group-1"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com"}}]}`))
 
-	callCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/apps/app-1/betaGroups" {
-				t.Fatalf("expected path /v1/apps/app-1/betaGroups, got %s", req.URL.Path)
-			}
-			if req.URL.Query().Get("limit") != "200" {
-				t.Fatalf("expected limit 200, got %q", req.URL.Query().Get("limit"))
-			}
-			body := `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Beta"}}]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesters" {
-				t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
-			}
-			query := req.URL.Query()
-			if query.Get("filter[apps]") != "" {
-				t.Fatalf("expected no app relationship filter when group filter is set, got %q", query.Get("filter[apps]"))
-			}
-			if query.Get("filter[betaGroups]") != "group-1" {
-				t.Fatalf("expected beta group filter group-1, got %q", query.Get("filter[betaGroups]"))
-			}
-			body := `{"data":[{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com"}}]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected request count %d", callCount)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "list", "--app", "app-1", "--group", "Beta"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "testflight", "testers", "list", "--app", "app-1", "--group", "Beta")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -295,242 +228,41 @@ func TestTestFlightBetaTestersListWithGroupUsesOnlyGroupFilter(t *testing.T) {
 	}
 }
 
-func TestTestFlightBetaTestersListRejectsGroupAndBuildID(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "list", "--app", "app-1", "--group", "group-1", "--build-id", "build-1"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
+func TestTestFlightBetaTestersSelectorUsageErrors(t *testing.T) {
+	runUsageExitCases(t, []usageExitCase{
+		{
+			name:    "ListRejectsGroupAndBuildID",
+			args:    []string{"testflight", "testers", "list", "--app", "app-1", "--group", "group-1", "--build-id", "build-1"},
+			deps:    true,
+			wantErr: "Error: --group cannot be combined with --build-id",
+		},
+		{
+			name:    "ExportRejectsGroupAndBuildID",
+			args:    []string{"testflight", "testers", "export", "--app", "app-1", "--group", "group-1", "--build-id", "build-1", "--output", "/tmp/testers.csv"},
+			deps:    true,
+			wantErr: "Error: --group cannot be combined with --build-id",
+		},
 	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "Error: --group cannot be combined with --build-id") {
-		t.Fatalf("expected conflicting filter error, got %q", stderr)
-	}
-}
-
-func TestTestFlightBetaTestersExportRejectsGroupAndBuildID(t *testing.T) {
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "export", "--app", "app-1", "--group", "group-1", "--build-id", "build-1", "--output", "/tmp/testers.csv"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "Error: --group cannot be combined with --build-id") {
-		t.Fatalf("expected conflicting filter error, got %q", stderr)
-	}
-}
-
-func TestTestFlightBetaTestersAddGroupsOutput(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodPost {
-			t.Fatalf("expected POST, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/betaTesters/tester-1/relationships/betaGroups" {
-			t.Fatalf("expected path /v1/betaTesters/tester-1/relationships/betaGroups, got %s", req.URL.Path)
-		}
-		payload, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("read body error: %v", err)
-		}
-		if !strings.Contains(string(payload), `"id":"group-1"`) {
-			t.Fatalf("expected group id in body, got %s", string(payload))
-		}
-		return &http.Response{
-			StatusCode: http.StatusNoContent,
-			Body:       io.NopCloser(strings.NewReader("")),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "add-groups", "--id", "tester-1", "--group", "group-1,group-2"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if !strings.Contains(stderr, "Successfully added tester tester-1") {
-		t.Fatalf("expected success message, got %q", stderr)
-	}
-	if !strings.Contains(stdout, `"action":"added"`) {
-		t.Fatalf("expected action added in output, got %q", stdout)
-	}
-}
-
-func TestTestFlightBetaTestersRemoveGroupsOutput(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodDelete {
-			t.Fatalf("expected DELETE, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/betaTesters/tester-2/relationships/betaGroups" {
-			t.Fatalf("expected path /v1/betaTesters/tester-2/relationships/betaGroups, got %s", req.URL.Path)
-		}
-		payload, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("read body error: %v", err)
-		}
-		if !strings.Contains(string(payload), `"id":"group-3"`) {
-			t.Fatalf("expected group id in body, got %s", string(payload))
-		}
-		return &http.Response{
-			StatusCode: http.StatusNoContent,
-			Body:       io.NopCloser(strings.NewReader("")),
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
-		}, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "remove-groups", "--id", "tester-2", "--group", "group-3", "--confirm"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
-
-	if !strings.Contains(stderr, "Successfully removed tester tester-2") {
-		t.Fatalf("expected success message, got %q", stderr)
-	}
-	if !strings.Contains(stdout, `"action":"removed"`) {
-		t.Fatalf("expected action removed in output, got %q", stdout)
-	}
 }
 
 func TestTestFlightBetaTestersInviteOutput(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_APP_ID", "")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/betaTesters", "filter[apps]=app-1", "filter[email]=tester@example.com"),
+		asctest.JSON(http.StatusOK, `{"data":[]}`))
+	reg.Register(asctest.GET("/v1/apps/app-1/betaGroups", "limit=200"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"betaGroups","id":"group-9","attributes":{"name":"Beta"}}]}`))
+	reg.Register(asctest.POST("/v1/betaTesters").JSONBody(`{"data":{"type":"betaTesters","attributes":{"email":"tester@example.com"},"relationships":{"betaGroups":{"data":[{"type":"betaGroups","id":"group-9"}]}}}}`),
+		asctest.JSON(http.StatusCreated, `{"data":{"type":"betaTesters","id":"tester-9","attributes":{"email":"tester@example.com"}}}`))
+	reg.Register(asctest.POST("/v1/betaTesterInvitations").JSONBody(`{"data":{"type":"betaTesterInvitations","relationships":{"app":{"data":{"type":"apps","id":"app-1"}},"betaTester":{"data":{"type":"betaTesters","id":"tester-9"}}}}}`),
+		asctest.JSON(http.StatusCreated, `{"data":{"type":"betaTesterInvitations","id":"invite-1"}}`))
 
-	callCount := 0
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		callCount++
-		switch callCount {
-		case 1:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesters" {
-				t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
-			}
-			query := req.URL.Query()
-			if query.Get("filter[apps]") != "app-1" {
-				t.Fatalf("expected app filter app-1, got %q", query.Get("filter[apps]"))
-			}
-			if query.Get("filter[email]") != "tester@example.com" {
-				t.Fatalf("expected email filter tester@example.com, got %q", query.Get("filter[email]"))
-			}
-			body := `{"data":[]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 2:
-			if req.Method != http.MethodGet {
-				t.Fatalf("expected GET, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/apps/app-1/betaGroups" {
-				t.Fatalf("expected path /v1/apps/app-1/betaGroups, got %s", req.URL.Path)
-			}
-			body := `{"data":[{"type":"betaGroups","id":"group-9","attributes":{"name":"Beta"}}]}`
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 3:
-			if req.Method != http.MethodPost {
-				t.Fatalf("expected POST, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesters" {
-				t.Fatalf("expected path /v1/betaTesters, got %s", req.URL.Path)
-			}
-			body := `{"data":{"type":"betaTesters","id":"tester-9","attributes":{"email":"tester@example.com"}}}`
-			return &http.Response{
-				StatusCode: http.StatusCreated,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		case 4:
-			if req.Method != http.MethodPost {
-				t.Fatalf("expected POST, got %s", req.Method)
-			}
-			if req.URL.Path != "/v1/betaTesterInvitations" {
-				t.Fatalf("expected path /v1/betaTesterInvitations, got %s", req.URL.Path)
-			}
-			body := `{"data":{"type":"betaTesterInvitations","id":"invite-1"}}`
-			return &http.Response{
-				StatusCode: http.StatusCreated,
-				Body:       io.NopCloser(strings.NewReader(body)),
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-			}, nil
-		default:
-			t.Fatalf("unexpected request count %d", callCount)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"testflight", "testers", "invite", "--app", "app-1", "--email", "tester@example.com", "--group", "Beta"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "testflight", "testers", "invite", "--app", "app-1", "--email", "tester@example.com", "--group", "Beta")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -540,5 +272,144 @@ func TestTestFlightBetaTestersInviteOutput(t *testing.T) {
 	}
 	if !strings.Contains(stdout, `"testerId":"tester-9"`) {
 		t.Fatalf("expected tester id in output, got %q", stdout)
+	}
+}
+
+// Apple answers POST /v1/betaTesters with this 409 both when the email is
+// already a tester in a requested group and when it cannot join the group at
+// all (an internal group and an email outside the team). Captured live on
+// 2026-11-22; the two cases return the same body.
+const testersAddCannotAssignBody = `{"errors":[{"id":"76f5639e-74a9-425b-ba54-ebc8ba7b6dc8","status":"409","code":"STATE_ERROR","title":"The request cannot be fulfilled because of the state of another resource.","detail":"Tester(s) cannot be assigned","meta":{"associatedErrors":{}}}]}`
+
+func TestTestFlightTestersAddConflictReadsTheTesterBack(t *testing.T) {
+	const (
+		testerList = `{"data":[{"type":"betaTesters","id":"tester-1","attributes":{"email":"tester@example.com","state":"INVITED"}}],"links":{"self":"/v1/betaTesters"}}`
+		noTesters  = `{"data":[],"links":{"self":"/v1/betaTesters"}}`
+		groups     = `{"data":[{"type":"betaGroups","id":"group-1","attributes":{"name":"Internal Testing","isInternalGroup":true}},{"type":"betaGroups","id":"group-2","attributes":{"name":"Beta"}}]}`
+	)
+	tests := []struct {
+		name       string
+		group      string
+		testers    string
+		memberOf   string
+		addGroups  string
+		groupRead  string
+		buildID    string
+		buildsOf   string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+		notStderr  []string
+	}{
+		{
+			name:       "already in every group",
+			group:      "Beta",
+			testers:    testerList,
+			memberOf:   `{"data":[{"type":"betaGroups","id":"group-2"}],"links":{}}`,
+			wantCode:   0,
+			wantStdout: `"id":"tester-1"`,
+			wantStderr: "testers add: tester@example.com is already tester tester-1 in every requested group and build; left unchanged\n",
+		},
+		{
+			name:       "in one group, missing the other",
+			group:      "Internal Testing,Beta",
+			testers:    testerList,
+			memberOf:   `{"data":[{"type":"betaGroups","id":"group-2"}],"links":{}}`,
+			addGroups:  `{"data":[{"type":"betaGroups","id":"group-1"}]}`,
+			wantCode:   0,
+			wantStdout: `"id":"tester-1"`,
+			wantStderr: "testers add: tester@example.com is already tester tester-1; added it to group(s) group-1\n",
+		},
+		{
+			// A rerun adds only what is still missing, but the caller must
+			// learn that the group add went through.
+			name:       "group added, build add fails",
+			group:      "Internal Testing,Beta",
+			testers:    testerList,
+			memberOf:   `{"data":[{"type":"betaGroups","id":"group-2"}],"links":{}}`,
+			addGroups:  `{"data":[{"type":"betaGroups","id":"group-1"}]}`,
+			buildID:    "build-1",
+			buildsOf:   `{"data":[],"links":{}}`,
+			wantCode:   cmd.ExitConflict,
+			wantStderr: "tester tester-1 exists; added it to group(s) group-1, but adding build(s) build-1 failed: ",
+		},
+		{
+			name:       "not a tester, internal group",
+			group:      "Internal Testing",
+			testers:    noTesters,
+			groupRead:  `{"data":{"type":"betaGroups","id":"group-1","attributes":{"name":"Internal Testing","isInternalGroup":true}}}`,
+			wantCode:   cmd.ExitConflict,
+			wantStderr: "Tester(s) cannot be assigned\nHint: tester@example.com is not a tester of app app-1, and \"Internal Testing\" (group-1) is an internal group: internal groups take only users of your App Store Connect team who can see this app. To let the person test without joining the team, add them to an external group. Inviting them to the team (asc users invite) is a different, bigger action that gives them a team role; the Account Holder or an Admin decides it.\n",
+			// The hint must not hand over a runnable team invite: an agent
+			// asked to add a tester would grant a team role by following it.
+			notStderr: []string{"asc users invite --", "--roles", "DEVELOPER"},
+		},
+		{
+			name:       "not a tester, external group keeps Apple's error",
+			group:      "Beta",
+			testers:    noTesters,
+			groupRead:  `{"data":{"type":"betaGroups","id":"group-2","attributes":{"name":"Beta","isInternalGroup":false}}}`,
+			wantCode:   cmd.ExitConflict,
+			wantStderr: "Error: testers add: failed to create: The request cannot be fulfilled because of the state of another resource.: Tester(s) cannot be assigned\n",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
+			reg := asctest.NewRegistry(t)
+			reg.Register(asctest.GET("/v1/apps/app-1/betaGroups", "limit=200"), asctest.JSON(http.StatusOK, groups))
+			reg.Register(asctest.POST("/v1/betaTesters"), asctest.JSON(http.StatusConflict, testersAddCannotAssignBody))
+			reg.Register(asctest.GET("/v1/betaTesters", "filter[apps]=app-1", "filter[email]=tester@example.com"), asctest.JSON(http.StatusOK, test.testers))
+			if test.memberOf != "" {
+				reg.Register(asctest.GET("/v1/betaTesters/tester-1/relationships/betaGroups", "limit=200"), asctest.JSON(http.StatusOK, test.memberOf))
+			}
+			if test.addGroups != "" {
+				reg.Register(asctest.POST("/v1/betaTesters/tester-1/relationships/betaGroups").JSONBody(test.addGroups), asctest.JSON(http.StatusNoContent, ""))
+			}
+			if test.buildsOf != "" {
+				reg.Register(asctest.GET("/v1/betaTesters/tester-1/relationships/builds", "limit=200"), asctest.JSON(http.StatusOK, test.buildsOf))
+				reg.Register(asctest.POST("/v1/betaTesters/tester-1/relationships/builds"), asctest.JSON(http.StatusUnprocessableEntity, `{"errors":[{"status":"422","code":"ENTITY_ERROR","title":"Build cannot be assigned","detail":"Build cannot be assigned"}]}`))
+			}
+			if test.groupRead != "" {
+				var group struct {
+					Data struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(test.groupRead), &group); err != nil {
+					t.Fatal(err)
+				}
+				reg.Register(asctest.GET("/v1/betaGroups/"+group.Data.ID), asctest.JSON(http.StatusOK, test.groupRead))
+			}
+
+			args := []string{"testflight", "testers", "add", "--app", "app-1", "--email", "tester@example.com", "--group", test.group, "--output", "json"}
+			if test.buildID != "" {
+				args = append(args, "--build-id", test.buildID)
+			}
+			stdout, stderr, code := runWithDeps(t, stubClient(t, reg), args...)
+
+			if code != test.wantCode {
+				t.Fatalf("exit code = %d, want %d (stderr %q)", code, test.wantCode, stderr)
+			}
+			if test.wantStdout == "" && stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stdout, test.wantStdout) {
+				t.Fatalf("stdout = %q, want it to contain %q", stdout, test.wantStdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want it to contain %q", stderr, test.wantStderr)
+			}
+			for _, unwanted := range test.notStderr {
+				if strings.Contains(stderr, unwanted) {
+					t.Fatalf("stderr = %q, must not contain %q", stderr, unwanted)
+				}
+			}
+			if strings.Count(stderr, "Hint:") > 1 {
+				t.Fatalf("stderr has more than one hint:\n%s", stderr)
+			}
+		})
 	}
 }

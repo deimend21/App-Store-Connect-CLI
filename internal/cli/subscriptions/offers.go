@@ -9,9 +9,9 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-// SubscriptionsOffersCommand returns the canonical offers family.
-func SubscriptionsOffersCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("offers", flag.ExitOnError)
+// newSubscriptionsOffersCommand returns the canonical offers family.
+func newSubscriptionsOffersCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("offers", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "offers",
@@ -24,38 +24,40 @@ Examples:
   asc subscriptions offers introductory import --subscription-id "SUB_ID" --input "./offers.csv" --offer-duration ONE_WEEK --offer-mode FREE_TRIAL --number-of-periods 1 --confirm
   asc subscriptions offers promotional create --subscription-id "SUB_ID" --offer-code "SPRING" --name "Spring" --offer-duration ONE_MONTH --offer-mode FREE_TRIAL --number-of-periods 1 --prices "US"
   asc subscriptions offers offer-codes generate --offer-code-id "OFFER_CODE_ID" --quantity 10 --expiration-date "2026-02-01"
-  asc subscriptions offers win-back list --subscription-id "SUB_ID"`,
+  asc subscriptions offers win-back list --subscription-id "SUB_ID"
+  asc subscriptions offers retention list --subscription-id "SUB_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
 			wrapSubscriptionsCommand(
-				SubscriptionsIntroductoryOffersCommand(),
+				newSubscriptionsIntroductoryOffersCommand(d),
 				"asc subscriptions introductory-offers",
 				"asc subscriptions offers introductory",
 				"introductory",
 				"Manage subscription introductory offers.",
 			),
 			wrapSubscriptionsCommand(
-				SubscriptionsPromotionalOffersCommand(),
+				newSubscriptionsPromotionalOffersCommand(d),
 				"asc subscriptions promotional-offers",
 				"asc subscriptions offers promotional",
 				"promotional",
 				"Manage subscription promotional offers.",
 			),
 			wrapSubscriptionsCommand(
-				SubscriptionsOfferCodesCommand(),
+				newSubscriptionsOfferCodesCommand(d),
 				"asc subscriptions offer-codes",
 				"asc subscriptions offers offer-codes",
 				"offer-codes",
 				"Manage subscription offer codes.",
 			),
 			wrapSubscriptionsCommand(
-				SubscriptionsWinBackOffersCommand(),
+				newSubscriptionsWinBackOffersCommand(d),
 				"asc subscriptions win-back-offers",
 				"asc subscriptions offers win-back",
 				"win-back",
 				"Manage subscription win-back offers.",
 			),
+			newSubscriptionsRetentionOffersCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp

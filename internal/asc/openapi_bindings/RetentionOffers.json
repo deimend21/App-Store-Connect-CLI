@@ -1,0 +1,19 @@
+{
+  "tag": "RetentionOffers",
+  "file": "retention_offers_gen.go",
+  "types": [
+    "RetentionOfferCreateData",
+    "RetentionOfferCreateRelationships",
+    "RetentionOfferResponse",
+    "RetentionOfferUpdateAttributes",
+    "RetentionOfferUpdateRequest"
+  ],
+  "relationships": [
+    {"data":"RetentionOfferCreateData","type":"RetentionOfferCreateRelationships"}
+  ],
+  "operations": [
+    {"operation":"retentionOffers_deleteInstance","name":"DeleteRetentionOffer","params":["offerID"]},
+    {"operation":"retentionOffers_prices_getToManyRelationship","name":"GetRetentionOfferPricesRelationships","params":["offerID"],"check":"require","options":"LinkagesOption","query":"buildLinkagesQuery","nextContext":"retentionOfferPrices relationships","parseErr":"failed to parse prices relationship response","response":"LinkagesResponse"},
+    {"operation":"retentionOffers_updateInstance","name":"UpdateRetentionOffer","params":["offerID"],"check":"trim","attrs":"value"}
+  ]
+}

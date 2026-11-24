@@ -365,14 +365,120 @@ func TestSaveDefaultNamePreservesLegacyFieldsOnMismatch(t *testing.T) {
 	if updated.DefaultKeyName != "other" {
 		t.Fatalf("expected DefaultKeyName to be other, got %q", updated.DefaultKeyName)
 	}
-	if updated.KeyID != "KEY1" {
-		t.Fatalf("expected legacy KeyID KEY1 to be preserved, got %q", updated.KeyID)
+	if updated.KeyID != "" || updated.IssuerID != "" || updated.PrivateKeyPath != "" {
+		t.Fatalf("expected top-level fields cleared for keychain default, got %+v", updated)
 	}
-	if updated.IssuerID != "ISSUER1" {
-		t.Fatalf("expected legacy IssuerID ISSUER1 to be preserved, got %q", updated.IssuerID)
+	if len(updated.Keys) != 1 || updated.Keys[0].Name != "personal" || updated.Keys[0].KeyID != "KEY1" {
+		t.Fatalf("expected personal credential preserved in keys, got %+v", updated.Keys)
 	}
-	if updated.PrivateKeyPath != "/tmp/personal.p8" {
-		t.Fatalf("expected legacy PrivateKeyPath /tmp/personal.p8 to be preserved, got %q", updated.PrivateKeyPath)
+}
+
+func withRepoConfigWithoutCredentials(t *testing.T) (string, string) {
+	t.Helper()
+	withArrayKeyring(t)
+	t.Setenv("ASC_CONFIG_PATH", "")
+	t.Setenv("HOME", t.TempDir())
+	outside := t.TempDir()
+	repo := t.TempDir()
+	if err := config.SaveAt(filepath.Join(repo, ".asc", "config.json"), &config.Config{AppID: "123"}); err != nil {
+		t.Fatalf("SaveAt() error: %v", err)
+	}
+	t.Chdir(outside)
+	return outside, repo
+}
+
+func TestStoreCredentials_InRepoWritesDefaultToGlobalConfig(t *testing.T) {
+	outside, repo := withRepoConfigWithoutCredentials(t)
+	if err := StoreCredentialsWithKeyType("old", "OLDKEY", "ISS", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials(old) error: %v", err)
+	}
+
+	t.Chdir(repo)
+	if err := StoreCredentialsWithKeyType("new", "NEWKEY", "ISS", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials(new) error: %v", err)
+	}
+
+	t.Chdir(outside)
+	cfg, err := GetCredentials("")
+	if err != nil {
+		t.Fatalf("GetCredentials() error: %v", err)
+	}
+	if cfg.KeyID != "NEWKEY" {
+		t.Fatalf("expected new default NEWKEY outside the repo, got %q", cfg.KeyID)
+	}
+}
+
+func TestStoreCredentials_KeychainUnavailableInRepoWritesGlobalConfig(t *testing.T) {
+	_, repo := withRepoConfigWithoutCredentials(t)
+	previous := keyringOpener
+	keyringOpener = func() (keyring.Keyring, error) {
+		return nil, keyring.ErrNoAvailImpl
+	}
+	t.Cleanup(func() { keyringOpener = previous })
+
+	t.Chdir(repo)
+	if err := StoreCredentialsWithKeyType("fallback", "KEY123", "ISS", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials() error: %v", err)
+	}
+
+	repoCfg, err := config.LoadAt(filepath.Join(repo, ".asc", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadAt(repo) error: %v", err)
+	}
+	if hasAnyCredentials(repoCfg) || repoCfg.DefaultKeyName != "" {
+		t.Fatalf("expected repo config to stay credential-free, got %+v", repoCfg)
+	}
+	globalPath, err := config.GlobalPath()
+	if err != nil {
+		t.Fatalf("GlobalPath() error: %v", err)
+	}
+	globalCfg, err := config.LoadAt(globalPath)
+	if err != nil {
+		t.Fatalf("LoadAt(global) error: %v", err)
+	}
+	if globalCfg.DefaultKeyName != "fallback" || globalCfg.KeyID != "KEY123" {
+		t.Fatalf("expected credentials in global config, got %+v", globalCfg)
+	}
+}
+
+func TestGetCredentials_RepoConfigWithoutCredentialsUsesGlobalDefault(t *testing.T) {
+	_, repo := withRepoConfigWithoutCredentials(t)
+	if err := StoreCredentialsWithKeyType("a", "AKEY", "ISS", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials(a) error: %v", err)
+	}
+	if err := StoreCredentialsWithKeyType("b", "BKEY", "ISS", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials(b) error: %v", err)
+	}
+
+	t.Chdir(repo)
+	cfg, err := GetCredentials("")
+	if err != nil {
+		t.Fatalf("GetCredentials() error: %v", err)
+	}
+	if cfg.KeyID != "BKEY" {
+		t.Fatalf("expected global default BKEY inside the repo, got %q", cfg.KeyID)
+	}
+}
+
+func TestStoreCredentials_KeychainDefaultDoesNotInheritConfigProfileKey(t *testing.T) {
+	withArrayKeyring(t)
+	if err := StoreCredentialsConfigWithKeyType("old", "OLDKEY", "ISS", "/tmp/old.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentialsConfig(old) error: %v", err)
+	}
+	if err := StoreCredentialsWithKeyType("new", "NEWKEY", "ISS", "/tmp/new.p8", config.CredentialKeyTypeTeam); err != nil {
+		t.Fatalf("StoreCredentials(new) error: %v", err)
+	}
+
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
+	if cfg, _, err := GetCredentialsWithSource(""); err == nil {
+		t.Fatalf("expected keychain default to be unavailable from config, got KeyID %q for %q", cfg.KeyID, cfg.DefaultKeyName)
+	}
+	cfg, err := GetCredentials("old")
+	if err != nil {
+		t.Fatalf("GetCredentials(old) error: %v", err)
+	}
+	if cfg.KeyID != "OLDKEY" {
+		t.Fatalf("expected profile old to keep OLDKEY, got %q", cfg.KeyID)
 	}
 }
 
@@ -841,7 +947,7 @@ func TestLoadPrivateKeySEC1(t *testing.T) {
 func TestStoreAndListCredentials(t *testing.T) {
 	withArrayKeyring(t)
 
-	if err := StoreCredentials("my-key", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("my-key", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -866,7 +972,7 @@ func TestStoreCredentials_PersistsPrivateKeyPEMInKeychain(t *testing.T) {
 	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
 	writeECDSAPEM(t, keyPath, 0o600, true)
 
-	if err := StoreCredentials("my-key", "KEY123", "ISS456", keyPath); err != nil {
+	if err := StoreCredentialsWithKeyType("my-key", "KEY123", "ISS456", keyPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -893,7 +999,7 @@ func TestGetCredentialsWithSource_KeychainEntrySurvivesOriginalKeyDeletion(t *te
 	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
 	writeECDSAPEM(t, keyPath, 0o600, true)
 
-	if err := StoreCredentials("my-key", "KEY123", "ISS456", keyPath); err != nil {
+	if err := StoreCredentialsWithKeyType("my-key", "KEY123", "ISS456", keyPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if err := os.Remove(keyPath); err != nil {
@@ -1476,11 +1582,11 @@ func TestMigrateKeychainToConfigWarnsWhenKeychainRemovalFails(t *testing.T) {
 func TestRemoveAllCredentials(t *testing.T) {
 	withArrayKeyring(t)
 
-	if err := StoreCredentials("my-key", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("my-key", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
-	if err := RemoveAllCredentials(); err != nil {
+	if err := RemoveAllCredentialsWithOptions(RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveAllCredentials() error: %v", err)
 	}
 
@@ -1516,7 +1622,7 @@ func TestRemoveAllCredentialsPreservesConfigSettings(t *testing.T) {
 		t.Fatalf("config.SaveAt() error: %v", err)
 	}
 
-	if err := RemoveAllCredentials(); err != nil {
+	if err := RemoveAllCredentialsWithOptions(RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveAllCredentials() error: %v", err)
 	}
 
@@ -1549,7 +1655,7 @@ func TestRemoveAllCredentials_ClearsStoredKeychainMetadata(t *testing.T) {
 		t.Fatalf("config.SaveAt() error: %v", err)
 	}
 
-	if err := RemoveAllCredentials(); err != nil {
+	if err := RemoveAllCredentialsWithOptions(RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveAllCredentials() error: %v", err)
 	}
 
@@ -1576,7 +1682,7 @@ func TestStoreCredentialsFallbackToConfig(t *testing.T) {
 		keyringOpener = previous
 	})
 
-	if err := StoreCredentials("test-fallback", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("test-fallback", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -1596,7 +1702,7 @@ func TestStoreCredentials_TrimsKeychainProfileNameBeforeSelectingDefault(t *test
 	newKr, _ := withSeparateKeyrings(t)
 	storeCredentialInKeyring(t, newKr, "  spaced  ", "OLDKEY", "OLDISSUER", "/tmp/OldAuthKey.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -1630,7 +1736,7 @@ func TestStoreCredentials_RemovesPreNormalizedProfileFromLegacyKeychain(t *testi
 	newKr, legacyKr := withSeparateKeyrings(t)
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "OLDKEY", "OLDISSUER", "/tmp/OldAuthKey.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := legacyKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -1659,7 +1765,7 @@ func TestStoreCredentials_RejectsDistinctNormalizedProfileCollisionBeforeMutatio
 	storeCredentialInKeyring(t, newKr, "spaced", "CANONICAL", "ISSUER-CANONICAL", canonicalPath)
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "RAW", "ISSUER-RAW", rawPath)
 
-	err := StoreCredentials("  spaced  ", "NEW", "ISSUER-NEW", "/tmp/new.p8")
+	err := StoreCredentialsWithKeyType("  spaced  ", "NEW", "ISSUER-NEW", "/tmp/new.p8", config.CredentialKeyTypeTeam)
 	wantErr := `credential profile name "  spaced  " conflicts with existing normalized profile "spaced"; ` +
 		`remove the existing profile with 'asc auth logout --name "spaced" --confirm' and retry`
 	if err == nil || err.Error() != wantErr {
@@ -1694,7 +1800,7 @@ func TestStoreCredentials_RejectsDistinctThirdNormalizedSpellingBeforeMutation(t
 	storeCredentialInKeyring(t, newKr, "spaced", "CANONICAL", "ISSUER-CANONICAL", canonicalPath)
 	storeCredentialInKeyring(t, legacyKr, "\tspaced ", "THIRD", "ISSUER-THIRD", thirdPath)
 
-	err := StoreCredentials("  spaced  ", "INCOMING", "ISSUER-INCOMING", incomingPath)
+	err := StoreCredentialsWithKeyType("  spaced  ", "INCOMING", "ISSUER-INCOMING", incomingPath, config.CredentialKeyTypeTeam)
 	if err == nil || !strings.Contains(err.Error(), "conflicts with existing normalized profile") {
 		t.Fatalf("StoreCredentials() error = %v, want normalized profile collision", err)
 	}
@@ -1727,7 +1833,7 @@ func TestStoreCredentials_CanonicalLoginRejectsDistinctNormalizedSpellingBeforeM
 	storeCredentialInKeyring(t, newKr, "spaced", "CANONICAL", "ISSUER-CANONICAL", canonicalPath)
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "RAW", "ISSUER-RAW", rawPath)
 
-	err := StoreCredentials("spaced", "INCOMING", "ISSUER-INCOMING", incomingPath)
+	err := StoreCredentialsWithKeyType("spaced", "INCOMING", "ISSUER-INCOMING", incomingPath, config.CredentialKeyTypeTeam)
 	if err == nil || !strings.Contains(err.Error(), "conflicts with existing normalized profile") {
 		t.Fatalf("StoreCredentials() error = %v, want normalized profile collision", err)
 	}
@@ -1763,7 +1869,7 @@ func TestStoreCredentials_UnusableCurrentSpellingDoesNotHideUsableLegacyCollisio
 	}
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "LEGACY", "ISSUER-LEGACY", legacyPath)
 
-	err := StoreCredentials("spaced", "INCOMING", "ISSUER-INCOMING", incomingPath)
+	err := StoreCredentialsWithKeyType("spaced", "INCOMING", "ISSUER-INCOMING", incomingPath, config.CredentialKeyTypeTeam)
 	if err == nil || !strings.Contains(err.Error(), "conflicts with existing normalized profile") {
 		t.Fatalf("StoreCredentials() error = %v, want normalized profile collision", err)
 	}
@@ -1836,7 +1942,7 @@ func TestStoreCredentials_RetryCompletesPartialLegacyCleanup(t *testing.T) {
 	}
 	t.Cleanup(func() { legacyKeyringOpener = previousLegacy })
 
-	firstErr := StoreCredentials("  spaced  ", "KEY123", "ISS456", newPath)
+	firstErr := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", newPath, config.CredentialKeyTypeTeam)
 	if firstErr == nil || !strings.Contains(firstErr.Error(), "legacy keyring locked") {
 		t.Fatalf("first StoreCredentials() error = %v, want legacy cleanup failure", firstErr)
 	}
@@ -1847,7 +1953,7 @@ func TestStoreCredentials_RetryCompletesPartialLegacyCleanup(t *testing.T) {
 		t.Fatalf("legacy credential should remain after failed removal: %v", err)
 	}
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", newPath); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", newPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("retry StoreCredentials() error = %v", err)
 	}
 	if _, err := legacyKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -1883,7 +1989,7 @@ func TestStoreCredentials_RestoresEarlierVariantsWhenLaterCleanupFails(t *testin
 	}
 	t.Cleanup(func() { legacyKeyringOpener = previousLegacy })
 
-	err := StoreCredentials("spaced", "KEY123", "ISS456", newPath)
+	err := StoreCredentialsWithKeyType("spaced", "KEY123", "ISS456", newPath, config.CredentialKeyTypeTeam)
 	if err == nil || !strings.Contains(err.Error(), "legacy keyring locked") {
 		t.Fatalf("StoreCredentials() error = %v, want legacy cleanup failure", err)
 	}
@@ -1912,7 +2018,7 @@ func TestStoreCredentials_IgnoresPathOnlyCollisionWithInsecurePermissions(t *tes
 	storeCredentialInKeyring(t, newKr, "spaced", "CANONICAL", "ISSUER-CANONICAL", canonicalPath)
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "INSECURE", "ISSUER-INSECURE", insecurePath)
 
-	if err := StoreCredentials("  spaced  ", "INCOMING", "ISSUER-INCOMING", incomingPath); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "INCOMING", "ISSUER-INCOMING", incomingPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := legacyKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -1926,7 +2032,7 @@ func TestStoreCredentials_NormalizedCollisionUsesCurrentKeyringPrecedence(t *tes
 	storeCredentialInKeyring(t, newKr, "  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8")
 	storeCredentialInKeyring(t, legacyKr, "spaced", "STALE", "STALE-ISSUER", "/tmp/Stale.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error = %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -1950,7 +2056,7 @@ func TestStoreCredentials_NormalizedPreflightPreservesUnavailableKeyringFallback
 		legacyKeyringOpener = previousLegacy
 	})
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error = %v", err)
 	}
 	cfg, err := config.Load()
@@ -1988,7 +2094,7 @@ func TestStoreCredentials_UnavailablePreflightDoesNotResumeKeychainMutation(t *t
 		legacyKeyringOpener = previousLegacy
 	})
 
-	if err := StoreCredentials("  spaced  ", "INCOMING", "INCOMING-ISSUER", incomingPath); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "INCOMING", "INCOMING-ISSUER", incomingPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	for _, name := range []string{"spaced", "  spaced  "} {
@@ -2036,7 +2142,7 @@ func TestStoreCredentials_LegacyUnavailableDoesNotBypassCurrentKeychain(t *testi
 		legacyKeyringOpener = previousLegacy
 	})
 
-	if err := StoreCredentials("spaced", "INCOMING", "INCOMING-ISSUER", incomingPath); err != nil {
+	if err := StoreCredentialsWithKeyType("spaced", "INCOMING", "INCOMING-ISSUER", incomingPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	item, err := current.Get(keyringKey("spaced"))
@@ -2065,7 +2171,7 @@ func TestStoreCredentials_ReplacesMalformedPreNormalizedEntry(t *testing.T) {
 		t.Fatalf("seed malformed keyring entry: %v", err)
 	}
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error = %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2093,7 +2199,7 @@ func TestStoreCredentials_ReplacesEmptyDecodedPreNormalizedEntry(t *testing.T) {
 				t.Fatalf("seed empty keyring entry: %v", err)
 			}
 
-			if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+			if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 				t.Fatalf("StoreCredentials() error = %v", err)
 			}
 			if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2129,7 +2235,7 @@ func TestStoreCredentials_ReplacesIncompletePreNormalizedEntry(t *testing.T) {
 				t.Fatalf("seed incomplete keyring entry: %v", err)
 			}
 
-			if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+			if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 				t.Fatalf("StoreCredentials() error = %v", err)
 			}
 			if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2167,7 +2273,7 @@ func TestStoreCredentials_ReplacesPreNormalizedEntryWithInvalidEmbeddedKey(t *te
 		t.Fatalf("seed invalid embedded-key credential: %v", err)
 	}
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2209,7 +2315,7 @@ func TestStoreCredentials_ReplacesCanonicalEntryWithValidPathAndInvalidEmbeddedK
 	}
 	storeCredentialInKeyring(t, newKr, "  spaced  ", "RAW", "ISSUER-RAW", "/tmp/raw.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2238,7 +2344,7 @@ func TestStoreCredentials_ReplacesRawEntryWithUnloadableKeyPath(t *testing.T) {
 	// collision-authoritative and block a padded-name login.
 	storeCredentialInKeyring(t, legacyKr, "  spaced  ", "RAW", "ISSUER-RAW", filepath.Join(t.TempDir(), "Deleted.p8"))
 
-	if err := StoreCredentials("  spaced  ", "NEW", "ISSUER-NEW", "/tmp/new.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "NEW", "ISSUER-NEW", "/tmp/new.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := legacyKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2267,7 +2373,7 @@ func TestStoreCredentials_CanonicalNameLoginCleansOrphanedPaddedEntries(t *testi
 	// Logging in with the canonical name is the advertised collision
 	// remediation, so it must also clear orphaned pre-normalized entries
 	// that RemoveCredentials cannot target.
-	if err := StoreCredentials("spaced", "KEY123", "ISS456", "/tmp/AuthKey.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("spaced", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2301,7 +2407,7 @@ func TestStoreCredentials_CleansRawEntryWhenCanonicalLacksPEMEnrichment(t *testi
 	storeCredentialInKeyring(t, newKr, "spaced", "KEY123", "ISS456", keyPath)
 	storeCredentialInKeyring(t, newKr, "  spaced  ", "OTHER", "OTHER-ISSUER", "/tmp/Other.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", keyPath); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", keyPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error = %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2337,7 +2443,7 @@ func TestStoreCredentials_CleansRawEntryWhenCanonicalKeyWasRelocated(t *testing.
 	storeCredentialInKeyring(t, newKr, "spaced", "KEY123", "ISS456", canonicalPath)
 	storeCredentialInKeyring(t, newKr, "  spaced  ", "OTHER", "OTHER-ISSUER", "/tmp/Other.p8")
 
-	if err := StoreCredentials("  spaced  ", "KEY123", "ISS456", relocatedPath); err != nil {
+	if err := StoreCredentialsWithKeyType("  spaced  ", "KEY123", "ISS456", relocatedPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error = %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("  spaced  ")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2359,7 +2465,7 @@ func TestStoreCredentials_CleansRawEntryWhenCanonicalKeyWasRelocated(t *testing.
 func TestStoreCredentials_RejectsWhitespaceOnlyProfileName(t *testing.T) {
 	newKr, _ := withSeparateKeyrings(t)
 
-	err := StoreCredentials("   ", "KEY123", "ISS456", "/tmp/AuthKey.p8")
+	err := StoreCredentialsWithKeyType("   ", "KEY123", "ISS456", "/tmp/AuthKey.p8", config.CredentialKeyTypeTeam)
 	if err == nil || err.Error() != "credential name is required" {
 		t.Fatalf("StoreCredentials() error = %v, want credential name is required", err)
 	}
@@ -2444,7 +2550,7 @@ func TestStoreCredentials_RemovesStaleGlobalCredentialWhenLocalConfigActive(t *t
 		keyringOpener = previousKeyringOpener
 	})
 
-	if err := StoreCredentials("stale", "NEW_KEY", "NEW_ISSUER", "/tmp/new.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("stale", "NEW_KEY", "NEW_ISSUER", "/tmp/new.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -2541,7 +2647,7 @@ func TestStoreCredentials_RemovesStaleCredentialFromOverrideConfigOnly(t *testin
 		keyringOpener = previousKeyringOpener
 	})
 
-	if err := StoreCredentials("stale", "NEW_KEY", "NEW_ISSUER", "/tmp/new.p8"); err != nil {
+	if err := StoreCredentialsWithKeyType("stale", "NEW_KEY", "NEW_ISSUER", "/tmp/new.p8", config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 
@@ -2611,7 +2717,7 @@ func TestRemoveCredentials_FallsBackToLegacy(t *testing.T) {
 
 	storeCredentialInKeyring(t, legacyKr, "legacy-only", "OLD123", "ISSOLD", "/tmp/old.p8")
 
-	if err := RemoveCredentials("legacy-only"); err != nil {
+	if err := RemoveCredentialsWithOptions("legacy-only", RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveCredentials() error: %v", err)
 	}
 	if _, err := legacyKr.Get(keyringKey("legacy-only")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2625,7 +2731,7 @@ func TestRemoveCredentials_TrimsName(t *testing.T) {
 
 	storeCredentialInKeyring(t, newKr, "trim-key", "KEY123", "ISS456", "/tmp/AuthKey.p8")
 
-	if err := RemoveCredentials("  trim-key  "); err != nil {
+	if err := RemoveCredentialsWithOptions("  trim-key  ", RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveCredentials() error: %v", err)
 	}
 	if _, err := newKr.Get(keyringKey("trim-key")); !errors.Is(err, keyring.ErrKeyNotFound) {
@@ -2641,7 +2747,7 @@ func TestRemoveCredentials_RemovesAllNormalizedSpellings(t *testing.T) {
 	storeCredentialInKeyring(t, newKr, "  trim-key  ", "OTHER", "OTHER-ISSUER", "/tmp/Other.p8")
 	storeCredentialInKeyring(t, legacyKr, "\ttrim-key ", "LEGACY", "LEGACY-ISSUER", "/tmp/Legacy.p8")
 
-	if err := RemoveCredentials("trim-key"); err != nil {
+	if err := RemoveCredentialsWithOptions("trim-key", RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveCredentials() error: %v", err)
 	}
 	for _, check := range []struct {
@@ -2668,7 +2774,7 @@ func TestRemoveCredentials_PreservesCurrentWhenLegacyListingFails(t *testing.T) 
 	}
 	t.Cleanup(func() { legacyKeyringOpener = previousLegacy })
 
-	err := RemoveCredentials("trim-key")
+	err := RemoveCredentialsWithOptions("trim-key", RemoveOptions{})
 	if err == nil || !strings.Contains(err.Error(), "legacy keyring locked") {
 		t.Fatalf("RemoveCredentials() error = %v, want legacy listing failure", err)
 	}
@@ -2711,7 +2817,7 @@ func TestRemoveCredentials_UnavailableCurrentDoesNotMutateOtherStores(t *testing
 		legacyKeyringOpener = previousLegacy
 	})
 
-	err := RemoveCredentials("trim-key")
+	err := RemoveCredentialsWithOptions("trim-key", RemoveOptions{})
 	if err == nil || !isKeyringUnavailable(err) {
 		t.Fatalf("RemoveCredentials() error = %v, want keyring unavailable", err)
 	}
@@ -2783,7 +2889,7 @@ func TestRemoveCredentials_ClearsStoredKeychainMetadata(t *testing.T) {
 		t.Fatalf("config.SaveAt() error: %v", err)
 	}
 
-	if err := RemoveCredentials("trim-key"); err != nil {
+	if err := RemoveCredentialsWithOptions("trim-key", RemoveOptions{}); err != nil {
 		t.Fatalf("RemoveCredentials() error: %v", err)
 	}
 
@@ -2833,7 +2939,7 @@ func TestRemoveCredentials_MissingReturnsErr(t *testing.T) {
 		t.Fatalf("SaveAt() error: %v", err)
 	}
 
-	err := RemoveCredentials("missing")
+	err := RemoveCredentialsWithOptions("missing", RemoveOptions{})
 	if !errors.Is(err, keyring.ErrKeyNotFound) {
 		t.Fatalf("expected ErrKeyNotFound, got %v", err)
 	}
@@ -3077,8 +3183,101 @@ func (k *transientKeysFailingKeyring) Keys() ([]string, error) {
 	return k.inner.Keys()
 }
 
-func TestGetCredentialsWithSource_KeychainAccessDeniedReturnsSentinel(t *testing.T) {
+func TestGetCredentialsWithSource_KeychainFailureReturnsSentinel(t *testing.T) {
+	// The messages mirror the stringified OSStatus errors go-keychain produces.
+	const denied = "Failed to query keychain: The user name or passphrase you entered is not correct. (-25293)"
+	const canceled = "Failed to query keychain: User canceled the operation. (-128)"
+	tests := []struct {
+		name    string
+		keyring keyring.Keyring
+		config  string
+		want    error
+		notWant error
+		message string
+	}{
+		{name: "denied", keyring: failingKeyring{err: errors.New(denied)}, want: ErrKeychainAccessDenied},
+		{name: "other failure", keyring: failingKeyring{err: errors.New(canceled)}, want: ErrKeychainReadFailed, notWant: ErrKeychainAccessDenied, message: canceled},
+		{name: "unparsable config", keyring: keyring.NewArrayKeyring(nil), config: "{", want: config.ErrParse, notWant: ErrKeychainReadFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			if test.config != "" {
+				if err := os.WriteFile(configPath, []byte(test.config), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("ASC_CONFIG_PATH", configPath)
+
+			previousKeyringOpener := keyringOpener
+			previousLegacyKeyringOpener := legacyKeyringOpener
+			t.Cleanup(func() {
+				keyringOpener = previousKeyringOpener
+				legacyKeyringOpener = previousLegacyKeyringOpener
+			})
+			keyringOpener = func() (keyring.Keyring, error) {
+				return test.keyring, nil
+			}
+			legacyKeyringOpener = func() (keyring.Keyring, error) {
+				return nil, keyring.ErrNoAvailImpl
+			}
+
+			_, _, err := GetCredentialsWithSource("")
+			if !errors.Is(err, test.want) || test.notWant != nil && errors.Is(err, test.notWant) {
+				t.Fatalf("GetCredentialsWithSource() error = %v, want %v and not %v", err, test.want, test.notWant)
+			}
+			if test.message != "" && err.Error() != test.message {
+				t.Fatalf("GetCredentialsWithSource() error text = %q, want %q", err, test.message)
+			}
+		})
+	}
+}
+
+// Listing stored credentials, as auth status does, must mark a keychain that
+// cannot be read the same way credential resolution does, so the command can
+// report it as an authentication failure instead of an unclassified one.
+func TestListCredentials_KeychainFailureReturnsSentinel(t *testing.T) {
+	const canceled = "Failed to query keychain: User canceled the operation. (-128)"
+	listings := map[string]func() ([]Credential, error){
+		"ListCredentials":         ListCredentials,
+		"ListCredentialSummaries": ListCredentialSummaries,
+	}
+	for name, list := range listings {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
+
+			previousKeyringOpener := keyringOpener
+			previousLegacyKeyringOpener := legacyKeyringOpener
+			t.Cleanup(func() {
+				keyringOpener = previousKeyringOpener
+				legacyKeyringOpener = previousLegacyKeyringOpener
+			})
+			keyringOpener = func() (keyring.Keyring, error) {
+				return failingKeyring{err: errors.New(canceled)}, nil
+			}
+			legacyKeyringOpener = func() (keyring.Keyring, error) {
+				return nil, keyring.ErrNoAvailImpl
+			}
+
+			_, err := list()
+			if !errors.Is(err, ErrKeychainReadFailed) {
+				t.Fatalf("%s() error = %v, want ErrKeychainReadFailed", name, err)
+			}
+			if err.Error() != canceled {
+				t.Fatalf("%s() error text = %q, want %q", name, err, canceled)
+			}
+		})
+	}
+}
+
+// A corrupt entry in a keychain the process can read is not a keychain the
+// process cannot read: listing must report it as an invalid entry naming the
+// profile, not as a keychain read failure.
+func TestListCredentials_CorruptEntryIsNotAReadFailure(t *testing.T) {
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "config.json"))
 
 	previousKeyringOpener := keyringOpener
 	previousLegacyKeyringOpener := legacyKeyringOpener
@@ -3086,21 +3285,57 @@ func TestGetCredentialsWithSource_KeychainAccessDeniedReturnsSentinel(t *testing
 		keyringOpener = previousKeyringOpener
 		legacyKeyringOpener = previousLegacyKeyringOpener
 	})
+	corrupt := keyring.NewArrayKeyring([]keyring.Item{{Key: keyringKey("broken"), Data: []byte("{")}})
+	keyringOpener = func() (keyring.Keyring, error) { return corrupt, nil }
+	legacyKeyringOpener = func() (keyring.Keyring, error) { return nil, keyring.ErrNoAvailImpl }
 
-	// Simulate the kind of stringified OSStatus errors produced by go-keychain.
-	denyErr := errors.New("Failed to query keychain: The user name or passphrase you entered is not correct. (-25293)")
-	keyringOpener = func() (keyring.Keyring, error) {
-		return failingKeyring{err: denyErr}, nil
+	_, err := ListCredentials()
+	if errors.Is(err, ErrKeychainReadFailed) {
+		t.Fatalf("ListCredentials() error = %v, want it not marked as a keychain read failure", err)
 	}
-	legacyKeyringOpener = func() (keyring.Keyring, error) {
-		return nil, keyring.ErrNoAvailImpl
+	invalid, ok := errors.AsType[*InvalidKeychainEntryError](err)
+	if !ok || invalid.Name != "broken" {
+		t.Fatalf("ListCredentials() error = %v, want an invalid entry for profile broken", err)
+	}
+	if want := `invalid keychain entry "asc:credential:broken": unexpected end of JSON input`; err.Error() != want {
+		t.Fatalf("ListCredentials() error text = %q, want %q", err, want)
+	}
+}
+
+// A keychain login from key content must keep the PEM in the keychain item and
+// write no key file beside the config.
+func TestStoreCredentialsPEMWithKeyTypeKeepsKeyInKeychain(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "0")
+	t.Setenv("HOME", t.TempDir())
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("ASC_CONFIG_PATH", configPath)
+	counting := withCountingKeyring(t)
+	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
+	writeECDSAPEM(t, keyPath, 0o600, true)
+	pemData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key: %v", err)
 	}
 
-	_, _, err := GetCredentialsWithSource("")
-	if err == nil {
-		t.Fatal("expected error")
+	written, err := StoreCredentialsPEMWithKeyType("CI", "KEY123", "ISS456", string(pemData), config.CredentialKeyTypeTeam)
+	if err != nil {
+		t.Fatalf("StoreCredentialsPEMWithKeyType() error: %v", err)
 	}
-	if !errors.Is(err, ErrKeychainAccessDenied) {
-		t.Fatalf("expected ErrKeychainAccessDenied, got %v", err)
+	if written != "" {
+		t.Fatalf("written key path = %q, want none for keychain storage", written)
+	}
+	item, err := counting.inner.Get(keyringKey("CI"))
+	if err != nil {
+		t.Fatalf("keychain item: %v", err)
+	}
+	var payload credentialPayload
+	if err := json.Unmarshal(item.Data, &payload); err != nil {
+		t.Fatalf("decode keychain item: %v", err)
+	}
+	if payload.KeyID != "KEY123" || payload.PrivateKeyPEM != string(pemData) || payload.PrivateKeyPath != "" {
+		t.Fatalf("keychain payload key %q, path %q; want KEY123 with the PEM and no path", payload.KeyID, payload.PrivateKeyPath)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(configPath), "keys")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no keys directory, got stat error %v", err)
 	}
 }

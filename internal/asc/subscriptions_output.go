@@ -6,24 +6,6 @@ import (
 	"strings"
 )
 
-// SubscriptionGroupDeleteResult represents CLI output for group deletions.
-type SubscriptionGroupDeleteResult struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
-}
-
-// SubscriptionDeleteResult represents CLI output for subscription deletions.
-type SubscriptionDeleteResult struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
-}
-
-// SubscriptionPriceDeleteResult represents CLI output for subscription price deletions.
-type SubscriptionPriceDeleteResult struct {
-	ID      string `json:"id"`
-	Deleted bool   `json:"deleted"`
-}
-
 // SubscriptionIntroductoryOfferCreateSummary describes a single- or
 // all-territories introductory-offer create operation.
 type SubscriptionIntroductoryOfferCreateSummary struct {
@@ -280,24 +262,6 @@ func subscriptionGracePeriodRows(resp *SubscriptionGracePeriodResponse) ([]strin
 	return headers, rows
 }
 
-func subscriptionGroupDeleteResultRows(result *SubscriptionGroupDeleteResult) ([]string, [][]string) {
-	headers := []string{"ID", "Deleted"}
-	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
-	return headers, rows
-}
-
-func subscriptionDeleteResultRows(result *SubscriptionDeleteResult) ([]string, [][]string) {
-	headers := []string{"ID", "Deleted"}
-	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
-	return headers, rows
-}
-
-func subscriptionPriceDeleteResultRows(result *SubscriptionPriceDeleteResult) ([]string, [][]string) {
-	headers := []string{"ID", "Deleted"}
-	rows := [][]string{{result.ID, fmt.Sprintf("%t", result.Deleted)}}
-	return headers, rows
-}
-
 func subscriptionIntroductoryOfferCreateSummaryRows(summary *SubscriptionIntroductoryOfferCreateSummary) ([]string, [][]string) {
 	headers := []string{"Subscription ID"}
 	row := []string{summary.SubscriptionID}
@@ -470,21 +434,21 @@ func subscriptionPricePointsRows(resp *SubscriptionPricePointsResponse) ([]strin
 }
 
 func subscriptionIntroductoryOffersRows(resp *SubscriptionIntroductoryOffersResponse) ([]string, [][]string) {
-	headers := []string{"ID", "Duration", "Mode", "Periods", "Start Date", "End Date"}
+	headers := []string{"ID", "Duration", "Mode", "Periods", "Start Date", "End Date", "Target Plan Type"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
 		attrs := item.Attributes
-		rows = append(rows, []string{item.ID, string(attrs.Duration), string(attrs.OfferMode), formatInt(attrs.NumberOfPeriods), attrs.StartDate, attrs.EndDate})
+		rows = append(rows, []string{item.ID, string(attrs.Duration), string(attrs.OfferMode), formatInt(attrs.NumberOfPeriods), attrs.StartDate, attrs.EndDate, string(attrs.TargetSubscriptionPlanType)})
 	}
 	return headers, rows
 }
 
 func subscriptionPromotionalOffersRows(resp *SubscriptionPromotionalOffersResponse) ([]string, [][]string) {
-	headers := []string{"ID", "Name", "Offer Code", "Duration", "Mode", "Periods"}
+	headers := []string{"ID", "Name", "Offer Code", "Duration", "Mode", "Periods", "Target Plan Type"}
 	rows := make([][]string, 0, len(resp.Data))
 	for _, item := range resp.Data {
 		attrs := item.Attributes
-		rows = append(rows, []string{item.ID, compactWhitespace(attrs.Name), attrs.OfferCode, string(attrs.Duration), string(attrs.OfferMode), formatInt(attrs.NumberOfPeriods)})
+		rows = append(rows, []string{item.ID, compactWhitespace(attrs.Name), attrs.OfferCode, string(attrs.Duration), string(attrs.OfferMode), formatInt(attrs.NumberOfPeriods), string(attrs.TargetSubscriptionPlanType)})
 	}
 	return headers, rows
 }

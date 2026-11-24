@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -29,16 +30,21 @@ var (
 	}
 )
 
-func loadDeepSession(ctx context.Context, appleID string) (*webcore.AuthSession, bool, error) {
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+func loadDeepSession(ctx context.Context, transport http.RoundTripper, appleID string) (*webcore.AuthSession, bool, error) {
+	// Under a web session broker the cached session is not this command's to
+	// use, and the deep checks do not go through the broker.
+	if _, brokered, _ := webcore.BrokerFromEnv(); brokered {
+		return nil, false, nil
+	}
+	requestCtx, cancel := readinessRequestContext(ctx)
 	defer cancel()
 	var session *webcore.AuthSession
 	var ok bool
 	var err error
 	if strings.TrimSpace(appleID) != "" {
-		session, ok, err = webcore.ResumeCachedSessionWithoutPersist(requestCtx, strings.TrimSpace(appleID))
+		session, ok, err = webcore.ResumeCachedSessionWithoutPersist(requestCtx, strings.TrimSpace(appleID), transport)
 	} else {
-		session, ok, err = webcore.ResumeLastCachedSessionWithoutPersist(requestCtx)
+		session, ok, err = webcore.ResumeLastCachedSessionWithoutPersist(requestCtx, transport)
 	}
 	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
 		return session, false, webcore.ErrCachedSessionValidationFailed
@@ -46,8 +52,8 @@ func loadDeepSession(ctx context.Context, appleID string) (*webcore.AuthSession,
 	return session, ok, err
 }
 
-func collectDeepValidation(ctx context.Context, report validation.Report, appleID string) (validation.DeepReport, []validation.CheckResult, error) {
-	session, ok, err := loadDeepSessionFn(ctx, strings.TrimSpace(appleID))
+func collectDeepValidation(ctx context.Context, d *shared.Deps, report validation.Report, appleID string) (validation.DeepReport, []validation.CheckResult, error) {
+	session, ok, err := loadDeepSessionFn(ctx, d.HTTPTransport(), strings.TrimSpace(appleID))
 	selectedAppleID := strings.TrimSpace(appleID)
 	if session != nil && strings.TrimSpace(session.UserEmail) != "" {
 		selectedAppleID = strings.TrimSpace(session.UserEmail)
@@ -67,6 +73,10 @@ func collectDeepValidation(ctx context.Context, report validation.Report, appleI
 	}
 	if err != nil || !ok || session == nil || session.Client == nil {
 		deep, findings := buildDeepValidation(ctx, report, nil, validation.DeepSessionUnavailable)
+		if _, brokered, _ := webcore.BrokerFromEnv(); brokered {
+			describeBrokeredDeepSession(findings)
+			return deep, findings, nil
+		}
 		scopeDeepResolutionCommands(&deep, findings, selectedAppleID)
 		return deep, findings, nil
 	}
@@ -82,6 +92,9 @@ func buildDeepValidation(ctx context.Context, report validation.Report, client d
 	deep := validation.DeepReport{
 		SessionStatus: sessionStatus,
 		Checks:        make([]validation.DeepCheck, 0, 5),
+	}
+	if report.Deep != nil {
+		deep.Checks = append(deep.Checks, report.Deep.Checks...)
 	}
 	findings := make([]validation.CheckResult, 0, 4)
 
@@ -147,6 +160,20 @@ func buildDeepValidation(ctx context.Context, report validation.Report, client d
 	return deep, findings
 }
 
+// describeBrokeredDeepSession replaces the sign-in advice of the session
+// finding: under a broker "asc web auth login" is refused and the deep checks
+// do not go through the broker, so neither command it names would help.
+func describeBrokeredDeepSession(findings []validation.CheckResult) {
+	for i := range findings {
+		if findings[i].ID != "deep.web_session.unavailable" {
+			continue
+		}
+		findings[i].Message = "deep validation does not use the web session broker"
+		findings[i].Remediation = "Run `asc validate --deep` where asc has its own cached Apple web session, without " + webcore.WebBrokerURLEnv + " and " + webcore.WebBrokerTokenEnv
+		findings[i].Resolution = &validation.Resolution{Fixability: validation.FixabilityManual}
+	}
+}
+
 func scopeDeepResolutionCommands(deep *validation.DeepReport, findings []validation.CheckResult, appleID string) {
 	appleID = strings.TrimSpace(appleID)
 	if appleID == "" {
@@ -181,7 +208,7 @@ func scopeResolutionCommands(resolution *validation.Resolution, appleID string) 
 	}
 	selector := fmt.Sprintf(" --apple-id %q", strings.TrimSpace(appleID))
 	for i, command := range resolution.Commands {
-		if strings.Contains(command, "--apple-id") {
+		if !strings.HasPrefix(command, "asc web ") || strings.Contains(command, "--apple-id") {
 			continue
 		}
 		if confirmIndex := strings.Index(command, " --confirm"); confirmIndex >= 0 {
@@ -193,7 +220,7 @@ func scopeResolutionCommands(resolution *validation.Resolution, appleID string) 
 }
 
 func collectPrivacyDeepCheck(ctx context.Context, client deepWebClient, appID string) (validation.DeepCheck, *validation.CheckResult) {
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := readinessRequestContext(ctx)
 	defer cancel()
 	state, err := client.GetAppDataUsagesPublishState(requestCtx, strings.TrimSpace(appID))
 	link := appStoreConnectURL(appID, "appPrivacy")
@@ -248,7 +275,7 @@ func collectSubscriptionDeepCheck(ctx context.Context, client deepWebClient, app
 		}, nil
 	}
 
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := readinessRequestContext(ctx)
 	defer cancel()
 	subscriptions, err := client.ListReviewSubscriptions(requestCtx, strings.TrimSpace(appID))
 	if err != nil {
@@ -388,7 +415,7 @@ func isSubscriptionAttachmentEditableVersionState(state string) bool {
 }
 
 func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requiresPaidAgreement, paidAgreementRelevanceKnown bool) (validation.DeepCheck, *validation.CheckResult) {
-	requestCtx, cancel := shared.ContextWithTimeout(ctx)
+	requestCtx, cancel := readinessRequestContext(ctx)
 	defer cancel()
 	status, err := client.GetAgreementsStatus(requestCtx)
 	if status == nil {
@@ -397,6 +424,7 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 	}
 	acceptIDs := make([]string, 0, len(status.Agreements))
 	hasPending := false
+	hasAlert := false
 	hasManualBlocker := false
 	hasUnknown := false
 	hasRelevantEvidence := false
@@ -414,14 +442,22 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 		}
 		if strings.Contains(messageText, "agreement") || strings.Contains(messageText, "contract") {
 			hasRelevantEvidence = true
-			hasPending = true
+			hasAlert = true
 			hasManualBlocker = true
 			continue
 		}
 		hasUnknown = true
 	}
 	seenIDs := map[string]struct{}{}
-	for _, agreement := range currentAgreementHistory(status.Agreements) {
+	agreements := make([]asc.WebAgreement, 0, len(status.Agreements))
+	for _, agreement := range status.Agreements {
+		if agreement.Pending && agreement.ProgramLicenseClassificationUnknown {
+			hasUnknown = true
+			continue
+		}
+		agreements = append(agreements, agreement)
+	}
+	for _, agreement := range currentAgreementHistory(agreements) {
 		if !agreement.IsProgramLicenseAgreement {
 			switch {
 			case paidAgreementRelevanceKnown && !requiresPaidAgreement:
@@ -464,7 +500,7 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 	if err != nil {
 		hasUnknown = true
 	}
-	if !hasPending && !hasUnknown {
+	if !hasPending && !hasAlert && !hasUnknown {
 		return validation.DeepCheck{
 			ID:      validation.DeepCheckAgreementsActive,
 			Status:  validation.DeepStatusPassed,
@@ -472,7 +508,7 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 			Message: "Required agreements are active",
 		}, nil
 	}
-	if !hasPending {
+	if !hasPending && !hasAlert {
 		check := unverifiedWebCheck(validation.DeepCheckAgreementsActive, "Apple returned an empty or unknown agreement status", agreementsAppStoreConnectURL)
 		return check, unverifiedFinding("deep.agreements.active.unverified", check.Message, "Inspect current agreement status with `asc web agreements status`", "agreement", "", check.Resolution)
 	}
@@ -482,7 +518,7 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 		commands = append(commands, fmt.Sprintf("asc web agreements accept --agreement-id %q --confirm", agreementID))
 	}
 	fixability := validation.FixabilityManual
-	if len(commands) > 0 && !hasManualBlocker {
+	if len(commands) > 0 && !hasManualBlocker && !hasUnknown {
 		fixability = validation.FixabilityWebFixable
 	}
 	resolution := &validation.Resolution{
@@ -497,11 +533,18 @@ func collectAgreementsDeepCheck(ctx context.Context, client deepWebClient, requi
 		Message:    "A required agreement is pending",
 		Resolution: resolution,
 	}
+	findingID := "agreements.pending"
+	remediation := "Have the Account Holder review and accept the pending agreement"
+	if !hasPending {
+		check.Message = "App Store Connect reports an agreement alert that needs review"
+		findingID = "agreements.alert"
+		remediation = "Inspect the alert in App Store Connect and review the Apple Developer account; agreement history does not confirm a pending agreement"
+	}
 	return check, &validation.CheckResult{
-		ID:           "agreements.pending",
+		ID:           findingID,
 		Severity:     validation.SeverityError,
 		Message:      check.Message,
-		Remediation:  "Have the Account Holder review and accept the pending agreement",
+		Remediation:  remediation,
 		ResourceType: "agreement",
 		Resolution:   resolution,
 	}
@@ -514,6 +557,10 @@ func currentAgreementHistory(agreements []asc.WebAgreement) []asc.WebAgreement {
 		key := strings.ToLower(strings.TrimSpace(agreement.Title))
 		if agreement.IsProgramLicenseAgreement {
 			key = "program-license-agreement"
+		}
+		if agreement.Pending && strings.TrimSpace(agreement.DateEffective) == "" {
+			// Dated history cannot supersede an undated outstanding agreement.
+			key = ""
 		}
 		if key == "" {
 			agreementID := strings.TrimSpace(agreement.AgreementID)

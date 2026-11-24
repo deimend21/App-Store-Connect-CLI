@@ -3,10 +3,11 @@ package bundleids
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"os"
+	"net/http"
 	"slices"
 	"strings"
 
@@ -14,11 +15,12 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared/suggest"
 )
 
-// BundleIDsCapabilitiesCommand returns the bundle IDs capabilities command group.
-func BundleIDsCapabilitiesCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("capabilities", flag.ExitOnError)
+// newBundleIDsCapabilitiesCommand returns the bundle IDs capabilities command group.
+func newBundleIDsCapabilitiesCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("capabilities", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "capabilities",
@@ -32,13 +34,13 @@ Examples:
   asc bundle-ids capabilities update --id "CAPABILITY_ID" --settings '[{"key":"ICLOUD_VERSION","options":[{"key":"XCODE_6","enabled":true}]}]'
   asc bundle-ids capabilities remove --id "CAPABILITY_ID" --confirm`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			BundleIDsCapabilitiesListCommand(),
-			BundleIDsCapabilitiesAddCommand(),
-			BundleIDsCapabilitiesUpdateCommand(),
-			BundleIDsCapabilitiesRemoveCommand(),
-			BundleIDsCapabilitiesReconcileCommand(),
+			newBundleIDsCapabilitiesListCommand(d),
+			newBundleIDsCapabilitiesAddCommand(d),
+			newBundleIDsCapabilitiesUpdateCommand(d),
+			newBundleIDsCapabilitiesRemoveCommand(d),
+			newBundleIDsCapabilitiesReconcileCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -46,14 +48,15 @@ Examples:
 	}
 }
 
-// BundleIDsCapabilitiesListCommand returns the bundle IDs capabilities list subcommand.
-func BundleIDsCapabilitiesListCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
+// newBundleIDsCapabilitiesListCommand returns the bundle IDs capabilities list subcommand.
+func newBundleIDsCapabilitiesListCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("list", flag.ExitOnError)
 
 	bundleID := shared.BindResourceIDFlag(fs, "bundle", "bundleIds", "Bundle ID")
-	next := fs.String("next", "", "Fetch next page using a links.next URL")
-	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
-	output := shared.BindOutputFlags(fs)
+	shared.BindFlagAlias(fs, "bundle-id", "bundle")
+	next := fs.String("next", "", shared.NextFlagUsage)
+	paginate := fs.Bool("paginate", false, shared.PaginateFlagUsage)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "list",
@@ -65,27 +68,26 @@ Examples:
   asc bundle-ids capabilities list --bundle "BUNDLE_ID"
   asc bundle-ids capabilities list --bundle "BUNDLE_ID" --paginate`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := shared.ValidateNextURL(*next); err != nil {
-				return shared.UsageErrorf("bundle-ids capabilities list: %v", err)
+			if err := d.ValidatePaginationFlags(ctx, fs, "bundle-ids capabilities list", 200); err != nil {
+				return err
 			}
 			bundleValue := strings.TrimSpace(*bundleID)
 			if bundleValue == "" && strings.TrimSpace(*next) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --bundle is required")
-				return shared.MissingRequiredUsageError("--bundle")
+				return d.RequiredFlag("--bundle")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("bundle-ids capabilities list: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			opts := []asc.BundleIDCapabilitiesOption{
-				asc.WithBundleIDCapabilitiesNextURL(*next),
+				asc.NextURL[asc.BundleIDCapabilitiesOption](*next),
 			}
 
 			if *paginate {
@@ -95,13 +97,13 @@ Examples:
 				}
 
 				paginated, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-					return client.GetBundleIDCapabilities(ctx, bundleValue, asc.WithBundleIDCapabilitiesNextURL(nextURL))
+					return client.GetBundleIDCapabilities(ctx, bundleValue, asc.NextURL[asc.BundleIDCapabilitiesOption](nextURL))
 				})
 				if err != nil {
 					return fmt.Errorf("bundle-ids capabilities list: %w", err)
 				}
 
-				return shared.PrintOutput(paginated, *output.Output, *output.Pretty)
+				return d.PrintOutput(paginated, *output.Output, *output.Pretty)
 			}
 
 			resp, err := client.GetBundleIDCapabilities(requestCtx, bundleValue, opts...)
@@ -109,20 +111,20 @@ Examples:
 				return fmt.Errorf("bundle-ids capabilities list: failed to fetch: %w", err)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			return d.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// BundleIDsCapabilitiesAddCommand returns the bundle IDs capabilities add subcommand.
-func BundleIDsCapabilitiesAddCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("add", flag.ExitOnError)
+// newBundleIDsCapabilitiesAddCommand returns the bundle IDs capabilities add subcommand.
+func newBundleIDsCapabilitiesAddCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("add", flag.ExitOnError)
 
 	bundleID := shared.BindResourceIDFlag(fs, "bundle", "bundleIds", "Bundle ID")
 	capability := fs.String("capability", "", "Capability type (e.g., ICLOUD, IN_APP_PURCHASE)")
 	settings := fs.String("settings", "", "Capability settings as a structure-validated JSON array (optional)")
 	ifExists := shared.BindIfExistsFlag(fs, shared.IfExistsSkip, shared.IfExistsUpdate)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "add",
@@ -149,38 +151,33 @@ the existing capability with PATCH /v1/bundleIdCapabilities/{id}; with no
 409 keeps failing, including ENTITY_ERROR.ATTRIBUTE.TYPE for a capability type
 the API cannot create, even when that capability is already enabled.`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := shared.RejectPositionalArgs(args); err != nil {
-				return err
-			}
 			bundleValue := strings.TrimSpace(*bundleID)
 			if bundleValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --bundle is required")
-				return shared.MissingRequiredUsageError("--bundle")
+				return d.RequiredFlag("--bundle")
 			}
 			capabilityValue := strings.ToUpper(strings.TrimSpace(*capability))
 			if capabilityValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --capability is required")
-				return shared.MissingRequiredUsageError("--capability")
+				return d.RequiredFlag("--capability")
 			}
 
 			settingsValue, err := parseCapabilitySettings(*settings)
 			if err != nil {
-				return shared.UsageErrorf("bundle-ids capabilities add: %v", err)
+				return d.UsageErrorf("bundle-ids capabilities add: %v", err)
 			}
 
-			ifExistsMode, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+			ifExistsMode, err := d.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
 			if err != nil {
 				return err
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("bundle-ids capabilities add: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			attrs := asc.BundleIDCapabilityCreateAttributes{
@@ -193,10 +190,10 @@ the API cannot create, even when that capability is already enabled.`,
 					return findExistingBundleIDCapability(requestCtx, client, bundleValue, capabilityValue)
 				})
 				if resolveErr != nil {
-					return fmt.Errorf("bundle-ids capabilities add: failed to create: %w", resolveErr)
+					return withCapabilitiesAddConflictHint(fmt.Errorf("bundle-ids capabilities add: failed to create: %w", resolveErr), bundleValue, capabilityValue)
 				}
 				if !handled {
-					return fmt.Errorf("bundle-ids capabilities add: failed to create: %w", err)
+					return withCapabilitiesAddConflictHint(fmt.Errorf("bundle-ids capabilities add: failed to create: %w", err), bundleValue, capabilityValue)
 				}
 				resp = existing
 				outcome := "left unchanged"
@@ -210,23 +207,23 @@ the API cannot create, even when that capability is already enabled.`,
 					resp = updated
 					outcome = "updated it in place"
 				}
-				fmt.Fprintf(os.Stderr, "bundle-ids capabilities add: capability %s already enabled on bundle ID %s as %s; %s (--if-exists %s)\n",
+				fmt.Fprintf(d.IO.ErrOut, "bundle-ids capabilities add: capability %s already enabled on bundle ID %s as %s; %s (--if-exists %s)\n",
 					capabilityValue, bundleValue, existing.Data.ID, outcome, ifExistsMode)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			return d.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// BundleIDsCapabilitiesUpdateCommand returns the bundle IDs capabilities update subcommand.
-func BundleIDsCapabilitiesUpdateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("update", flag.ExitOnError)
+// newBundleIDsCapabilitiesUpdateCommand returns the bundle IDs capabilities update subcommand.
+func newBundleIDsCapabilitiesUpdateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("update", flag.ExitOnError)
 
 	id := shared.BindResourceIDFlag(fs, "id", "bundleIdCapabilities", "Capability ID")
 	capabilityType := fs.String("capability", "", "Capability type (e.g., ICLOUD, IN_APP_PURCHASE)")
 	settings := fs.String("settings", "", "Capability settings as a structure-validated JSON array")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "update",
@@ -242,35 +239,30 @@ Examples:
   asc bundle-ids capabilities update --id "CAPABILITY_ID" --capability PUSH_NOTIFICATIONS
   asc bundle-ids capabilities update --id "CAPABILITY_ID" --output table`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if err := shared.RejectPositionalArgs(args); err != nil {
-				return err
-			}
 			idValue := strings.TrimSpace(*id)
 			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return shared.MissingRequiredUsageError("--id")
+				return d.RequiredFlag("--id")
 			}
 
 			capabilityValue := strings.ToUpper(strings.TrimSpace(*capabilityType))
 			settingsValue, err := parseCapabilitySettings(*settings)
 			if err != nil {
-				return shared.UsageErrorf("bundle-ids capabilities update: %v", err)
+				return d.UsageErrorf("bundle-ids capabilities update: %v", err)
 			}
 
 			// Treat empty settings arrays as no-op updates.
 			if capabilityValue == "" && len(settingsValue) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: at least one update field is required (--capability or --settings)")
-				return shared.MissingRequiredUsageError("")
+				return d.UpdateFlagRequired(fs, capabilityType, settings)
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("bundle-ids capabilities update: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			attrs := asc.BundleIDCapabilityUpdateAttributes{
@@ -282,20 +274,15 @@ Examples:
 				return fmt.Errorf("bundle-ids capabilities update: failed to update: %w", err)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			return d.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// BundleIDsCapabilitiesRemoveCommand returns the bundle IDs capabilities remove subcommand.
-func BundleIDsCapabilitiesRemoveCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("remove", flag.ExitOnError)
-
-	id := shared.BindResourceIDFlag(fs, "id", "bundleIdCapabilities", "Capability ID")
-	confirm := fs.Bool("confirm", false, "Confirm deletion")
-	output := shared.BindOutputFlags(fs)
-
-	return &ffcli.Command{
+// newBundleIDsCapabilitiesRemoveCommand returns the bundle IDs capabilities remove subcommand.
+func newBundleIDsCapabilitiesRemoveCommand(d *shared.Deps) *ffcli.Command {
+	return shared.BuildConfirmDeleteCommand(shared.ConfirmDeleteCommandConfig{
+		Deps:       d,
 		Name:       "remove",
 		ShortUsage: "asc bundle-ids capabilities remove --id \"CAPABILITY_ID\" --confirm",
 		ShortHelp:  "Remove a capability from a bundle ID.",
@@ -303,42 +290,17 @@ func BundleIDsCapabilitiesRemoveCommand() *ffcli.Command {
 
 Examples:
   asc bundle-ids capabilities remove --id "CAPABILITY_ID" --confirm`,
-		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
-		Exec: func(ctx context.Context, args []string) error {
-			if err := shared.RejectPositionalArgs(args); err != nil {
-				return err
-			}
-			idValue := strings.TrimSpace(*id)
-			if idValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return shared.MissingRequiredUsageError("--id")
-			}
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required")
-				return shared.MissingRequiredUsageError("--confirm")
-			}
-
-			client, err := shared.GetASCClient()
-			if err != nil {
-				return fmt.Errorf("bundle-ids capabilities remove: %w", err)
-			}
-
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
-			if err := client.DeleteBundleIDCapability(requestCtx, idValue); err != nil {
-				return fmt.Errorf("bundle-ids capabilities remove: failed to delete: %w", err)
-			}
-
-			result := &asc.BundleIDCapabilityDeleteResult{
-				ID:      idValue,
-				Deleted: true,
-			}
-
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+		IDFlag:             "id",
+		IDUsage:            "Capability ID",
+		IDType:             "bundleIdCapabilities",
+		RequiredDiagnostic: true,
+		Delete: func(ctx context.Context, client *asc.Client, id string) error {
+			return client.DeleteBundleIDCapability(ctx, id)
 		},
-	}
+		Result: func(id string) any {
+			return &asc.DeleteResult{ID: id, Deleted: true}
+		},
+	})
 }
 
 func parseCapabilitySettings(value string) ([]asc.CapabilitySetting, error) {
@@ -493,6 +455,110 @@ func validateCapabilitySettings(settings []asc.CapabilitySetting) error {
 	return nil
 }
 
+// signInWithAppleSettings is the --settings value that enables Sign in with
+// Apple as a primary App ID; Apple rejects APPLE_ID_AUTH without a
+// configuration ("Please select at least one configuration for Sign In with
+// Apple.").
+const signInWithAppleSettings = `'[{"key":"APPLE_ID_AUTH_APP_CONSENT","options":[{"key":"PRIMARY_APP_CONSENT","enabled":true}]}]'`
+
+// capabilityTypeAPINames maps entitlement- and portal-style names agents use
+// for a capability to the type App Store Connect's API accepts.
+var capabilityTypeAPINames = map[string]string{
+	"APPLICATION_GROUPS": "APP_GROUPS",
+	"SIGN_IN_WITH_APPLE": "APPLE_ID_AUTH",
+}
+
+// apiCapabilityTypes is the CapabilityType enum in Apple's OpenAPI document
+// (docs/openapi/latest.json): the capabilityType values
+// POST /v1/bundleIdCapabilities accepts.
+var apiCapabilityTypes = []string{
+	"ICLOUD", "IN_APP_PURCHASE", "GAME_CENTER", "PUSH_NOTIFICATIONS", "WALLET",
+	"INTER_APP_AUDIO", "MAPS", "ASSOCIATED_DOMAINS", "PERSONAL_VPN", "APP_GROUPS",
+	"HEALTHKIT", "HOMEKIT", "WIRELESS_ACCESSORY_CONFIGURATION", "APPLE_PAY",
+	"DATA_PROTECTION", "SIRIKIT", "NETWORK_EXTENSIONS", "MULTIPATH", "HOT_SPOT",
+	"NFC_TAG_READING", "CLASSKIT", "AUTOFILL_CREDENTIAL_PROVIDER",
+	"ACCESS_WIFI_INFORMATION", "NETWORK_CUSTOM_PROTOCOL", "COREMEDIA_HLS_LOW_LATENCY",
+	"SYSTEM_EXTENSION_INSTALL", "USER_MANAGEMENT", "APPLE_ID_AUTH",
+}
+
+// withCapabilitiesAddConflictHint names the next step for the 409s Apple
+// returns on POST /v1/bundleIdCapabilities that are not existence conflicts:
+// a capability type outside the API's enum, Sign in with Apple without a
+// configuration, and a --bundle that is a bundle identifier rather than the
+// bundle ID's resource ID. Every entry of Apple's errors[] is consulted, so a
+// cause reported after the first still gets its hint. Every other error is
+// returned unchanged.
+func withCapabilitiesAddConflictHint(err error, bundle, capability string) error {
+	apiErr, ok := errors.AsType[*asc.APIError](err)
+	if !ok || apiErr.StatusCode != http.StatusConflict {
+		return err
+	}
+	entries := apiErr.Entries
+	if len(entries) == 0 {
+		entries = []asc.APIErrorEntry{{Code: apiErr.Code, Detail: apiErr.Detail}}
+	}
+	for _, entry := range entries {
+		if hint := capabilitiesAddConflictEntryHint(entry, bundle, capability); hint != "" {
+			return &shared.HintedError{Err: err, Hint: hint}
+		}
+	}
+	return err
+}
+
+func capabilitiesAddConflictEntryHint(entry asc.APIErrorEntry, bundle, capability string) string {
+	switch {
+	case entry.Code == "ENTITY_ERROR.ATTRIBUTE.TYPE" && strings.Contains(entry.Detail, "for the attribute 'capabilityType'"):
+		return capabilityTypeRejectedHint(bundle, capability)
+	case strings.Contains(entry.Detail, "at least one configuration for Sign In with Apple"):
+		return fmt.Sprintf("Sign in with Apple needs a configuration. To enable it as a primary App ID: asc bundle-ids capabilities add --bundle %q --capability APPLE_ID_AUTH --settings %s", bundle, signInWithAppleSettings)
+	case entry.Code == "ENTITY_ERROR.RELATIONSHIP.INVALID" && strings.Contains(bundle, "."):
+		// Bundle ID resource IDs are alphanumeric; a dot means the caller
+		// passed the reverse-DNS identifier.
+		return fmt.Sprintf("--bundle takes the bundle ID's resource ID (for example ABCDE12345), not its identifier %q. Look the ID up with asc bundle-ids list --identifier %q, then rerun with --bundle set to it.", bundle, bundle)
+	}
+	return ""
+}
+
+func capabilityTypeRejectedHint(bundle, capability string) string {
+	if apiName, ok := capabilityTypeAPINames[capability]; ok {
+		hint := fmt.Sprintf("App Store Connect calls this capability %s: asc bundle-ids capabilities add --bundle %q --capability %s", apiName, bundle, apiName)
+		if apiName == "APPLE_ID_AUTH" {
+			hint += " --settings " + signInWithAppleSettings
+		}
+		return hint
+	}
+	if capability == "PRIVATE_CLOUD_COMPUTE" {
+		return fmt.Sprintf("PRIVATE_CLOUD_COMPUTE is a Developer Portal-only capability. Enable it through a web session with asc web bundle-ids capabilities enable --bundle-id %q --capability PRIVATE_CLOUD_COMPUTE --confirm", bundle)
+	}
+	// A near miss of a type the API accepts is a typo, not a portal-only
+	// capability: name the type it most likely meant.
+	if closest := closestAPICapabilityTypes(capability); len(closest) > 0 {
+		command := fmt.Sprintf("asc bundle-ids capabilities add --bundle %q --capability %s", bundle, closest[0])
+		if len(closest) == 1 {
+			return fmt.Sprintf("%s is not a capability type the App Store Connect API recognizes; the closest one it accepts is %s: %s", capability, closest[0], command)
+		}
+		return fmt.Sprintf("%s is not a capability type the App Store Connect API recognizes; the closest ones it accepts are %s. Rerun with the one you meant, for example: %s", capability, strings.Join(closest, ", "), command)
+	}
+	return fmt.Sprintf("The App Store Connect API does not accept %s (Apple lists the capability types it accepts above), and retrying with other flags or --if-exists does not change that. If %s is a capability the Apple Developer portal offers, enable it on this App ID there (Certificates, Identifiers & Profiles > Identifiers), then regenerate the provisioning profiles that use the App ID.", capability, capability)
+}
+
+// closestAPICapabilityTypes returns up to three API capability types the
+// rejected capability is a likely misspelling of. The suggester ranks
+// hyphen-separated names, so underscores are swapped for hyphens going in
+// and back coming out.
+func closestAPICapabilityTypes(capability string) []string {
+	toSuggest := func(value string) string { return strings.ReplaceAll(value, "_", "-") }
+	candidates := make([]string, len(apiCapabilityTypes))
+	for i, capabilityType := range apiCapabilityTypes {
+		candidates[i] = toSuggest(capabilityType)
+	}
+	matches := suggest.Commands(toSuggest(capability), candidates)
+	for i, match := range matches {
+		matches[i] = strings.ToUpper(strings.ReplaceAll(match, "-", "_"))
+	}
+	return matches
+}
+
 // capabilitiesAddExistsCodes lists the Apple 409 codes accepted as "this
 // capability is already enabled on the bundle ID" on
 // POST /v1/bundleIdCapabilities. ENTITY_ERROR.ATTRIBUTE.TYPE (a capability type
@@ -512,7 +578,7 @@ func findExistingBundleIDCapability(ctx context.Context, client *asc.Client, bun
 		return nil, false, err
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBundleIDCapabilities(ctx, bundleID, asc.WithBundleIDCapabilitiesNextURL(nextURL))
+		return client.GetBundleIDCapabilities(ctx, bundleID, asc.NextURL[asc.BundleIDCapabilitiesOption](nextURL))
 	})
 	if err != nil {
 		return nil, false, err

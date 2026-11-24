@@ -59,6 +59,10 @@ BOOLEAN_FLAG_OVERRIDES: dict[tuple[str, ...], set[str]] = {
         "--public-link-enabled",
         "--public-link-limit-enabled",
     },
+    ("testflight", "groups", "edit"): {
+        "--ios-builds-available-for-apple-silicon-mac",
+        "--ios-builds-available-for-apple-vision",
+    },
     # `versions update --confirm` tracks presence so an explicit
     # `--confirm=false` is rejected instead of silently ignored.
     ("versions", "update"): {"--confirm"},
@@ -851,12 +855,12 @@ def collect_errors(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate Mintlify website command examples.")
+    parser = argparse.ArgumentParser(description="Validate website command examples.")
     parser.add_argument("--binary", type=Path, help="Use a CLI freshly built by the caller instead of building one.")
     parser.add_argument(
         "--website-root",
-        default=".",
-        help="Path to the Mintlify docs root.",
+        default="website/src/content/docs",
+        help="Path to the website docs content root.",
     )
     args = parser.parse_args(argv)
 

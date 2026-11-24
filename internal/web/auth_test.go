@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -141,6 +142,42 @@ func TestLogWebAuthHTTPRedactsSensitiveQueryValues(t *testing.T) {
 	}
 	if !strings.Contains(output, "%5BREDACTED%5D") {
 		t.Fatalf("expected redacted marker in debug output, got %q", output)
+	}
+}
+
+func TestLogWebAuthHTTPSummarizesSetCookieWithoutValues(t *testing.T) {
+	origLogger := webDebugLogger
+	origDebugEnabled := webDebugEnabledFn
+	t.Cleanup(func() {
+		webDebugLogger = origLogger
+		webDebugEnabledFn = origDebugEnabled
+	})
+	var logs bytes.Buffer
+	webDebugLogger = slog.New(slog.NewTextHandler(&logs, nil))
+	webDebugEnabledFn = func() bool { return true }
+
+	req, err := http.NewRequest(http.MethodGet, "https://appstoreconnect.apple.com/olympus/v1/session", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{"Set-Cookie": {
+			"myacinfo=secret-myacinfo-value; Domain=.apple.com; Path=/; Max-Age=3600; Secure; HttpOnly",
+			"itctx=secret-itctx-value; Path=/",
+			"dqsid=secret-dqsid-value; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+		}},
+	}
+
+	logWebAuthHTTP("session_info", req, resp, nil, nil)
+
+	output := logs.String()
+	want := `set_cookie="myacinfo domain=apple.com path=/ persistent; itctx host-only path=/ session; dqsid host-only path=/ deletion"`
+	if !strings.Contains(output, want) {
+		t.Fatalf("expected %s in debug output, got %q", want, output)
+	}
+	if strings.Contains(output, "secret-") || strings.Contains(output, "HttpOnly") {
+		t.Fatalf("expected cookie values and other attributes to be omitted, got %q", output)
 	}
 }
 
@@ -371,6 +408,44 @@ func TestSigninCompleteKeepsGenericUnauthorizedErrorsForOtherCodes(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "signin complete failed with status 401") {
 		t.Fatalf("expected generic status error, got %q", err.Error())
+	}
+}
+
+func TestSigninCompleteReportsLockedAppleAccount(t *testing.T) {
+	// #3111: Apple answers signin/complete with 403 and -20209 once it has
+	// locked the account for API sign-in. Only that pair means locked; other
+	// 403 refusals keep the generic service error.
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantLocked bool
+	}{
+		{name: "-20209 locked", body: `{"serviceErrors":[{"code":"-20209","message":"This Apple Account has been locked for security reasons. Visit iForgot to reset your account (https://iforgot.apple.com)","suppressDismissal":false}]}`, wantLocked: true},
+		{name: "other 403 code", body: `{"serviceErrors":[{"code":"-20751","message":"Your account cannot sign in at this time."}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusForbidden,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader(tc.body)),
+					}, nil
+				}),
+			}
+
+			err := signinComplete(context.Background(), client, "user@example.com", "m1-proof", "m2-proof", json.RawMessage(`{"v":1}`), "service-key", "hashcash-token")
+			if errors.Is(err, ErrAppleAccountLocked) != tc.wantLocked {
+				t.Fatalf("errors.Is(err, ErrAppleAccountLocked) = %v, want %v for %v", !tc.wantLocked, tc.wantLocked, err)
+			}
+			var serviceErr *SigninServiceError
+			if !errors.As(err, &serviceErr) || serviceErr.Status != http.StatusForbidden {
+				t.Fatalf("error = %v, want the 403 service error with Apple's message", err)
+			}
+			if !strings.Contains(err.Error(), "signin_complete") || !strings.Contains(err.Error(), "403") {
+				t.Fatalf("error = %q, want the stage and status", err)
+			}
+		})
 	}
 }
 
@@ -687,6 +762,48 @@ func TestPrepareTwoFactorChallengeKeepsPhoneFallbackForTrustedDeviceFlow(t *test
 	}
 	if cachedChallenge.Destination != challenge.Destination {
 		t.Fatalf("expected cached challenge destination %q, got %q", challenge.Destination, cachedChallenge.Destination)
+	}
+}
+
+// Regression: preparing the same FSA challenge twice must preserve its bytes
+// without requesting another challenge or routing the account into code delivery.
+func TestPrepareTwoFactorChallengeCachesSecurityKeyContinuation(t *testing.T) {
+	requests := 0
+	session := &AuthSession{
+		ServiceKey: "service-key", AppleIDSessionID: "session-id", SCNT: "scnt-token",
+		Client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if req.Method != http.MethodGet || req.URL.String() != authServiceURL {
+				t.Fatalf("unexpected request %s %s", req.Method, req.URL)
+			}
+			for name, want := range map[string]string{"X-Apple-Widget-Key": "service-key", "X-Apple-ID-Session-Id": "session-id", "scnt": "scnt-token"} {
+				if got := req.Header.Get(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"fsaChallenge":{"challenge":"AQID","allowedCredentials":"BAUG","keyHandles":["BAUG"]},"trustedDevices":[{"id":"device"}]}`))}, nil
+		})},
+	}
+	for range 2 {
+		challenge, err := PrepareTwoFactorChallenge(context.Background(), session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if challenge.Method != appleauth.TwoFactorMethodSecurityKey || challenge.SecurityKey == nil {
+			t.Fatalf("challenge = %+v, want security key", challenge)
+		}
+		if challenge.SecurityKey.Challenge != "AQID" || challenge.SecurityKey.AllowedCredentials != "BAUG" {
+			t.Fatalf("continuation bytes changed: %+v", challenge.SecurityKey)
+		}
+		if challenge.PhoneFallbackAvailable || challenge.Requested {
+			t.Fatal("security-key continuation exposed code delivery")
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("auth-options requests = %d, want 1", requests)
+	}
+	if session.TwoFactorMethod() != appleauth.TwoFactorMethodSecurityKey {
+		t.Fatalf("prepared method = %q", session.TwoFactorMethod())
 	}
 }
 
@@ -1332,32 +1449,36 @@ func TestResolveWebMinRequestInterval(t *testing.T) {
 }
 
 func TestClientDoRequestAppliesRateLimit(t *testing.T) {
-	servedAt := make(chan time.Time, 2)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		servedAt <- time.Now()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[]}`))
-	}))
-	defer server.Close()
+	synctest.Test(t, func(t *testing.T) {
+		var servedAt []time.Time
+		client := &Client{
+			httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				servedAt = append(servedAt, time.Now())
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+					Request:    req,
+				}, nil
+			})},
+			baseURL:            "https://appstoreconnect.example.test",
+			minRequestInterval: 80 * time.Millisecond,
+		}
 
-	client := &Client{
-		httpClient:         server.Client(),
-		baseURL:            server.URL,
-		minRequestInterval: 80 * time.Millisecond,
-	}
+		if _, err := client.doRequest(context.Background(), "GET", "/apps", nil); err != nil {
+			t.Fatalf("first doRequest error: %v", err)
+		}
+		if _, err := client.doRequest(context.Background(), "GET", "/apps", nil); err != nil {
+			t.Fatalf("second doRequest error: %v", err)
+		}
 
-	if _, err := client.doRequest(context.Background(), "GET", "/apps", nil); err != nil {
-		t.Fatalf("first doRequest error: %v", err)
-	}
-	if _, err := client.doRequest(context.Background(), "GET", "/apps", nil); err != nil {
-		t.Fatalf("second doRequest error: %v", err)
-	}
-
-	first := <-servedAt
-	second := <-servedAt
-	if diff := second.Sub(first); diff < 55*time.Millisecond {
-		t.Fatalf("expected low-rate gap between calls, got %v", diff)
-	}
+		if len(servedAt) != 2 {
+			t.Fatalf("served %d requests, want 2", len(servedAt))
+		}
+		if diff := servedAt[1].Sub(servedAt[0]); diff != 80*time.Millisecond {
+			t.Fatalf("gap between calls = %v, want the 80ms request interval", diff)
+		}
+	})
 }
 
 func TestLoadWebRootCAPoolFromPaths(t *testing.T) {
@@ -1515,7 +1636,7 @@ func TestIsStaleSessionAfterTwoFactorIgnoresUnrelatedFailures(t *testing.T) {
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "unauthorized", err: &TwoFactorFinalizationError{Status: http.StatusUnauthorized}, want: true},
-		{name: "forbidden", err: &TwoFactorFinalizationError{Status: http.StatusForbidden}, want: true},
+		{name: "forbidden", err: &TwoFactorFinalizationError{Status: http.StatusForbidden}, want: false},
 		{name: "server error", err: &TwoFactorFinalizationError{Status: http.StatusInternalServerError}, want: false},
 		{name: "wrapped", err: fmt.Errorf("wrapped: %w", &TwoFactorFinalizationError{Status: http.StatusUnauthorized}), want: true},
 		{name: "rejected code", err: &twoFAVerificationFailedError{Kind: "trusted-device", Status: http.StatusBadRequest}, want: false},

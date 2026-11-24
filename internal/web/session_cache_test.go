@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/99designs/keyring"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/testguard"
 )
 
 type countingKeyring struct {
@@ -110,6 +112,28 @@ func withSessionInfoStub(t *testing.T) {
 	t.Cleanup(func() {
 		sessionInfoFetcher = prev
 	})
+}
+
+func serializeCookieJar(jar http.CookieJar, userEmail string) persistedSession {
+	sess, _ := serializeCookieJarWithError(jar, userEmail)
+	return sess
+}
+
+func writeSessionToKeychain(key string, sess persistedSession) error {
+	return withSessionStoreLock(func() error {
+		return writeSessionToKeychainUnlocked(key, sess, keychainSessionWrite{})
+	})
+}
+
+func persistSessionBySelection(selection backendSelection, key string, sess persistedSession) error {
+	return withSessionEntryLock(key, func() error {
+		return persistSessionBySelectionLocked(selection, key, sess, nil)
+	})
+}
+
+func readLastSessionFromKeychain() (persistedSession, bool, error) {
+	sess, _, ok, err := readLastSessionFromKeychainWithKey()
+	return sess, ok, err
 }
 
 func TestResolveBackendSelectionDefaultsToFileWithKeychainFallback(t *testing.T) {
@@ -520,6 +544,9 @@ func TestTryResumeSessionKeychainBackendFallsBackToFileAndPersistsKeychain(t *te
 	if !ok || resumed == nil {
 		t.Fatal("expected resumed file-backed session")
 	}
+	if resumed.cachedSource != CachedSessionSourceFile {
+		t.Fatalf("cached source = %v, want file", resumed.cachedSource)
+	}
 
 	if _, ok, err := readSessionFromKeychain(key); err != nil {
 		t.Fatalf("readSessionFromKeychain error: %v", err)
@@ -555,6 +582,9 @@ func TestTryResumeLastSessionKeychainBackendFallsBackToFileAndPersistsKeychain(t
 	}
 	if !ok || resumed == nil {
 		t.Fatal("expected resumed last session from file fallback")
+	}
+	if resumed.cachedSource != CachedSessionSourceFile {
+		t.Fatalf("cached source = %v, want file", resumed.cachedSource)
 	}
 
 	if _, ok, err := readSessionFromKeychain(key); err != nil {
@@ -1396,6 +1426,60 @@ func TestSerializeCookieJarIncludesDeveloperPortalOrigin(t *testing.T) {
 	}
 }
 
+func TestPersistSessionKeepsNewerCookieWrittenToKeychainByAnotherProcess(t *testing.T) {
+	kr := withArraySessionKeyring(t)
+	t.Setenv(webSessionBackendEnv, "keychain")
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
+	key := webSessionCacheKey(webTestSessionEmail)
+	root := "https://appstoreconnect.apple.com/"
+	expires := time.Now().UTC().Add(time.Hour)
+	if err := writeSessionToKeychain(key, persistedSession{
+		Version:    webSessionCacheVersion,
+		UpdatedAt:  time.Now().UTC(),
+		Generation: "s0",
+		UserEmail:  webTestSessionEmail,
+		Cookies: map[string][]pCookie{root: {
+			{Name: "myacinfo", Value: "old", ScopeDomain: "apple.com", Path: "/", Expires: expires},
+			{Name: "itctx", Value: "provider", ScopeDomain: "apple.com", Path: "/", Expires: expires},
+		}},
+	}); err != nil {
+		t.Fatalf("writeSessionToKeychain() error: %v", err)
+	}
+	a, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession(a) = (%t, %v)", ok, err)
+	}
+	b, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession(b) = (%t, %v)", ok, err)
+	}
+	target, _ := url.Parse(root)
+	a.Client.Jar.SetCookies(target, []*http.Cookie{{Name: "myacinfo", Value: "fresh", Path: "/", Expires: expires}})
+	if err := PersistSession(a); err != nil {
+		t.Fatalf("PersistSession(a) error: %v", err)
+	}
+	b.Client.Jar.SetCookies(target, []*http.Cookie{{Name: "itctx", Value: "other", Path: "/", Expires: expires}})
+	kr.ResetCounts()
+	if err := PersistSession(b); err != nil {
+		t.Fatalf("PersistSession(b) error: %v", err)
+	}
+	if got := kr.GetCount(webSessionStoreItem); got != 1 {
+		t.Fatalf("PersistSession(b) read the keychain store %d times, want 1", got)
+	}
+	stored, ok, err := readSessionFromKeychain(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromKeychain() = (%t, %v), want stored session", ok, err)
+	}
+	values := map[string]string{}
+	for _, cookie := range stored.Cookies[root] {
+		values[cookie.Name] = cookie.Value
+	}
+	if len(stored.Cookies[root]) != 2 || values["myacinfo"] != "fresh" || values["itctx"] != "other" {
+		t.Fatalf("persisted cookies = %v, want the other process's myacinfo plus this handle's itctx", values)
+	}
+}
+
 func TestPersistSessionUsesSingleSharedKeychainStore(t *testing.T) {
 	kr := withArraySessionKeyring(t)
 	t.Setenv(webSessionBackendEnv, "keychain")
@@ -1561,6 +1645,36 @@ func TestPersistSessionRoundTripsDeveloperTeamID(t *testing.T) {
 	}
 }
 
+func TestPersistSessionRecordsProviderIDForCachedReload(t *testing.T) {
+	t.Setenv(webSessionBackendEnv, "file")
+	t.Setenv(webSessionCacheEnabledEnv, "1")
+	t.Setenv(webSessionCacheDirEnv, t.TempDir())
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("cookiejar.New error: %v", err)
+	}
+	targetURL, _ := url.Parse("https://appstoreconnect.apple.com/")
+	jar.SetCookies(targetURL, []*http.Cookie{
+		{Name: "myacinfo", Value: "token", Path: "/", Expires: time.Now().Add(24 * time.Hour)},
+	})
+	if err := PersistSession(&AuthSession{
+		Client:     &http.Client{Jar: jar},
+		UserEmail:  "user@example.com",
+		ProviderID: 99,
+	}); err != nil {
+		t.Fatalf("PersistSession error: %v", err)
+	}
+
+	loaded, ok, err := LoadCachedSession("user@example.com")
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession = %v, %v", ok, err)
+	}
+	if loaded.ProviderID != 99 {
+		t.Fatalf("ProviderID = %d, want 99", loaded.ProviderID)
+	}
+}
+
 func TestTryResumeSessionPersistsRefreshedCookies(t *testing.T) {
 	withArraySessionKeyring(t)
 	t.Setenv(webSessionBackendEnv, "keychain")
@@ -1607,7 +1721,7 @@ func TestTryResumeSessionPersistsRefreshedCookies(t *testing.T) {
 	}
 
 	selection := resolveBackendSelection()
-	stored, ok, err := readSessionBySelection(selection, webSessionCacheKey("user@example.com"))
+	stored, _, ok, err := readSessionBySelection(selection, webSessionCacheKey("user@example.com"))
 	if err != nil {
 		t.Fatalf("readSessionBySelection error: %v", err)
 	}
@@ -2253,7 +2367,7 @@ func TestPersistedCookieScopeNormalizesLeadingDotDomain(t *testing.T) {
 	root := pCookie{Name: "token", Value: "same", Path: "/olympus", Domain: "appstoreconnect.apple.com"}
 	leadingDot := root
 	leadingDot.Domain = ".appstoreconnect.apple.com"
-	if !persistedCookieListHasScope([]pCookie{root}, leadingDot) {
+	if !samePersistedCookieScope(root, leadingDot) {
 		t.Fatal("equivalent leading-dot domain was treated as a distinct cookie scope")
 	}
 }
@@ -2432,7 +2546,7 @@ func TestTryResumeSessionPreservesNormalizedCookieDeadline(t *testing.T) {
 	if resumed, ok, err := TryResumeSession(context.Background(), sess.UserEmail); err != nil || !ok || resumed == nil {
 		t.Fatalf("TryResumeSession() = (%v, %t, %v), want resumed session", resumed, ok, err)
 	}
-	stored, ok, err := readSessionBySelection(resolveBackendSelection(), key)
+	stored, _, ok, err := readSessionBySelection(resolveBackendSelection(), key)
 	if err != nil || !ok {
 		t.Fatalf("readSessionBySelection() = (%t, %v), want stored session", ok, err)
 	}
@@ -2482,7 +2596,7 @@ func TestTryResumeSessionPersistsSameValueCookieRenewalDeadline(t *testing.T) {
 	if resumed, ok, err := TryResumeSession(context.Background(), sess.UserEmail); err != nil || !ok || resumed == nil {
 		t.Fatalf("TryResumeSession() = (%v, %t, %v), want resumed session", resumed, ok, err)
 	}
-	stored, ok, err := readSessionBySelection(resolveBackendSelection(), key)
+	stored, _, ok, err := readSessionBySelection(resolveBackendSelection(), key)
 	if err != nil || !ok {
 		t.Fatalf("readSessionBySelection() = (%t, %v), want stored session", ok, err)
 	}
@@ -2541,7 +2655,7 @@ func TestTryResumeLastSessionPersistsRefreshedCookies(t *testing.T) {
 	}
 
 	selection := resolveBackendSelection()
-	stored, ok, err := readSessionBySelection(selection, webSessionCacheKey("user@example.com"))
+	stored, _, ok, err := readSessionBySelection(selection, webSessionCacheKey("user@example.com"))
 	if err != nil {
 		t.Fatalf("readSessionBySelection error: %v", err)
 	}
@@ -2569,7 +2683,7 @@ func TestReadSessionBySelectionKeychainBackendIgnoresBrokenFileMirror(t *testing
 		t.Fatalf("write malformed file mirror: %v", err)
 	}
 
-	_, ok, err := readSessionBySelection(resolveBackendSelection(), key)
+	_, _, ok, err := readSessionBySelection(resolveBackendSelection(), key)
 	if err != nil {
 		t.Fatalf("expected broken file mirror to be ignored in keychain mode, got %v", err)
 	}
@@ -2592,7 +2706,7 @@ func TestReadLastSessionBySelectionKeychainBackendIgnoresBrokenFileMirror(t *tes
 		t.Fatalf("write malformed last marker: %v", err)
 	}
 
-	_, ok, err := readLastSessionBySelection(resolveBackendSelection())
+	_, _, _, ok, err := readLastSessionBySelection(resolveBackendSelection())
 	if err != nil {
 		t.Fatalf("expected broken last-session mirror to be ignored in keychain mode, got %v", err)
 	}
@@ -3253,10 +3367,10 @@ func TestSessionCacheIgnoresLegacyIrisFileCacheAndEnvironment(t *testing.T) {
 	if resumed, ok, err := TryResumeLastSession(context.Background()); err != nil || ok || resumed != nil {
 		t.Fatalf("TryResumeLastSession = (%+v, %t, %v), want cache miss", resumed, ok, err)
 	}
-	if resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com"); err != nil || ok || resumed != nil {
+	if resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com", http.DefaultTransport); err != nil || ok || resumed != nil {
 		t.Fatalf("ResumeCachedSessionWithoutPersist = (%+v, %t, %v), want cache miss", resumed, ok, err)
 	}
-	if resumed, ok, err := ResumeLastCachedSessionWithoutPersist(context.Background()); err != nil || ok || resumed != nil {
+	if resumed, ok, err := ResumeLastCachedSessionWithoutPersist(context.Background(), http.DefaultTransport); err != nil || ok || resumed != nil {
 		t.Fatalf("ResumeLastCachedSessionWithoutPersist = (%+v, %t, %v), want cache miss", resumed, ok, err)
 	}
 	if _, err := os.Stat(filepath.Join(webDir, "session-"+key+".json")); !os.IsNotExist(err) {
@@ -3328,7 +3442,7 @@ func TestResumeCachedSessionWithoutPersistNeverOpensKeychain(t *testing.T) {
 		t.Fatalf("writeSessionToFile error: %v", err)
 	}
 
-	resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com")
+	resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com", http.DefaultTransport)
 	if err != nil || !ok || resumed == nil {
 		t.Fatalf("resume = (%+v, %t, %v), want cached file session", resumed, ok, err)
 	}
@@ -3369,7 +3483,7 @@ func TestResumeCachedSessionWithoutPersistPreservesExpiredCache(t *testing.T) {
 				t.Fatalf("read cache before resume: %v", err)
 			}
 
-			resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com")
+			resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com", http.DefaultTransport)
 			if !errors.Is(err, ErrCachedSessionExpired) || ok || resumed == nil {
 				t.Fatalf("resume = (%+v, %t, %v), want identity plus expired sentinel", resumed, ok, err)
 			}
@@ -3389,8 +3503,11 @@ func TestResumeCachedSessionWithoutPersistClassifiesTransientValidationFailure(t
 	t.Setenv(webSessionBackendEnv, "file")
 	t.Setenv(webSessionCacheDirEnv, filepath.Join(t.TempDir(), "web-cache"))
 
+	transport := &resumeTestTransport{}
+	var validationTransport http.RoundTripper
 	previousFetcher := sessionInfoFetcher
-	sessionInfoFetcher = func(context.Context, *http.Client) (*sessionInfo, error) {
+	sessionInfoFetcher = func(_ context.Context, client *http.Client) (*sessionInfo, error) {
+		validationTransport = client.Transport
 		return nil, errors.New("temporary network failure")
 	}
 	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
@@ -3406,11 +3523,16 @@ func TestResumeCachedSessionWithoutPersistClassifiesTransientValidationFailure(t
 		t.Fatalf("writeSessionToFile error: %v", err)
 	}
 
-	resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com")
+	resumed, ok, err := ResumeCachedSessionWithoutPersist(context.Background(), "user@example.com", transport)
 	if !errors.Is(err, ErrCachedSessionValidationFailed) || ok || resumed == nil || resumed.UserEmail != "user@example.com" {
 		t.Fatalf("resume = (%+v, %t, %v), want identity plus validation sentinel", resumed, ok, err)
 	}
+	if validationTransport != transport {
+		t.Fatalf("validation client transport = %v, want the given transport", validationTransport)
+	}
 }
+
+type resumeTestTransport struct{ http.RoundTripper }
 
 func persistedMyacinfoCookieValue(sess persistedSession, baseURL string) string {
 	list := sess.Cookies[baseURL]
@@ -3962,5 +4084,140 @@ func TestBypassKeychainKeepsWebSessionsOutOfKeychain(t *testing.T) {
 	}
 	if opened != 0 {
 		t.Fatalf("keychain opened %d times with explicit keychain backend and ASC_BYPASS_KEYCHAIN=1", opened)
+	}
+}
+
+func TestPersistSessionKeepsRotatedSessionOnlyCookie(t *testing.T) {
+	withFileSessionCache(t)
+	key := webSessionCacheKey(webTestSessionEmail)
+	root := "https://appstoreconnect.apple.com/"
+	if err := writeSessionToFile(key, persistedSession{
+		Version:   webSessionCacheVersion,
+		UpdatedAt: time.Now().UTC(),
+		UserEmail: webTestSessionEmail,
+		Cookies: map[string][]pCookie{root: {
+			{Name: "myacinfo", Value: "session", ScopeDomain: "apple.com", Path: "/", Expires: time.Now().UTC().Add(time.Hour)},
+			{Name: "dqsid", Value: "old", Path: "/"},
+		}},
+	}); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+	loaded, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession() = (%t, %v), want cached session", ok, err)
+	}
+	target, _ := url.Parse(root)
+	loaded.Client.Jar.SetCookies(target, []*http.Cookie{{Name: "dqsid", Value: "new", Path: "/"}})
+	if err := PersistSession(loaded); err != nil {
+		t.Fatalf("PersistSession() error: %v", err)
+	}
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	var got []string
+	for _, cookie := range stored.Cookies[root] {
+		if cookie.Name == "dqsid" {
+			got = append(got, cookie.Value)
+		}
+	}
+	if len(got) != 1 || got[0] != "new" {
+		t.Fatalf("persisted dqsid = %v, want [new]", got)
+	}
+}
+
+func TestPersistSessionKeepsNewerCookieWrittenByAnotherProcess(t *testing.T) {
+	withFileSessionCache(t)
+	key := webSessionCacheKey(webTestSessionEmail)
+	root := "https://appstoreconnect.apple.com/"
+	expires := time.Now().UTC().Add(time.Hour)
+	if err := writeSessionToFile(key, persistedSession{
+		Version:    webSessionCacheVersion,
+		UpdatedAt:  time.Now().UTC(),
+		Generation: "s0",
+		UserEmail:  webTestSessionEmail,
+		Cookies: map[string][]pCookie{root: {
+			{Name: "myacinfo", Value: "old", ScopeDomain: "apple.com", Path: "/", Expires: expires},
+			{Name: "itctx", Value: "provider", ScopeDomain: "apple.com", Path: "/", Expires: expires},
+		}},
+	}); err != nil {
+		t.Fatalf("writeSessionToFile() error: %v", err)
+	}
+	a, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession(a) = (%t, %v)", ok, err)
+	}
+	b, ok, err := LoadCachedSession(webTestSessionEmail)
+	if err != nil || !ok {
+		t.Fatalf("LoadCachedSession(b) = (%t, %v)", ok, err)
+	}
+	target, _ := url.Parse(root)
+	a.Client.Jar.SetCookies(target, []*http.Cookie{{Name: "myacinfo", Value: "fresh", Path: "/", Expires: expires}})
+	if err := PersistSession(a); err != nil {
+		t.Fatalf("PersistSession(a) error: %v", err)
+	}
+	b.Client.Jar.SetCookies(target, []*http.Cookie{{Name: "itctx", Value: "other", Path: "/", Expires: expires}})
+	endpoint, _ := url.Parse(olympusSessionURL)
+	b.Client.Jar.SetCookies(endpoint, []*http.Cookie{{Name: "myacinfo", Value: "olympus", Path: "/olympus", Expires: expires}})
+	if err := PersistSession(b); err != nil {
+		t.Fatalf("PersistSession(b) error: %v", err)
+	}
+	stored, ok, err := readSessionFromFile(key)
+	if err != nil || !ok {
+		t.Fatalf("readSessionFromFile() = (%t, %v), want stored session", ok, err)
+	}
+	values := map[string]string{}
+	for _, cookie := range stored.Cookies[root] {
+		values[cookie.Name+" "+persistedCookiePath(cookie.Path)] = cookie.Value
+	}
+	if len(stored.Cookies[root]) != 3 || values["myacinfo /"] != "fresh" || values["itctx /"] != "other" || values["myacinfo /olympus"] != "olympus" {
+		t.Fatalf("persisted cookies = %v, want the other process's myacinfo plus this handle's itctx and Olympus myacinfo", values)
+	}
+}
+
+func TestCachedSessionRejectsDifferentAppleAccount(t *testing.T) {
+	withFileSessionCache(t)
+	if _, err := ImportSessionBundleWithOptions(validTestBundle(time.Now().Add(time.Hour)), false); err != nil {
+		t.Fatal(err)
+	}
+
+	previousFetcher := sessionInfoFetcher
+	sessionInfoFetcher = func(context.Context, *http.Client) (*sessionInfo, error) {
+		info := &sessionInfo{}
+		info.Provider.ProviderID = 42
+		info.User.EmailAddress = "other@example.com"
+		return info, nil
+	}
+	t.Cleanup(func() { sessionInfoFetcher = previousFetcher })
+
+	for _, tc := range []struct {
+		name   string
+		resume func(context.Context, string) (*AuthSession, bool, error)
+	}{
+		{"normal", TryResumeSession},
+		{"read_only", func(ctx context.Context, username string) (*AuthSession, bool, error) {
+			return ResumeCachedSessionWithoutPersist(ctx, username, http.DefaultTransport)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			session, ok, err := tc.resume(context.Background(), webTestSessionEmail)
+			if !errors.Is(err, ErrCachedSessionValidationFailed) || ok || (session != nil && session.Client != nil) {
+				t.Errorf("resume must reject a different Apple Account, got ok=%t err=%v", ok, err)
+			}
+		})
+	}
+	if _, ok, err := LoadCachedSession("other@example.com"); err != nil || ok {
+		t.Errorf("mismatched account was cached, got ok=%t err=%v", ok, err)
+	}
+}
+
+func TestDevelopersWebSessionsAreHiddenFromTests(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(webSessionCacheDirEnv, "")
+	t.Cleanup(testguard.HideForTest(filepath.Join(home, ".asc")))
+
+	if _, _, err := readLastKeyFromFile(); err == nil || !strings.Contains(err.Error(), webSessionCacheDirEnv) {
+		t.Fatalf("readLastKeyFromFile() error = %v, want a refusal that names %s", err, webSessionCacheDirEnv)
 	}
 }

@@ -1,0 +1,18 @@
+{
+  "tag": "AppClipAdvancedExperiences",
+  "file": "app_clip_advanced_experiences_gen.go",
+  "types": [
+    "AppClipAdvancedExperienceCreateData",
+    "AppClipAdvancedExperienceCreateRelationships",
+    "AppClipAdvancedExperienceRelationships",
+    "AppClipAdvancedExperienceUpdateData",
+    "AppClipAdvancedExperienceUpdateRequest"
+  ],
+  "relationships": [
+    {"data":"AppClipAdvancedExperienceCreateData","type":"AppClipAdvancedExperienceCreateRelationships"},
+    {"data":"AppClipAdvancedExperienceUpdateData","type":"*AppClipAdvancedExperienceRelationships","omitempty":true}
+  ],
+  "operations": [
+    {"operation":"appClipAdvancedExperiences_getInstance","name":"GetAppClipAdvancedExperience","params":["experienceID"],"check":"require"}
+  ]
+}

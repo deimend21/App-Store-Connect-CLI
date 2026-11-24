@@ -31,15 +31,22 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 		return nil, err
 	}
 
+	if err := c.validateRequestHost(path); err != nil {
+		return nil, err
+	}
+	if err := c.validateEnterpriseOperation(ctx, method, path); err != nil {
+		return nil, err
+	}
+
 	// Generate JWT token
-	token, err := c.generateJWT()
+	token, err := c.generateJWT(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate JWT: %w", err)
 	}
 
 	url := path
 	if !strings.HasPrefix(path, "http://") && !strings.HasPrefix(path, "https://") {
-		url = BaseURL + path
+		url = c.apiBaseURL() + path
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -53,9 +60,40 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	return req, nil
 }
 
-// generateJWT generates a JWT for ASC API authentication
-func (c *Client) generateJWT() (string, error) {
+// validateRequestHost keeps an absolute URL from carrying a token to the API it
+// was not signed for.
+func (c *Client) validateRequestHost(target string) error {
+	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+		return nil
+	}
+	parsedURL, err := url.Parse(target)
+	if err != nil {
+		return fmt.Errorf("invalid request URL: %w", err)
+	}
+	if parsedURL.User != nil {
+		return fmt.Errorf("rejected request URL containing userinfo")
+	}
+
+	expectedHost := ascAPIHost
+	if c.enterprise {
+		expectedHost = enterpriseAPIHost
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsedURL.Hostname()), ".")
+	if host != expectedHost && (c.enterprise || IsAPIHost(host)) {
+		return fmt.Errorf("rejected request URL from host %q (expected %q)", parsedURL.Host, expectedHost)
+	}
+	if c.enterprise && (parsedURL.Scheme != "https" || parsedURL.Host != expectedHost) {
+		return fmt.Errorf("rejected request URL %q (expected https://%s)", parsedURL.Scheme+"://"+parsedURL.Host, expectedHost)
+	}
+	return nil
+}
+
+// generateJWT generates a JWT for the client's API
+func (c *Client) generateJWT(ctx context.Context) (string, error) {
 	now := time.Now()
+	if c.bearer != nil {
+		return c.bearer.current(ctx, now)
+	}
 
 	c.jwtMu.Lock()
 	defer c.jwtMu.Unlock()
@@ -64,7 +102,11 @@ func (c *Client) generateJWT() (string, error) {
 		return c.cachedJWT, nil
 	}
 
-	signedToken, err := GenerateJWT(c.keyID, c.issuerID, c.privateKey)
+	generate := GenerateJWT
+	if c.enterprise {
+		generate = GenerateEnterpriseJWT
+	}
+	signedToken, err := generate(c.keyID, c.issuerID, c.privateKey)
 	if err != nil {
 		return "", err
 	}
@@ -76,6 +118,15 @@ func (c *Client) generateJWT() (string, error) {
 
 // GenerateJWT generates a JWT for ASC API authentication.
 func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, error) {
+	return generateJWTForAudience(keyID, issuerID, privateKey, ascJWTAudience)
+}
+
+// GenerateEnterpriseJWT generates a JWT for Enterprise Program API authentication.
+func GenerateEnterpriseJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, error) {
+	return generateJWTForAudience(keyID, issuerID, privateKey, enterpriseJWTAudience)
+}
+
+func generateJWTForAudience(keyID, issuerID string, privateKey *ecdsa.PrivateKey, audience string) (string, error) {
 	keyID = strings.TrimSpace(keyID)
 	if keyID == "" {
 		return "", ErrMissingKeyID
@@ -84,7 +135,7 @@ func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, 
 
 	now := time.Now()
 	claims := jwt.RegisteredClaims{
-		Audience:  jwt.ClaimStrings{"appstoreconnect-v1"},
+		Audience:  jwt.ClaimStrings{audience},
 		IssuedAt:  jwt.NewNumericDate(now.Add(-jwtIssuedAtSkew)),
 		ExpiresAt: jwt.NewNumericDate(now.Add(tokenLifetime)),
 	}
@@ -111,16 +162,15 @@ func GenerateJWT(keyID, issuerID string, privateKey *ecdsa.PrivateKey) (string, 
 // Mutating requests are throttled and retried only when App Store Connect
 // rejects them with 429; see isRateLimitRejection.
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader) ([]byte, error) {
-	return c.doWithHTTPClient(ctx, method, path, body, c.httpClient)
-}
-
-// doWithHTTPClient preserves the shared request/retry behavior while allowing
-// narrowly scoped callers to override only the HTTP client's redirect policy.
-func (c *Client) doWithHTTPClient(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
 	if err := validateMutatingRequestTarget(method, path); err != nil {
 		return nil, err
 	}
+	return c.doWithHTTPClient(ctx, method, path, body, c.httpClient)
+}
 
+// doWithHTTPClient shares retry and rate-limit behavior after callers
+// validate the request target.
+func (c *Client) doWithHTTPClient(ctx context.Context, method, path string, body io.Reader, httpClient *http.Client) ([]byte, error) {
 	request, err := c.replayableRequestWithHTTPClient(method, path, body, httpClient)
 	if err != nil {
 		return nil, err
@@ -143,16 +193,16 @@ func (c *Client) doWithHTTPClient(ctx context.Context, method, path string, body
 // separate app read proves that the parent exists. Apple returns the same 404
 // shape for a transient build-upload propagation failure and a permanently
 // invalid app ID, so status and error detail alone cannot classify it safely.
-func (c *Client) doAppBuildUploadsRead(ctx context.Context, appID, path string) ([]byte, error) {
+func (c *Client) doAppBuildUploadsRead(ctx context.Context, path string) ([]byte, error) {
 	request, err := c.replayableRequest(http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// The request path, not the caller's original appID, determines whether
-	// this is an app-scoped endpoint. A top-level continuation URL must keep
-	// the normal detail-based classification for missing upload resources.
-	appID = appIDFromBuildUploadsPath(path)
+	// The request path determines whether this is an app-scoped endpoint. A
+	// top-level continuation URL must keep the normal detail-based
+	// classification for missing upload resources.
+	appID := appIDFromBuildUploadsPath(path)
 	retryOpts := ResolveRetryOptions()
 	appVerified := false
 	return withRetry(ctx, func() ([]byte, error) {
@@ -378,6 +428,7 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 		return nil, requestErr
 	}
 	defer resp.Body.Close()
+	observeRequestStatus(ctx, resp.StatusCode)
 
 	if debugSettings.verboseHTTP {
 		debugLogger.Info(
@@ -395,13 +446,17 @@ func (c *Client) doOnce(ctx context.Context, method, path string, body io.Reader
 
 		if isRetryableHTTPStatus(resp.StatusCode) {
 			retryAfter := parseRetryAfterHeader(resp.Header.Get("Retry-After"))
+			statusErr := buildRetryableError(resp.StatusCode, retryAfter, respBody)
+			if limit, ok := exhaustedHourlyRequestLimit(resp.Header.Get("X-Rate-Limit")); ok && resp.StatusCode == http.StatusTooManyRequests {
+				statusErr.message += fmt.Sprintf(" (hourly request limit of %s is used up; requests free up over the next hour, so wait before retrying)", limit)
+			}
 			return nil, &RetryableError{
-				Err:        buildRetryableError(resp.StatusCode, retryAfter, respBody),
+				Err:        statusErr,
 				RetryAfter: retryAfter,
 			}
 		}
 
-		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+		if err := c.parseAuthenticatedResponseError(respBody, resp); err != nil {
 			if isIntermittentBuildUploadsNotFound(method, path, err) {
 				// No Retry-After accompanies the flake; the shared exponential
 				// backoff (1s/2s/4s by default) and retry budget apply.
@@ -564,11 +619,30 @@ func shouldLimitMutatingMethod(method string) bool {
 	}
 }
 
-func buildRetryableError(statusCode int, retryAfter time.Duration, respBody []byte) error {
+func buildRetryableError(statusCode int, retryAfter time.Duration, respBody []byte) *retryableStatusError {
 	return buildRetryableErrorWithSource(statusCode, retryAfter, respBody, "App Store Connect")
 }
 
-func buildRetryableErrorWithSource(statusCode int, retryAfter time.Duration, respBody []byte, source string) error {
+// exhaustedHourlyRequestLimit returns the hourly limit from an X-Rate-Limit
+// value such as "user-hour-lim:3500;user-hour-rem:0;" when none remain.
+func exhaustedHourlyRequestLimit(header string) (string, bool) {
+	var limit, remaining string
+	for part := range strings.SplitSeq(header, ";") {
+		key, value, ok := strings.Cut(part, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "user-hour-lim":
+			limit = strings.TrimSpace(value)
+		case "user-hour-rem":
+			remaining = strings.TrimSpace(value)
+		}
+	}
+	return limit, limit != "" && remaining == "0"
+}
+
+func buildRetryableErrorWithSource(statusCode int, retryAfter time.Duration, respBody []byte, source string) *retryableStatusError {
 	base := "API request failed"
 	switch statusCode {
 	case http.StatusRequestTimeout:
@@ -688,7 +762,7 @@ func isPositiveDecimal(value string) bool {
 }
 
 // validateNextURL validates that a pagination URL is safe to use.
-// It ensures the URL is on the same host as BaseURL and uses HTTPS.
+// It ensures the URL is on an API host and uses HTTPS.
 func validateNextURL(nextURL string) error {
 	if nextURL == "" {
 		return nil
@@ -705,14 +779,8 @@ func validateNextURL(nextURL string) error {
 		return fmt.Errorf("invalid pagination URL: %w", err)
 	}
 
-	baseURL, err := url.Parse(BaseURL)
-	if err != nil {
-		return fmt.Errorf("invalid base URL: %w", err)
-	}
-
-	// Allow URLs on the same host as BaseURL
-	if parsedURL.Host != baseURL.Host {
-		return fmt.Errorf("rejected pagination URL from untrusted host %q (expected %q)", parsedURL.Host, baseURL.Host)
+	if !IsAPIHost(parsedURL.Host) {
+		return fmt.Errorf("rejected pagination URL from untrusted host %q (expected %q)", parsedURL.Host, ascAPIHost)
 	}
 
 	// Require HTTPS for authentication endpoints
@@ -770,11 +838,6 @@ func isAllowedAnalyticsCDNHost(host string) bool {
 	return false
 }
 
-// hasSignedAnalyticsQuery checks for common signed URL query parameters.
-func hasSignedAnalyticsQuery(values url.Values) bool {
-	return hasSignedQuery(values)
-}
-
 func hasSignedQuery(values url.Values) bool {
 	return urlsanitize.HasSignedQuery(values, signedQueryKeys)
 }
@@ -788,7 +851,8 @@ func validateAnalyticsDownloadURL(downloadURL string) error {
 
 	parsedURL, err := url.Parse(downloadURL)
 	if err != nil {
-		return fmt.Errorf("invalid analytics download URL: %w", err)
+		// url.Error repeats the whole URL, so the cause is dropped.
+		return errors.New("invalid analytics download URL")
 	}
 
 	// Require HTTPS for all analytics downloads
@@ -802,7 +866,7 @@ func validateAnalyticsDownloadURL(downloadURL string) error {
 		return nil
 	}
 	if isAllowedAnalyticsCDNHost(host) {
-		if !hasSignedAnalyticsQuery(parsedURL.Query()) {
+		if !hasSignedQuery(parsedURL.Query()) {
 			return fmt.Errorf("rejected analytics download URL from CDN host %q without signed query", parsedURL.Host)
 		}
 		return nil
@@ -829,7 +893,7 @@ func (c *Client) doStream(ctx context.Context, path string, accept string) (*htt
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
-		if err := ParseErrorWithStatus(respBody, resp.StatusCode); err != nil {
+		if err := c.parseAuthenticatedResponseError(respBody, resp); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("API request failed with status %d", resp.StatusCode)
@@ -877,9 +941,19 @@ func BuildRequestBody(data any) (io.Reader, error) {
 	return &buf, nil
 }
 
-// ParseError parses an error response (status code unknown)
-func ParseError(body []byte) error {
-	return ParseErrorWithStatus(body, 0)
+func (c *Client) parseAuthenticatedResponseError(body []byte, resp *http.Response) error {
+	err := ParseErrorWithStatus(body, resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized || c.bearer == nil {
+		return err
+	}
+	// A redirect can drop the Authorization header before the final response.
+	if resp.Request != nil && !strings.HasPrefix(resp.Request.Header.Get("Authorization"), "Bearer ") {
+		return err
+	}
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
+		apiErr.bearerTokenRejected = true
+	}
+	return err
 }
 
 // ParseErrorWithStatus parses an error response and includes the HTTP status code

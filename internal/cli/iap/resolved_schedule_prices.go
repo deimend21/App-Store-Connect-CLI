@@ -15,10 +15,12 @@ import (
 type resolvedIAPPriceCandidate struct {
 	entry iapPriceEntry
 	row   shared.ResolvedPriceRow
+	err   error
 }
 
 type iapSchedulePriceFetcher func(context.Context, string, ...asc.IAPPriceSchedulePricesOption) (*asc.InAppPurchasePricesResponse, error)
 
+// requireComplete rejects unresolved active rows before a full schedule replacement.
 func fetchResolvedIAPSchedulePrices(
 	ctx context.Context,
 	client *asc.Client,
@@ -27,6 +29,7 @@ func fetchResolvedIAPSchedulePrices(
 	limit int,
 	nextURL string,
 	now time.Time,
+	requireComplete bool,
 ) (*shared.ResolvedPricesResult, error) {
 	if limit <= 0 {
 		limit = 200
@@ -46,6 +49,7 @@ func fetchResolvedIAPSchedulePrices(
 			now,
 			candidates,
 			client.GetInAppPurchasePriceScheduleManualPrices,
+			requireComplete,
 		); err != nil {
 			return nil, fmt.Errorf("fetch manual prices: %w", err)
 		}
@@ -58,6 +62,7 @@ func fetchResolvedIAPSchedulePrices(
 				now,
 				candidates,
 				client.GetInAppPurchasePriceScheduleAutomaticPrices,
+				requireComplete,
 			); err != nil {
 				return nil, fmt.Errorf("fetch automatic prices: %w", err)
 			}
@@ -71,6 +76,7 @@ func fetchResolvedIAPSchedulePrices(
 			now,
 			candidates,
 			client.GetInAppPurchasePriceScheduleAutomaticPrices,
+			requireComplete,
 		); err != nil {
 			return nil, fmt.Errorf("fetch automatic prices: %w", err)
 		}
@@ -83,6 +89,7 @@ func fetchResolvedIAPSchedulePrices(
 				now,
 				candidates,
 				client.GetInAppPurchasePriceScheduleManualPrices,
+				requireComplete,
 			); err != nil {
 				return nil, fmt.Errorf("fetch manual prices: %w", err)
 			}
@@ -93,6 +100,9 @@ func fetchResolvedIAPSchedulePrices(
 
 	rows := make([]shared.ResolvedPriceRow, 0, len(candidates))
 	for _, candidate := range candidates {
+		if candidate.err != nil {
+			return nil, candidate.err
+		}
 		rows = append(rows, candidate.row)
 	}
 	shared.SortResolvedPrices(rows)
@@ -107,10 +117,11 @@ func consumeResolvedIAPSchedulePrices(
 	now time.Time,
 	candidates map[string]resolvedIAPPriceCandidate,
 	fetch iapSchedulePriceFetcher,
+	requireComplete bool,
 ) error {
 	opts := []asc.IAPPriceSchedulePricesOption{
-		asc.WithIAPPriceSchedulePricesLimit(limit),
-		asc.WithIAPPriceSchedulePricesNextURL(nextURL),
+		asc.Limit[asc.IAPPriceSchedulePricesOption](limit),
+		asc.NextURL[asc.IAPPriceSchedulePricesOption](nextURL),
 		asc.WithIAPPriceSchedulePricesInclude([]string{"inAppPurchasePricePoint", "territory"}),
 		asc.WithIAPPriceSchedulePricesFields([]string{"manual", "startDate", "endDate", "inAppPurchasePricePoint", "territory"}),
 		asc.WithIAPPriceSchedulePricesPricePointFields([]string{"customerPrice", "proceeds", "territory"}),
@@ -127,13 +138,13 @@ func consumeResolvedIAPSchedulePrices(
 		if err != nil {
 			return nil, err
 		}
-		return fetch(ctx, scheduleID, asc.WithIAPPriceSchedulePricesNextURL(nextURL))
+		return fetch(ctx, scheduleID, asc.NextURL[asc.IAPPriceSchedulePricesOption](nextURL))
 	}, func(page asc.PaginatedResponse) error {
 		resp, ok := page.(*asc.InAppPurchasePricesResponse)
 		if !ok {
 			return fmt.Errorf("unexpected in-app purchase prices response type %T", page)
 		}
-		return consumeResolvedIAPPricePage(candidates, resp, now)
+		return consumeResolvedIAPPricePage(candidates, resp, now, requireComplete)
 	})
 }
 
@@ -153,6 +164,7 @@ func consumeResolvedIAPPricePage(
 	candidates map[string]resolvedIAPPriceCandidate,
 	page *asc.InAppPurchasePricesResponse,
 	now time.Time,
+	requireComplete bool,
 ) error {
 	if page == nil {
 		return nil
@@ -166,13 +178,23 @@ func consumeResolvedIAPPricePage(
 	asOf := shared.PricingDate(now)
 	for _, item := range page.Data {
 		entry, row, ok := resolvedIAPPriceCandidateFromResource(item, values, currencies)
-		if !ok || !entryActiveOn(entry, asOf) {
+		if !entryActiveOn(entry, asOf) {
 			continue
+		}
+		candidate := resolvedIAPPriceCandidate{entry: entry, row: row}
+		if !ok {
+			if !requireComplete {
+				continue
+			}
+			candidate.err = fmt.Errorf("cannot resolve active price %q (territory %q, price point %q)", item.ID, entry.TerritoryID, entry.PricePointID)
+			if entry.TerritoryID == "" || entry.PricePointID == "" {
+				return candidate.err
+			}
 		}
 
 		existing, exists := candidates[entry.TerritoryID]
 		if !exists || iapPriceEntryIsNewer(entry, existing.entry) {
-			candidates[entry.TerritoryID] = resolvedIAPPriceCandidate{entry: entry, row: row}
+			candidates[entry.TerritoryID] = candidate
 		}
 	}
 
@@ -226,9 +248,8 @@ func parseResolvedIAPPricePageIncluded(raw json.RawMessage) (map[string]iapPrice
 			}
 
 			values[strings.TrimSpace(item.ID)] = value
-			_, decodedPricePointID, ok := decodeIAPPriceResourceID(item.ID)
-			if ok && strings.TrimSpace(decodedPricePointID) != "" {
-				values[strings.TrimSpace(decodedPricePointID)] = value
+			if territoryID, tier, ok := decodeIAPPriceResourceID(item.ID); ok {
+				values[iapTerritoryTierKey(territoryID, tier)] = value
 			}
 		}
 	}
@@ -247,24 +268,15 @@ func resolvedIAPPriceCandidateFromResource(
 	if err != nil || strings.TrimSpace(territoryID) == "" {
 		territoryID = decodedMeta.TerritoryID
 	}
-	pricePointID, err := relationshipID(item.Relationships, "inAppPurchasePricePoint")
-	if err != nil || strings.TrimSpace(pricePointID) == "" {
-		pricePointID = decodedMeta.PricePointID
-	} else if strings.TrimSpace(decodedMeta.PricePointID) != "" {
+	relatedPricePointID, _ := relationshipID(item.Relationships, "inAppPurchasePricePoint")
+	relatedPricePointID = strings.TrimSpace(relatedPricePointID)
+	pricePointID := relatedPricePointID
+	if strings.TrimSpace(decodedMeta.PricePointID) != "" {
 		pricePointID = decodedMeta.PricePointID
 	}
 
 	territoryID = strings.ToUpper(strings.TrimSpace(territoryID))
 	pricePointID = strings.TrimSpace(pricePointID)
-	if territoryID == "" || pricePointID == "" {
-		return iapPriceEntry{}, shared.ResolvedPriceRow{}, false
-	}
-
-	value, ok := values[pricePointID]
-	if !ok {
-		return iapPriceEntry{}, shared.ResolvedPriceRow{}, false
-	}
-
 	startDate := strings.TrimSpace(item.Attributes.StartDate)
 	endDate := strings.TrimSpace(item.Attributes.EndDate)
 	if decodedOK {
@@ -277,6 +289,18 @@ func resolvedIAPPriceCandidateFromResource(
 	}
 
 	entry := newIAPPriceEntry(territoryID, pricePointID, startDate, endDate, item.Attributes.Manual)
+	if territoryID == "" || pricePointID == "" {
+		return entry, shared.ResolvedPriceRow{}, false
+	}
+
+	value, ok := values[relatedPricePointID]
+	if !ok {
+		value, ok = values[iapTerritoryTierKey(territoryID, pricePointID)]
+	}
+	if !ok {
+		return entry, shared.ResolvedPriceRow{}, false
+	}
+
 	currency := currencies[territoryID]
 	if currency == "" {
 		currency = territoryID
@@ -293,6 +317,11 @@ func resolvedIAPPriceCandidateFromResource(
 		EndDate:       entry.EndDate,
 		Manual:        iapResolvedBoolPtr(item.Attributes.Manual),
 	}, true
+}
+
+// A decoded price tier is only unique within its territory.
+func iapTerritoryTierKey(territoryID, tier string) string {
+	return strings.ToUpper(strings.TrimSpace(territoryID)) + "/" + strings.TrimSpace(tier)
 }
 
 func iapResolvedBoolPtr(value bool) *bool {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,94 +60,64 @@ type commandNode struct {
 	spec     *appleads.EndpointSpec
 }
 
-func legacyEndpointCommands() []*ffcli.Command {
-	return commandsForEndpointSpecs(appleads.EndpointSpecs(), []string{"v5"})
-}
-
-func platformEndpointCommands() []*ffcli.Command {
-	return commandsForEndpointSpecs(appleads.PlatformEndpointSpecs(), nil)
-}
-
-func commandsForEndpointSpecs(specs []appleads.EndpointSpec, commandPrefix []string) []*ffcli.Command {
+func platformEndpointCommands(d *shared.Deps) []*ffcli.Command {
 	root := &commandNode{children: map[string]*commandNode{}}
-	for _, spec := range specs {
+	for _, spec := range appleads.PlatformEndpointSpecs() {
 		addSpec(root, spec)
 	}
 	commands := make([]*ffcli.Command, 0, len(root.children))
 	for _, name := range sortedChildNames(root) {
-		commands = append(commands, buildNodeCommand(root.children[name], nil, commandPrefix))
+		commands = append(commands, buildNodeCommand(d, root.children[name], nil))
 	}
 	return commands
 }
 
 func addSpec(root *commandNode, spec appleads.EndpointSpec) {
 	current := root
-	for index, part := range spec.CommandPath {
-		if current.children == nil {
-			current.children = map[string]*commandNode{}
-		}
+	for _, part := range spec.CommandPath {
 		child := current.children[part]
 		if child == nil {
 			child = &commandNode{name: part, children: map[string]*commandNode{}}
 			current.children[part] = child
 		}
 		current = child
-		if spec.DefaultListAlias && index == 0 {
-			specCopy := spec
-			current.spec = &specCopy
-		}
 	}
 	specCopy := spec
 	current.spec = &specCopy
 }
 
-func buildNodeCommand(node *commandNode, parentPath, commandPrefix []string) *ffcli.Command {
+func buildNodeCommand(d *shared.Deps, node *commandNode, parentPath []string) *ffcli.Command {
 	path := append(append([]string(nil), parentPath...), node.name)
-	displayPath := append(append([]string(nil), commandPrefix...), path...)
 	if node.spec != nil && node.spec.Name == "platform-upload-asset" {
-		return PlatformAssetUploadCommand()
+		return newPlatformAssetUploadCommand(d)
 	}
 	var flags endpointFlagValues
 	var fs *flag.FlagSet
 	if node.spec != nil {
-		fs, flags = bindEndpointFlags(*node.spec, strings.Join(path, " "))
+		fs, flags = bindEndpointFlags(d, *node.spec, strings.Join(path, " "))
 	} else {
-		fs = flag.NewFlagSet(strings.Join(path, " "), flag.ExitOnError)
+		fs = d.NewFlagSet(strings.Join(path, " "), flag.ExitOnError)
 	}
 
 	subcommands := []*ffcli.Command{}
 	for _, name := range sortedChildNames(node) {
-		subcommands = append(subcommands, buildNodeCommand(node.children[name], path, commandPrefix))
+		subcommands = append(subcommands, buildNodeCommand(d, node.children[name], path))
 	}
-	if slices.Equal(commandPrefix, []string{"v5"}) && len(path) == 1 && path[0] == "reports" {
-		subcommands = append(subcommands, ReportsPresetCommand())
-	}
-	if slices.Equal(commandPrefix, []string{"v5"}) {
-		subcommands = append(subcommands, workflowSubcommands(path, &flags)...)
-	}
-	if len(commandPrefix) == 0 {
-		subcommands = append(subcommands, platformWorkflowSubcommands(path)...)
-	}
+	subcommands = append(subcommands, platformWorkflowSubcommands(d, path)...)
 
 	command := &ffcli.Command{
 		Name:        node.name,
-		ShortUsage:  "asc ads " + strings.Join(displayPath, " ") + " [flags]",
+		ShortUsage:  "asc ads " + strings.Join(path, " ") + " [flags]",
 		ShortHelp:   endpointShortHelp(node),
-		LongHelp:    endpointLongHelp(node, displayPath),
+		LongHelp:    endpointLongHelp(node, path),
 		FlagSet:     fs,
-		UsageFunc:   shared.DefaultUsageFunc,
+		UsageFunc:   d.DefaultUsageFunc,
 		Subcommands: subcommands,
 	}
 	if node.spec != nil {
 		spec := *node.spec
 		command.Exec = func(ctx context.Context, args []string) error {
-			if err := rejectUnexpectedArgs(args); err != nil {
-				return err
-			}
-			return executeEndpoint(ctx, spec, flags)
-		}
-		if migration, ok := adsLegacyMigrationForSpec(spec); ok {
-			command = markAdsLegacyCommandDeprecated(command, displayPath, migration)
+			return executeEndpoint(ctx, d, spec, flags)
 		}
 	}
 	return command
@@ -166,10 +135,6 @@ func sortedChildNames(node *commandNode) []string {
 func endpointShortHelp(node *commandNode) string {
 	if node.spec == nil {
 		return endpointGroupHelp(node.name)
-	}
-	switch node.spec.Name {
-	case "get-me-details", "get-user-acl":
-		return sentenceFromEndpointName(node.spec.Name)
 	}
 	if len(node.children) > 0 {
 		return "Manage Apple Ads " + strings.ReplaceAll(node.name, "-", " ") + "."
@@ -219,9 +184,6 @@ func endpointLongHelp(node *commandNode, path []string) string {
 	case node.spec.ConfirmBodyField != "":
 		examples[0] += " [--confirm]"
 	}
-	if node.spec.RequiresOrg {
-		examples[0] += " --org ORG_ID"
-	}
 	switch node.spec.Context {
 	case appleads.ContextAdAccount:
 		examples[0] += " --ad-account AD_ACCOUNT_ID"
@@ -229,9 +191,6 @@ func endpointLongHelp(node *commandNode, path []string) string {
 		examples[0] += " [--ad-account AD_ACCOUNT_ID]"
 	}
 	help := fmt.Sprintf("%s\n\nEndpoint: %s %s", endpointShortHelp(node), node.spec.Method, node.spec.Path)
-	if node.spec.BodyType == "UpdateCampaignRequest" {
-		help += "\n\nPayload:\n  Apple requires a \"campaign\" envelope for campaign updates.\n  Example: {\"campaign\":{\"status\":\"PAUSED\"}}"
-	}
 	if node.spec.Name == "platform-search-apps" {
 		examples = []string{
 			`  asc ads apps search --ad-account AD_ACCOUNT_ID --query "Example"`,
@@ -308,9 +267,9 @@ func endpointGroupHelp(name string) string {
 
 func sentenceFromEndpointName(name string) string {
 	switch name {
-	case "get-me-details", "platform-get-me-details":
+	case "platform-get-me-details":
 		return "View the current Apple Ads user."
-	case "get-user-acl", "platform-get-user-acls":
+	case "platform-get-user-acls":
 		return "List Apple Ads account ACLs."
 	}
 	text := strings.ReplaceAll(strings.TrimPrefix(strings.TrimSpace(name), "platform-"), "-", " ")
@@ -352,8 +311,8 @@ func sentenceFromEndpointName(name string) string {
 	return strings.TrimSuffix(text, ".") + "."
 }
 
-func bindEndpointFlags(spec appleads.EndpointSpec, flagSetName string) (*flag.FlagSet, endpointFlagValues) {
-	fs := flag.NewFlagSet(flagSetName, flag.ExitOnError)
+func bindEndpointFlags(d *shared.Deps, spec appleads.EndpointSpec, flagSetName string) (*flag.FlagSet, endpointFlagValues) {
+	fs := d.NewFlagSet(flagSetName, flag.ExitOnError)
 	values := endpointFlagValues{
 		common: commonFlags{
 			AdsProfile: fs.String("ads-profile", "", "Use named Apple Ads authentication profile"),
@@ -365,9 +324,6 @@ func bindEndpointFlags(spec appleads.EndpointSpec, flagSetName string) (*flag.Fl
 		queryRepeated: map[string]*repeatedFlagValue{},
 		queryInts:     map[string]*int{},
 		queryBools:    map[string]*bool{},
-	}
-	if spec.RequiresOrg {
-		values.common.Org = fs.String("org", "", "Apple Ads organization ID (or ASC_ADS_ORG_ID env)")
 	}
 	if spec.Context == appleads.ContextAdAccount || spec.Context == appleads.ContextAdAccountOptional {
 		values.common.AdAccount = fs.String("ad-account", "", "Apple Ads ad account ID (or ASC_ADS_AD_ACCOUNT_ID env)")
@@ -381,7 +337,7 @@ func bindEndpointFlags(spec appleads.EndpointSpec, flagSetName string) (*flag.Fl
 	for _, param := range spec.QueryParams {
 		switch param.Type {
 		case appleads.ParamInt:
-			values.queryInts[param.Name] = fs.Int(param.Flag, intParamDefault(param), flagUsage(param))
+			values.queryInts[param.Name] = fs.Int(param.Flag, param.Default, flagUsage(param))
 		case appleads.ParamBool:
 			values.queryBools[param.Name] = fs.Bool(param.Flag, false, flagUsage(param))
 		default:
@@ -404,7 +360,7 @@ func bindEndpointFlags(spec appleads.EndpointSpec, flagSetName string) (*flag.Fl
 		values.confirm = fs.Bool("confirm", false, "Confirm an Apple Ads update that replaces delegations")
 	}
 	if spec.SupportsPaginate {
-		values.paginate = fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
+		values.paginate = fs.Bool("paginate", false, shared.PaginateFlagUsage)
 	}
 	return fs, values
 }
@@ -441,58 +397,46 @@ func confirmFlagUsage(spec appleads.EndpointSpec) string {
 	}
 }
 
-func intParamDefault(param appleads.ParamSpec) int {
-	return param.Default
-}
-
-func executeEndpoint(ctx context.Context, spec appleads.EndpointSpec, flags endpointFlagValues) error {
+func executeEndpoint(ctx context.Context, d *shared.Deps, spec appleads.EndpointSpec, flags endpointFlagValues) error {
 	outputFormat, err := validateAdsRawOutput(flags.output)
 	if err != nil {
-		return shared.UsageError(err.Error())
-	}
-	if spec.RequiresConfirm && flags.confirm != nil && !*flags.confirm {
-		return shared.UsageError("--confirm is required")
+		return d.UsageError(err.Error())
 	}
 	pathParams, err := collectPathParams(spec, flags)
 	if err != nil {
-		return shared.UsageError(err.Error())
+		return d.UsageError(err.Error())
 	}
 	query, err := collectQuery(spec, flags)
 	if err != nil {
-		return shared.UsageError(err.Error())
+		return d.UsageError(err.Error())
+	}
+	if spec.RequiresConfirm && flags.confirm != nil {
+		if err := d.RequireConfirm(*flags.confirm); err != nil {
+			return err
+		}
 	}
 	if spec.RiskConfirm && spec.RiskConfirmBodyField == "" && flags.confirm != nil && !*flags.confirm {
-		return shared.UsageError("--confirm is required to acknowledge " + riskConfirmationImpact)
+		return d.UsageError("--confirm is required to acknowledge " + riskConfirmationImpact)
 	}
-	body, err := readBody(spec, flags)
+	body, err := readBody(d, spec, flags)
 	if err != nil {
 		return err
 	}
 	if err := validateEndpointBody(spec, body, flags.confirm != nil && *flags.confirm); err != nil {
-		return shared.UsageError(err.Error())
+		return d.UsageError(err.Error())
 	}
 
-	var client *appleads.Client
-	if spec.Version == appleads.APIVersionPlatformV1 {
-		var adAccountID string
-		client, adAccountID, err = resolvePlatformClientAndAdAccountID(ctx, flags.common, spec.Context)
-		if err != nil {
-			return fmt.Errorf("ads: %w", err)
-		}
-		for _, param := range spec.PathParams {
-			if param.ContextValue {
-				pathParams[param.Name] = adAccountID
-			}
-		}
-	}
-	if spec.Version != appleads.APIVersionPlatformV1 {
-		client, err = resolveClient(ctx, flags.common, spec.RequiresOrg)
-	}
+	client, adAccountID, err := resolvePlatformClientAndAdAccountID(ctx, d, flags.common, spec.Context)
 	if err != nil {
 		return fmt.Errorf("ads: %w", err)
 	}
+	for _, param := range spec.PathParams {
+		if param.ContextValue {
+			pathParams[param.Name] = adAccountID
+		}
+	}
 
-	requestCtx, cancel := requestContext(ctx)
+	requestCtx, cancel := d.Timeout(ctx)
 	defer cancel()
 
 	var result appleads.RawResponse
@@ -501,7 +445,7 @@ func executeEndpoint(ctx context.Context, spec appleads.EndpointSpec, flags endp
 		pageSize := intValue(flags.queryInts["limit"])
 		if pageSize == 0 {
 			// Geo search uses the Platform API's pageSize spelling instead of
-			// the limit used by apps and the legacy API.
+			// the limit used by apps.
 			pageSize = intValue(flags.queryInts["pageSize"])
 		}
 		result, err = client.PaginateAll(requestCtx, spec, pathParams, query, startOffset, pageSize, body)
@@ -511,7 +455,7 @@ func executeEndpoint(ctx context.Context, spec appleads.EndpointSpec, flags endp
 	if err != nil {
 		return fmt.Errorf("ads %s: %w", strings.Join(spec.CommandPath, " "), err)
 	}
-	return shared.PrintOutput(result, outputFormat, *flags.output.Pretty)
+	return d.PrintOutput(result, outputFormat, *flags.output.Pretty)
 }
 
 func collectPathParams(spec appleads.EndpointSpec, flags endpointFlagValues) (map[string]string, error) {
@@ -709,7 +653,7 @@ func validateAllowed(param appleads.ParamSpec, raw string) error {
 	return nil
 }
 
-func readBody(spec appleads.EndpointSpec, flags endpointFlagValues) (json.RawMessage, error) {
+func readBody(d *shared.Deps, spec appleads.EndpointSpec, flags endpointFlagValues) (json.RawMessage, error) {
 	if spec.BodyKind == appleads.BodyNone {
 		return nil, nil
 	}
@@ -718,14 +662,13 @@ func readBody(spec appleads.EndpointSpec, flags endpointFlagValues) (json.RawMes
 		if spec.BodyOptional && !spec.CLIRequiresBody {
 			return nil, nil
 		}
-		fmt.Fprintln(os.Stderr, "Error: --file is required")
-		return nil, shared.MissingRequiredUsageError("--file")
+		return nil, d.RequiredFlag("--file")
 	}
 	kind := shared.JSONPayloadObject
 	if spec.BodyKind == appleads.BodyArray {
 		kind = shared.JSONPayloadArray
 	}
-	payload, err := shared.ReadJSONFilePayloadKind(fileValue, kind)
+	payload, err := d.ReadJSONFilePayloadKind(fileValue, kind)
 	if err != nil {
 		return nil, fmt.Errorf("ads %s: %w", strings.Join(spec.CommandPath, " "), err)
 	}
@@ -733,7 +676,7 @@ func readBody(spec appleads.EndpointSpec, flags endpointFlagValues) (json.RawMes
 }
 
 func validateEndpointBody(spec appleads.EndpointSpec, body json.RawMessage, confirmed bool) error {
-	if len(body) == 0 || spec.Version != appleads.APIVersionPlatformV1 {
+	if len(body) == 0 {
 		return nil
 	}
 	if spec.RiskConfirm && !confirmed && riskConfirmationRequired(spec, body) {

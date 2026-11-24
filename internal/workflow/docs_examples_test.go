@@ -13,9 +13,9 @@ import (
 // docWorkflowPages are the pages that ship .asc/workflow.json examples.
 // Keep this list in sync with the workflow documentation set.
 var docWorkflowPages = []string{
-	"concepts/workflows.mdx",
-	"configuration/workflows.mdx",
-	"guides/automation.mdx",
+	"website/src/content/docs/concepts/workflows.mdx",
+	"website/src/content/docs/configuration/workflows.mdx",
+	"website/src/content/docs/guides/automation.mdx",
 	"docs/WORKFLOWS.md",
 }
 
@@ -83,10 +83,8 @@ func TestDocWorkflowExamplesLoadAndValidate(t *testing.T) {
 	}
 }
 
-// TestDocWorkflowExamplesUseVariableNamesForIf pins the documented `if` contract
-// to the engine: `if` names a variable, so a shell expression such as
-// `test "$AUTO_SUBMIT" = "true"` is used verbatim as a variable name, never
-// resolves, and silently skips the step.
+// TestDocWorkflowExamplesUseVariableNamesForIf keeps complete documented
+// examples on the boolean-flag form of `if`.
 func TestDocWorkflowExamplesUseVariableNamesForIf(t *testing.T) {
 	for _, block := range docJSONBlocks(t) {
 		for _, match := range docIfFieldPattern.FindAllStringSubmatch(block.body, -1) {

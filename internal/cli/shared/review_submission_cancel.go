@@ -99,14 +99,19 @@ func reviewSubmissionNotCancellableGuidance(submissionID string, state asc.Revie
 // state after App Store Connect refused to cancel it and returns an error that
 // explains the state and the next step. It returns cancelErr unchanged when
 // cancelErr is not that refusal, or when the state cannot be read, so a failed
-// follow-up read never hides the original error.
-func ExplainReviewSubmissionNotCancellable(ctx context.Context, client *asc.Client, submissionID string, cancelErr error) error {
+// follow-up read never hides the original error. The read's deadline comes from
+// d.Timeout.
+func (d *Deps) ExplainReviewSubmissionNotCancellable(ctx context.Context, client *asc.Client, submissionID string, cancelErr error) error {
+	return explainReviewSubmissionNotCancellable(ctx, d.Timeout, client, submissionID, cancelErr)
+}
+
+func explainReviewSubmissionNotCancellable(ctx context.Context, timeout func(context.Context) (context.Context, context.CancelFunc), client *asc.Client, submissionID string, cancelErr error) error {
 	submissionID = strings.TrimSpace(submissionID)
 	if client == nil || submissionID == "" || !IsReviewSubmissionNotCancellableError(cancelErr) {
 		return cancelErr
 	}
 
-	readCtx, cancel := ContextWithTimeout(ctx)
+	readCtx, cancel := timeout(ctx)
 	defer cancel()
 
 	resp, err := client.GetReviewSubmissionStrict(readCtx, submissionID)

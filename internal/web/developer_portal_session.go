@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/readonly"
 )
 
@@ -19,7 +20,6 @@ const (
 	developerPortalLegacyPath = "/services-account/QH65B2"
 	developerPortalTeamsPath  = developerPortalLegacyPath + "/account/listTeams.action"
 	developerServicesPath     = "/services-account/v1"
-	developerPortalAuthHint   = "run 'asc web auth logout --apple-id EMAIL', then 'asc web auth login --apple-id EMAIL', and try again"
 )
 
 type developerPortalTeam struct {
@@ -29,6 +29,7 @@ type developerPortalTeam struct {
 }
 
 type developerPortalTeamsResponse struct {
+	developerPortalLegacyResponse
 	Teams []developerPortalTeam `json:"teams"`
 	Data  struct {
 		Teams []developerPortalTeam `json:"teams"`
@@ -82,36 +83,9 @@ func (c *Client) rememberDeveloperPortalTeam(teamID string) {
 func (c *Client) ensureDeveloperPortalSession(ctx context.Context) error {
 	// The App Store Connect SRP session becomes usable by Developer Portal only
 	// after its legacy team endpoint establishes Portal team and CSRF context.
-	headers := developerPortalHeaders("")
-	headers.Set("Accept", "application/json, text/javascript, */*; q=0.01")
-	headers.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Listing teams only establishes Portal context; it changes nothing.
-	body, response, err := c.doDeveloperPortalHTTP(readonly.WithReadIntent(ctx), http.MethodPost, c.developerPortalOrigin()+developerPortalTeamsPath, nil, headers)
+	teams, err := c.fetchDeveloperPortalTeams(ctx)
 	if err != nil {
 		return err
-	}
-	c.captureDeveloperCSRFTokens(response.Header)
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		return developerPortalSessionError(response.StatusCode)
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return &APIError{Status: response.StatusCode, AppleRequestID: extractAppleRequestID(response.Header), rawBody: body}
-	}
-	portalURL, parseErr := url.Parse(c.developerPortalOrigin())
-	if parseErr != nil {
-		return fmt.Errorf("invalid Developer Portal base URL: %w", parseErr)
-	}
-	if response.Request != nil && response.Request.URL != nil && !sameURLOrigin(portalURL, response.Request.URL) {
-		return fmt.Errorf("authentication redirected to %s instead of Developer Portal; %s", response.Request.URL.Host, developerPortalAuthHint)
-	}
-
-	var payload developerPortalTeamsResponse
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return fmt.Errorf("failed to parse Developer Portal teams response: %w", err)
-	}
-	teams := payload.Teams
-	if len(teams) == 0 {
-		teams = payload.Data.Teams
 	}
 	team, err := resolveDeveloperPortalTeam(teams, developerPortalTeamSelection{
 		Selector:         c.currentDeveloperTeamSelector(),
@@ -126,11 +100,66 @@ func (c *Client) ensureDeveloperPortalSession(ctx context.Context) error {
 	return nil
 }
 
-func selectDeveloperPortalTeam(teams []developerPortalTeam, publicProviderID, providerName string) (developerPortalTeam, error) {
-	return resolveDeveloperPortalTeam(teams, developerPortalTeamSelection{
-		PublicProviderID: publicProviderID,
-		ProviderName:     providerName,
-	})
+// ListDeveloperPortalTeams returns every Developer Portal team on the web
+// session's Apple Account without selecting one.
+func (c *Client) ListDeveloperPortalTeams(ctx context.Context) (*asc.WebDeveloperTeamsResult, error) {
+	teams, err := c.fetchDeveloperPortalTeams(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := &asc.WebDeveloperTeamsResult{Teams: make([]asc.WebDeveloperTeam, 0, len(teams))}
+	for _, team := range teams {
+		teamID := strings.TrimSpace(team.TeamID)
+		if teamID == "" {
+			continue
+		}
+		result.Teams = append(result.Teams, asc.WebDeveloperTeam{
+			TeamID: teamID,
+			Name:   strings.TrimSpace(team.Name),
+			Status: strings.TrimSpace(team.Status),
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) fetchDeveloperPortalTeams(ctx context.Context) ([]developerPortalTeam, error) {
+	headers := developerPortalHeaders("")
+	headers.Set("Accept", "application/json, text/javascript, */*; q=0.01")
+	headers.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Listing teams only establishes Portal context; it changes nothing.
+	body, response, err := c.doDeveloperPortalHTTP(readonly.WithReadIntent(ctx), http.MethodPost, c.developerPortalOrigin()+developerPortalTeamsPath, nil, headers)
+	if err != nil {
+		return nil, err
+	}
+	c.captureDeveloperCSRFTokens(response.Header)
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return nil, developerPortalSessionError(response, body)
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, &APIError{Status: response.StatusCode, AppleRequestID: extractAppleRequestID(response.Header), rawBody: body}
+	}
+	portalURL, parseErr := url.Parse(c.developerPortalOrigin())
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid Developer Portal base URL: %w", parseErr)
+	}
+	if response.Request != nil && response.Request.URL != nil && !sameURLOrigin(portalURL, response.Request.URL) {
+		return nil, fmt.Errorf("authentication redirected to %s instead of Developer Portal; %s", response.Request.URL.Host, developerPortalAuthHint())
+	}
+
+	var payload developerPortalTeamsResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse Developer Portal teams response: %w", err)
+	}
+	teams := payload.Teams
+	if len(teams) == 0 {
+		teams = payload.Data.Teams
+	}
+	if len(teams) == 0 && payload.ResultCode != nil {
+		if err := validateDeveloperPortalLegacyResponse(payload.developerPortalLegacyResponse); err != nil {
+			return nil, err
+		}
+	}
+	return teams, nil
 }
 
 func resolveDeveloperPortalTeam(teams []developerPortalTeam, selection developerPortalTeamSelection) (developerPortalTeam, error) {
@@ -286,7 +315,7 @@ func (c *Client) doDeveloperPortalProxyRead(ctx context.Context, path string, qu
 	// POSTs carrying the team and encoded query in the request body.
 	teamID := c.developerPortalTeamID()
 	if teamID == "" {
-		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint)
+		return nil, fmt.Errorf("developer portal team is not selected; %s", developerPortalAuthHint())
 	}
 	headers.Set("X-HTTP-Method-Override", http.MethodGet)
 	return c.doDeveloperPortalRequest(ctx, http.MethodPost, path, developerPortalProxyReadRequest{
@@ -321,7 +350,7 @@ func (c *Client) applyDeveloperPortalCSRF(headers http.Header, requireCSRF bool)
 		headers.Set("csrf_ts", csrfTS)
 	}
 	if requireCSRF && (csrf == "" || csrfTS == "") {
-		return fmt.Errorf("missing Developer Portal CSRF headers; %s", developerPortalAuthHint)
+		return fmt.Errorf("missing Developer Portal CSRF headers; %s", developerPortalAuthHint())
 	}
 	return nil
 }
@@ -333,7 +362,7 @@ func (c *Client) doDeveloperPortalHTTPAndCapture(ctx context.Context, method, re
 	}
 	c.captureDeveloperCSRFTokens(response.Header)
 	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
-		return nil, developerPortalSessionError(response.StatusCode)
+		return nil, developerPortalSessionError(response, responseBody)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, &APIError{
@@ -388,7 +417,7 @@ func (c *Client) doDeveloperPortalHTTP(ctx context.Context, method, requestURL s
 	previousCheckRedirect := httpClient.CheckRedirect
 	httpClient.CheckRedirect = func(redirect *http.Request, via []*http.Request) error {
 		if !sameURLOrigin(request.URL, redirect.URL) {
-			return fmt.Errorf("authentication redirected to %s instead of Developer Portal; %s", redirect.URL.Host, developerPortalAuthHint)
+			return fmt.Errorf("authentication redirected to %s instead of Developer Portal; %s", redirect.URL.Host, developerPortalAuthHint())
 		}
 		if previousCheckRedirect != nil {
 			return previousCheckRedirect(redirect, via)
@@ -487,13 +516,31 @@ type developerPortalSessionStatusError struct {
 }
 
 func (e *developerPortalSessionStatusError) Error() string {
-	return fmt.Sprintf("web session is unauthorized or expired for Developer Portal (status %d); %s", e.status, developerPortalAuthHint)
+	if e.status == http.StatusForbidden {
+		return fmt.Sprintf("apple denied the Developer Portal request (%s); the account role likely lacks permission for this action, or the web session expired; run 'asc web auth status' to check the session", e.cause)
+	}
+	return fmt.Sprintf("web session is unauthorized or expired for Developer Portal (status %d); %s", e.status, developerPortalAuthHint())
 }
 
 func (e *developerPortalSessionStatusError) Unwrap() error {
 	return e.cause
 }
 
-func developerPortalSessionError(status int) error {
-	return &developerPortalSessionStatusError{status: status, cause: &APIError{Status: status}}
+func developerPortalSessionError(response *http.Response, body []byte) error {
+	return &developerPortalSessionStatusError{status: response.StatusCode, cause: &APIError{
+		Status:         response.StatusCode,
+		AppleRequestID: extractAppleRequestID(response.Header),
+		CorrelationKey: strings.TrimSpace(response.Header.Get("X-Apple-Jingle-Correlation-Key")),
+		rawBody:        body,
+	}}
+}
+
+// developerPortalAuthHint names how to get a session the Developer Portal
+// accepts: signing in again with asc, or, under a broker, where the session
+// lives.
+func developerPortalAuthHint() string {
+	if _, brokered, _ := BrokerFromEnv(); brokered {
+		return "sign in to Apple again through the broker's owner, and try again"
+	}
+	return "run 'asc web auth logout --apple-id EMAIL', then 'asc web auth login --apple-id EMAIL', and try again"
 }

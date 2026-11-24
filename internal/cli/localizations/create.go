@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -14,10 +13,12 @@ import (
 )
 
 // LocalizationsCreateCommand returns the create localizations subcommand.
-func LocalizationsCreateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("create", flag.ExitOnError)
+func newLocalizationsCreateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("create", flag.ExitOnError)
 
-	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID (required)")
+	versionID := shared.BindResourceIDFlag(fs, "version", "appStoreVersions", "App Store version ID, or a version string with --app (required)")
+	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID, for version strings)")
+	platform := fs.String("platform", "", "Platform for version strings: IOS, MAC_OS, TV_OS, VISION_OS")
 	locale := fs.String("locale", "", "Locale code to create (required; use canonical ASC values like en-US, ja, ar-SA, zh-Hans)")
 	description := fs.String("description", "", "App description")
 	keywords := fs.String("keywords", "", "Search keywords")
@@ -26,13 +27,16 @@ func LocalizationsCreateCommand() *ffcli.Command {
 	supportURL := fs.String("support-url", "", "Support URL")
 	marketingURL := fs.String("marketing-url", "", "Marketing URL")
 	ifExists := shared.BindIfExistsFlag(fs, shared.IfExistsSkip, shared.IfExistsUpdate)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "create",
 		ShortUsage: "asc localizations create --version \"VERSION_ID\" --locale \"LOCALE\" [flags]",
 		ShortHelp:  "Create a new locale for an app store version.",
 		LongHelp: `Create a new locale for an app store version.
+
+--version accepts a version ID, or a version string such as 1.2.3 with --app
+(or ASC_APP_ID). Use --platform when the string exists on multiple platforms.
 
 Use canonical App Store Connect locale identifiers when possible. Common accepted
 forms include en-US, es-MX, de-DE, ja, ar-SA, zh-Hans, and zh-Hant.
@@ -60,30 +64,33 @@ PATCH /v1/appStoreVersionLocalizations/{id}; when no metadata field was
 supplied there is nothing to apply, so update behaves like skip. Any other
 409 keeps failing.`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageError("localizations create does not accept positional arguments")
+			if flagProvided(fs, "platform") && strings.TrimSpace(*platform) == "" {
+				return d.UsageError("--platform must not be empty")
 			}
 
 			vid := strings.TrimSpace(*versionID)
 			if vid == "" {
-				fmt.Fprintln(os.Stderr, "Error: --version is required")
-				return shared.MissingRequiredUsageError("--version")
+				return d.RequiredFlag("--version")
+			}
+
+			versionIsString, normalizedPlatform, err := normalizeLocalizationVersionSelector(d, vid, *appID, *platform)
+			if err != nil {
+				return err
 			}
 
 			localeValue := strings.TrimSpace(*locale)
 			if localeValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --locale is required")
-				return shared.MissingRequiredUsageError("--locale")
+				return d.RequiredFlag("--locale")
 			}
 			normalizedLocale, err := shared.CanonicalizeAppStoreLocalizationLocale(localeValue)
 			if err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 			localeValue = normalizedLocale
 
-			ifExistsMode, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+			ifExistsMode, err := d.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
 			if err != nil {
 				return err
 			}
@@ -98,18 +105,25 @@ supplied there is nothing to apply, so update behaves like skip. Any other
 				MarketingURL:    strings.TrimSpace(*marketingURL),
 			}
 			if err := shared.ValidateVersionLocalizationAttributes(attrs); err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("localizations create: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
-			resp, err := client.CreateAppStoreVersionLocalization(requestCtx, vid, attrs)
+			if versionIsString {
+				vid, err = resolveLocalizationsVersionString(requestCtx, d, client, d.ResolveAppID(*appID), vid, normalizedPlatform)
+				if err != nil {
+					return fmt.Errorf("localizations create: %w", err)
+				}
+			}
+
+			resp, err := client.CreateAppStoreVersionLocalization(requestCtx, vid, attrs.CreateAttributes())
 			created := err == nil
 			if err != nil {
 				existing, handled, resolveErr := shared.ResolveIfExistsConflict(ifExistsMode, err, localizationsCreateExistsCodes, func() (*asc.AppStoreVersionLocalizationResponse, bool, error) {
@@ -123,7 +137,7 @@ supplied there is nothing to apply, so update behaves like skip. Any other
 				}
 				outcome := "left unchanged"
 				if ifExistsMode == shared.IfExistsUpdate && hasUpdatableVersionLocalizationFields(attrs) {
-					updated, updateErr := client.UpdateAppStoreVersionLocalization(requestCtx, existing.Data.ID, attrs)
+					updated, updateErr := client.UpdateAppStoreVersionLocalization(requestCtx, existing.Data.ID, attrs.UpdateAttributes())
 					if updateErr != nil {
 						return fmt.Errorf("localizations create: update existing localization %s: %w", existing.Data.ID, updateErr)
 					}
@@ -139,7 +153,7 @@ supplied there is nothing to apply, so update behaves like skip. Any other
 					}
 					resp = detail
 				}
-				fmt.Fprintf(os.Stderr, "localizations create: locale %s already exists on version %s as %s; %s (--if-exists %s)\n",
+				fmt.Fprintf(d.IO.ErrOut, "localizations create: locale %s already exists on version %s as %s; %s (--if-exists %s)\n",
 					localeValue, vid, existing.Data.ID, outcome, ifExistsMode)
 			}
 
@@ -162,10 +176,10 @@ supplied there is nothing to apply, so update behaves like skip. Any other
 				}
 			}
 
-			if err := shared.PrintOutput(resp, *output.Output, *output.Pretty); err != nil {
+			if err := d.PrintOutput(resp, *output.Output, *output.Pretty); err != nil {
 				return err
 			}
-			if err := shared.PrintSubmitReadinessCreateWarnings(os.Stderr, warnings); err != nil {
+			if err := shared.PrintSubmitReadinessCreateWarnings(d.IO.ErrOut, warnings); err != nil {
 				return err
 			}
 			if submitWarningLookupErr == nil || len(warnings) > 0 {
@@ -180,7 +194,7 @@ supplied there is nothing to apply, so update behaves like skip. Any other
 				localeLabel = "<unknown>"
 			}
 			_, err = fmt.Fprintf(
-				os.Stderr,
+				d.IO.ErrOut,
 				"Warning: locale %s was created without whatsNew, but the CLI could not determine whether this version is an app update: %v\n",
 				localeLabel,
 				submitWarningLookupErr,
@@ -202,12 +216,12 @@ var localizationsCreateExistsCodes = []string{"ENTITY_ERROR.ATTRIBUTE.INVALID.DU
 // referred to, keyed by locale. It reports found=false when the version has no
 // such locale so the caller can surface the original conflict.
 func findExistingVersionLocalization(ctx context.Context, client *asc.Client, versionID, locale string) (*asc.AppStoreVersionLocalizationResponse, bool, error) {
-	firstPage, err := client.GetAppStoreVersionLocalizations(ctx, versionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+	firstPage, err := client.GetAppStoreVersionLocalizations(ctx, versionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	if err != nil {
 		return nil, false, err
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetAppStoreVersionLocalizations(ctx, versionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+		return client.GetAppStoreVersionLocalizations(ctx, versionID, asc.NextURL[asc.AppStoreVersionLocalizationsOption](nextURL))
 	})
 	if err != nil {
 		return nil, false, err

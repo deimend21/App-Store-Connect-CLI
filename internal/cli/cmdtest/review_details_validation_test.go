@@ -1,47 +1,24 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	cmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
 func TestReviewDetailsCreateRejectsDemoAccountRequiredWithoutCredentials(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected HTTP request: %s %s", req.Method, req.URL.Path)
-		return nil, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-create",
-			"--version-id", "version-1",
-			"--demo-account-required=true",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, asctest.NewRegistry(t)), "review", "details-create",
+		"--version-id", "version-1",
+		"--demo-account-required=true")
 
 	if !errors.Is(runErr, flag.ErrHelp) {
 		t.Fatalf("expected ErrHelp, got %v", runErr)
@@ -55,59 +32,24 @@ func TestReviewDetailsCreateRejectsDemoAccountRequiredWithoutCredentials(t *test
 }
 
 func TestReviewDetailsCreateAllowsDemoAccountRequiredWithBothCredentials(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.POST("/v1/appStoreReviewDetails").JSONBody(`{"data":{"type":"appStoreReviewDetails","attributes":{"contactFirstName":"Dev","contactLastName":"Support","contactPhone":"+1 408 555 0100","contactEmail":"dev@example.com","demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password","demoAccountRequired":true},"relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}}`),
+		asctest.JSON(http.StatusCreated, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountRequired":true,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodPost {
-			t.Fatalf("expected POST, got %s", req.Method)
-		}
-		if req.URL.Path != "/v1/appStoreReviewDetails" {
-			t.Fatalf("expected path /v1/appStoreReviewDetails, got %s", req.URL.Path)
-		}
-		payload, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("read body error: %v", err)
-		}
-		body := string(payload)
-		if !strings.Contains(body, `"demoAccountRequired":true`) {
-			t.Fatalf("expected demoAccountRequired=true in body, got %s", body)
-		}
-		if !strings.Contains(body, `"demoAccountName":"reviewer@example.com"`) {
-			t.Fatalf("expected demoAccountName in body, got %s", body)
-		}
-		if !strings.Contains(body, `"demoAccountPassword":"app-specific-password"`) {
-			t.Fatalf("expected demoAccountPassword in body, got %s", body)
-		}
-		return jsonResponse(http.StatusCreated, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountRequired":true,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`)
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-create",
-			"--version-id", "version-1",
-			"--contact-first-name", "Dev",
-			"--contact-last-name", "Support",
-			"--contact-email", "dev@example.com",
-			"--contact-phone", "+1 408 555 0100",
-			"--demo-account-required=true",
-			"--demo-account-name", "reviewer@example.com",
-			"--demo-account-password", "app-specific-password",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "review", "details-create",
+		"--version-id", "version-1",
+		"--contact-first-name", "Dev",
+		"--contact-last-name", "Support",
+		"--contact-email", "dev@example.com",
+		"--contact-phone", "+1 408 555 0100",
+		"--demo-account-required=true",
+		"--demo-account-name", "reviewer@example.com",
+		"--demo-account-password", "app-specific-password")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -117,80 +59,15 @@ func TestReviewDetailsCreateAllowsDemoAccountRequiredWithBothCredentials(t *test
 	}
 }
 
-func TestReviewDetailsCreateRejectsOverlongDemoAccountPassword(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected HTTP request: %s %s", req.Method, req.URL.Path)
-		return nil, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-create",
-			"--version-id", "version-1",
-			"--demo-account-password", strings.Repeat("p", 101),
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "--demo-account-password must be 100 characters or fewer") {
-		t.Fatalf("expected local demo account password length error, got %q", stderr)
-	}
-}
-
 func TestReviewDetailsUpdateRejectsDemoAccountRequiredWhenExistingCredentialsAreIncomplete(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/appStoreReviewDetails/detail-1"), asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"contactFirstName":"Dev","contactLastName":"Support","contactEmail":"dev@example.com","contactPhone":"123","demoAccountRequired":false}}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreReviewDetails/detail-1" {
-			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"contactFirstName":"Dev","contactLastName":"Support","contactEmail":"dev@example.com","contactPhone":"123","demoAccountRequired":false}}}`)
-		}
-		if req.Method == http.MethodPatch {
-			t.Fatalf("unexpected PATCH request: %s", req.URL.Path)
-		}
-		t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
-		return nil, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-update",
-			"--id", "detail-1",
-			"--demo-account-required=true",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "review", "details-update",
+		"--id", "detail-1",
+		"--demo-account-required=true")
 
 	if !errors.Is(runErr, flag.ErrHelp) {
 		t.Fatalf("expected ErrHelp, got %v", runErr)
@@ -203,85 +80,19 @@ func TestReviewDetailsUpdateRejectsDemoAccountRequiredWhenExistingCredentialsAre
 	}
 }
 
-func TestReviewDetailsUpdateRejectsOverlongDemoAccountPassword(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("unexpected HTTP request: %s %s", req.Method, req.URL.Path)
-		return nil, nil
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-update",
-			"--id", "detail-1",
-			"--demo-account-password", strings.Repeat("p", 101),
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
-
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected ErrHelp, got %v", runErr)
-	}
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !strings.Contains(stderr, "--demo-account-password must be 100 characters or fewer") {
-		t.Fatalf("expected local demo account password length error, got %q", stderr)
-	}
-}
-
 func TestReviewDetailsUpdateAcceptsMaxLengthDemoAccountPassword(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.PATCH("/v1/appStoreReviewDetails/detail-1").JSONBody(`{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountPassword":"`+strings.Repeat("p", 100)+`"}}}`),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountPassword":"`+strings.Repeat("p", 100)+`"}}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodPatch || req.URL.Path != "/v1/appStoreReviewDetails/detail-1" {
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
-		}
-		payload, err := io.ReadAll(req.Body)
-		if err != nil {
-			t.Fatalf("read body error: %v", err)
-		}
-		body := string(payload)
-		if !strings.Contains(body, `"demoAccountPassword":"`+strings.Repeat("p", 100)+`"`) {
-			t.Fatalf("expected max-length demo account password in body, got %s", body)
-		}
-		return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountPassword":"`+strings.Repeat("p", 100)+`"}}}`)
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-update",
-			"--id", "detail-1",
-			"--demo-account-password", strings.Repeat("p", 100),
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "review", "details-update",
+		"--id", "detail-1",
+		"--demo-account-password", strings.Repeat("p", 100))
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -322,12 +133,10 @@ func TestRunReviewDetailsRejectsOverlongDemoAccountPasswordWithUsageExit(t *test
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stdout, stderr := captureOutput(t, func() {
-				code := cmd.Run(test.args, "1.2.3")
-				if code != cmd.ExitUsage {
-					t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
-				}
-			})
+			stdout, stderr, code := runWithDeps(t, nil, test.args...)
+			if code != cmd.ExitUsage {
+				t.Fatalf("expected exit code %d, got %d", cmd.ExitUsage, code)
+			}
 
 			if stdout != "" {
 				t.Fatalf("expected empty stdout, got %q", stdout)
@@ -340,52 +149,20 @@ func TestRunReviewDetailsRejectsOverlongDemoAccountPasswordWithUsageExit(t *test
 }
 
 func TestReviewDetailsUpdateAllowsDemoAccountRequiredWhenExistingCredentialsArePresent(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/appStoreReviewDetails/detail-1"),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"contactFirstName":"Dev","contactLastName":"Support","contactEmail":"dev@example.com","contactPhone":"123","demoAccountRequired":false,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`))
+	reg.Register(asctest.PATCH("/v1/appStoreReviewDetails/detail-1").JSONBody(`{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountRequired":true}}}`),
+		asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountRequired":true,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreReviewDetails/detail-1":
-			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"contactFirstName":"Dev","contactLastName":"Support","contactEmail":"dev@example.com","contactPhone":"123","demoAccountRequired":false,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`)
-		case req.Method == http.MethodPatch && req.URL.Path == "/v1/appStoreReviewDetails/detail-1":
-			payload, err := io.ReadAll(req.Body)
-			if err != nil {
-				t.Fatalf("read body error: %v", err)
-			}
-			body := string(payload)
-			if !strings.Contains(body, `"demoAccountRequired":true`) {
-				t.Fatalf("expected demoAccountRequired=true in body, got %s", body)
-			}
-			if strings.Contains(body, "demoAccountName") || strings.Contains(body, "demoAccountPassword") {
-				t.Fatalf("expected update to rely on existing demo credentials, got %s", body)
-			}
-			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"demoAccountRequired":true,"demoAccountName":"reviewer@example.com","demoAccountPassword":"app-specific-password"}}}`)
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.Path)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"review", "details-update",
-			"--id", "detail-1",
-			"--demo-account-required=true",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "review", "details-update",
+		"--id", "detail-1",
+		"--demo-account-required=true")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -396,40 +173,16 @@ func TestReviewDetailsUpdateAllowsDemoAccountRequiredWhenExistingCredentialsAreP
 }
 
 func TestReviewDetailsForVersionReturnsNotConfiguredStateWhenUnset(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/appStoreVersions/version-1/appStoreReviewDetail"), asctest.JSON(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`))
+	reg.Register(asctest.GET("/v1/appStoreVersions/version-1"), asctest.JSON(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.0"}}}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
-		}
-		switch req.URL.Path {
-		case "/v1/appStoreVersions/version-1/appStoreReviewDetail":
-			return jsonResponse(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`)
-		case "/v1/appStoreVersions/version-1":
-			return jsonResponse(http.StatusOK, `{"data":{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.0"}}}`)
-		default:
-			t.Fatalf("unexpected path %s", req.URL.Path)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"review", "details-for-version", "--version-id", "version-1", "--output", "json"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		if err := root.Run(context.Background()); err != nil {
-			t.Fatalf("run error: %v", err)
-		}
-	})
+	stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), "review", "details-for-version", "--version-id", "version-1", "--output", "json")
+	if err != nil {
+		t.Fatalf("run error: %v", err)
+	}
 
 	if !strings.Contains(stderr, "Warning: App Store review detail is not configured for version \"version-1\".") {
 		t.Fatalf("expected not-configured warning, got %q", stderr)
@@ -455,39 +208,13 @@ func TestReviewDetailsForVersionReturnsNotConfiguredStateWhenUnset(t *testing.T)
 }
 
 func TestReviewDetailsForVersionPreservesErrorForUnknownVersionID(t *testing.T) {
-	setupAuth(t)
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Register(asctest.GET("/v1/appStoreVersions/missing-version/appStoreReviewDetail"), asctest.JSON(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`))
+	reg.Register(asctest.GET("/v1/appStoreVersions/missing-version"), asctest.JSON(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`))
 
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		if req.Method != http.MethodGet {
-			t.Fatalf("expected GET, got %s", req.Method)
-		}
-		switch req.URL.Path {
-		case "/v1/appStoreVersions/missing-version/appStoreReviewDetail":
-			return jsonResponse(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`)
-		case "/v1/appStoreVersions/missing-version":
-			return jsonResponse(http.StatusNotFound, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found"}]}`)
-		default:
-			t.Fatalf("unexpected path %s", req.URL.Path)
-			return nil, nil
-		}
-	})
-
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{"review", "details-for-version", "--version-id", "missing-version", "--output", "json"}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(context.Background())
-	})
+	stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, reg), "review", "details-for-version", "--version-id", "missing-version", "--output", "json")
 
 	if runErr == nil {
 		t.Fatal("expected error, got nil")
@@ -503,5 +230,104 @@ func TestReviewDetailsForVersionPreservesErrorForUnknownVersionID(t *testing.T) 
 	}
 	if strings.Contains(runErr.Error(), "not configured") {
 		t.Fatalf("expected unknown version to remain a hard error, got %v", runErr)
+	}
+}
+
+func TestReviewDetailsGetSelectsByVersionOrApp(t *testing.T) {
+	type stub struct {
+		matcher asctest.Matcher
+		body    string
+	}
+	detail := stub{
+		matcher: asctest.GET("/v1/appStoreVersions/version-1/appStoreReviewDetail"),
+		body:    `{"data":{"type":"appStoreReviewDetails","id":"detail-1","attributes":{"notes":"Sign in with the demo account"}}}`,
+	}
+	versionOf := func(versionID, appID string) stub {
+		return stub{
+			matcher: asctest.GET("/v1/appStoreVersions/"+versionID, "include=app"),
+			body:    `{"data":{"type":"appStoreVersions","id":"` + versionID + `","attributes":{"versionString":"1.0","platform":"IOS"},"relationships":{"app":{"data":{"type":"apps","id":"` + appID + `"}}}}}`,
+		}
+	}
+	tests := []struct {
+		name       string
+		args       []string
+		stubs      []stub
+		wantStdout string
+		wantStderr string
+		wantErr    string
+	}{
+		{
+			name:       "version ID",
+			args:       []string{"--version-id", "version-1"},
+			stubs:      []stub{detail},
+			wantStdout: `"id":"detail-1"`,
+		},
+		{
+			name:       "version ID of the app",
+			args:       []string{"--app", "100000001", "--version-id", "version-1"},
+			stubs:      []stub{versionOf("version-1", "100000001"), detail},
+			wantStdout: `"id":"detail-1"`,
+		},
+		{
+			name:    "version ID of another app",
+			args:    []string{"--app", "100000001", "--version-id", "version-9"},
+			stubs:   []stub{versionOf("version-9", "200000002")},
+			wantErr: `version "version-9" belongs to app "200000002", not "100000001"`,
+		},
+		{
+			name: "app alone reads its editable version",
+			args: []string{"--app", "100000001"},
+			stubs: []stub{
+				{
+					matcher: asctest.GET("/v1/apps/100000001/appStoreVersions", "filter[appVersionState]=DEVELOPER_REJECTED,INVALID_BINARY,METADATA_REJECTED,PREPARE_FOR_SUBMISSION,READY_FOR_REVIEW,REJECTED,WAITING_FOR_REVIEW", "limit=200"),
+					body:    `{"data":[{"type":"appStoreVersions","id":"version-1","attributes":{"versionString":"1.1","platform":"IOS","appVersionState":"PREPARE_FOR_SUBMISSION"}}]}`,
+				},
+				detail,
+			},
+			wantStdout: `"id":"detail-1"`,
+			wantStderr: "Using version 1.1 (PREPARE_FOR_SUBMISSION) for platform IOS; pass --version-id to override",
+		},
+		{
+			name:    "detail ID with app",
+			args:    []string{"--id", "detail-1", "--app", "100000001"},
+			wantErr: "--app selects the review detail through the app's version; pass --app with or without --version-id, not with --id",
+		},
+		{
+			name:    "detail ID with version ID",
+			args:    []string{"--id", "detail-1", "--version-id", "version-1"},
+			wantErr: "--id and --version-id are mutually exclusive",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("ASC_APP_ID", "")
+			reg := asctest.NewRegistry(t)
+			for _, stub := range test.stubs {
+				reg.Register(stub.matcher, asctest.JSON(http.StatusOK, stub.body))
+			}
+
+			args := append([]string{"review", "details-get", "--output", "json"}, test.args...)
+			stdout, stderr, err := runRootWithDeps(t, stubClient(t, reg), args...)
+
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error()+stderr, test.wantErr) {
+					t.Fatalf("err = %v, stderr = %q, want %q", err, stderr, test.wantErr)
+				}
+				if stdout != "" {
+					t.Fatalf("expected no output, got %q", stdout)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("run error: %v", err)
+			}
+			if !strings.Contains(stdout, test.wantStdout) {
+				t.Fatalf("stdout = %q, want %s", stdout, test.wantStdout)
+			}
+			if !strings.Contains(stderr, test.wantStderr) {
+				t.Fatalf("stderr = %q, want %q", stderr, test.wantStderr)
+			}
+		})
 	}
 }

@@ -2,28 +2,17 @@ package subscriptions
 
 import (
 	"flag"
+	"slices"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-func normalizeSparseFieldsFlag(fs *flag.FlagSet, next, name, value string, allowed []string) ([]string, error) {
+func normalizeSparseFieldsFlag(d *shared.Deps, fs *flag.FlagSet, next, name, value string, allowed []string) ([]string, error) {
 	if strings.TrimSpace(next) != "" && flagWasProvided(fs, name) {
-		return nil, shared.UsageErrorf("--next cannot be combined with --%s", name)
+		return nil, d.UsageErrorf("--next cannot be combined with --%s", name)
 	}
-	return normalizeSelectionFlag(fs, value, "--"+name, allowed)
-}
-
-func validateNextExclusiveFlags(fs *flag.FlagSet, next string, names ...string) error {
-	if strings.TrimSpace(next) == "" {
-		return nil
-	}
-	for _, name := range names {
-		if flagWasProvided(fs, name) {
-			return shared.UsageErrorf("--next cannot be combined with --%s", name)
-		}
-	}
-	return nil
+	return normalizeSelectionFlag(d, fs, value, "--"+name, allowed)
 }
 
 func includeRelationshipForFields(fields []string, relationship string) []string {
@@ -34,7 +23,7 @@ func includeRelationshipForFields(fields []string, relationship string) []string
 }
 
 func appendIncludeForFields(include []string, fields []string, relationship string) []string {
-	if len(fields) == 0 || containsString(include, relationship) {
+	if len(fields) == 0 || slices.Contains(include, relationship) {
 		return include
 	}
 	return append(include, relationship)

@@ -3,7 +3,7 @@ package shared
 import (
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -141,26 +141,29 @@ func IsAmbiguousSelection(err error) bool {
 	return errors.As(err, &ambiguous)
 }
 
-// AmbiguousUsageError prints an ambiguity error to stderr line by line and
-// returns a usage-class error (exit code 2). UsageError cannot be used for
+// AmbiguousUsageError prints an ambiguity error to d's stderr line by line
+// and returns a usage-class error (exit code 2). UsageError cannot be used for
 // this because its terminal sanitizer flattens the candidate table onto one
 // line.
-func AmbiguousUsageError(err error) error {
-	return AmbiguousUsageErrorWithKind(err, UsageErrorOther)
+func (d *Deps) AmbiguousUsageError(err error) error {
+	return d.AmbiguousUsageErrorWithKind(err, UsageErrorOther)
 }
 
-// AmbiguousUsageErrorWithKind prints an ambiguity error to stderr line by
+// AmbiguousUsageErrorWithKind prints an ambiguity error to d's stderr line by
 // line and returns a usage-class error (exit code 2) with the requested
-// telemetry classification. The default AmbiguousUsageError intentionally
-// remains UsageErrorOther for callers whose ambiguity is not a missing or
-// invalid flag.
-func AmbiguousUsageErrorWithKind(err error, kind UsageErrorKind) error {
+// telemetry classification. AmbiguousUsageError intentionally remains
+// UsageErrorOther for callers whose ambiguity is not a missing or invalid flag.
+func (d *Deps) AmbiguousUsageErrorWithKind(err error, kind UsageErrorKind) error {
+	return ambiguousUsageErrorTo(d.IO.ErrOut, err, kind)
+}
+
+func ambiguousUsageErrorTo(stderr io.Writer, err error, kind UsageErrorKind) error {
 	if err == nil {
 		return nil
 	}
 	message := strings.TrimSpace(err.Error())
 	if message != "" {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+		fmt.Fprintf(stderr, "Error: %s\n", message)
 	}
 	// The full table stays on the error so wrapped callers and tests can read
 	// the candidates; cmd does not reprint usage-class errors, so this cannot

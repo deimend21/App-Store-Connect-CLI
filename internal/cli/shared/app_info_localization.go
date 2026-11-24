@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
@@ -19,8 +20,9 @@ type AppInfoLocalizationUpsertPlan struct {
 }
 
 // PlanAppInfoLocalizationUpsert resolves one locale and validates whether it can
-// be created or updated without performing a mutation.
-func PlanAppInfoLocalizationUpsert(
+// be created or updated without performing a mutation. The app info
+// auto-selection notice goes to d's stderr.
+func (d *Deps) PlanAppInfoLocalizationUpsert(
 	ctx context.Context,
 	client *asc.Client,
 	appID string,
@@ -28,7 +30,19 @@ func PlanAppInfoLocalizationUpsert(
 	locale string,
 	values map[string]string,
 ) (*AppInfoLocalizationUpsertPlan, error) {
-	resolvedAppInfoID, err := ResolveOwnedAppInfoID(ctx, client, appID, appInfoID)
+	return planAppInfoLocalizationUpsertTo(ctx, d.IO.ErrOut, client, appID, appInfoID, locale, values)
+}
+
+func planAppInfoLocalizationUpsertTo(
+	ctx context.Context,
+	stderr io.Writer,
+	client *asc.Client,
+	appID string,
+	appInfoID string,
+	locale string,
+	values map[string]string,
+) (*AppInfoLocalizationUpsertPlan, error) {
+	resolvedAppInfoID, err := resolveOwnedAppInfoIDTo(ctx, stderr, client, appID, appInfoID)
 	if err != nil {
 		return nil, err
 	}
@@ -36,7 +50,7 @@ func PlanAppInfoLocalizationUpsert(
 	localizations, err := client.GetAppInfoLocalizations(
 		ctx,
 		resolvedAppInfoID,
-		asc.WithAppInfoLocalizationsLimit(200),
+		asc.Limit[asc.AppInfoLocalizationsOption](200),
 		asc.WithAppInfoLocalizationLocales([]string{locale}),
 	)
 	if err != nil {
@@ -57,7 +71,7 @@ func PlanAppInfoLocalizationUpsert(
 			return nil, MarkAmbiguousSelectionSample(AmbiguousLocalizationError("app info localization", locale, nil))
 		}
 		if strings.TrimSpace(values["name"]) == "" {
-			return nil, UsageError("--name is required when creating an app info localization")
+			return nil, usageErrorTo(stderr, "--name is required when creating an app info localization")
 		}
 		plan.Create = true
 		plan.Attributes = buildAppInfoLocalizationAttributes(locale, values, true)
@@ -91,9 +105,9 @@ func ApplyAppInfoLocalizationUpsert(
 		return nil, "", fmt.Errorf("app info localization plan is required")
 	}
 	if plan.Create {
-		resp, err := client.CreateAppInfoLocalization(ctx, plan.AppInfoID, plan.Attributes)
+		resp, err := client.CreateAppInfoLocalization(ctx, plan.AppInfoID, plan.Attributes.CreateAttributes())
 		return resp, "create", err
 	}
-	resp, err := client.UpdateAppInfoLocalization(ctx, plan.LocalizationID, plan.Attributes)
+	resp, err := client.UpdateAppInfoLocalization(ctx, plan.LocalizationID, plan.Attributes.UpdateAttributes())
 	return resp, "update", err
 }

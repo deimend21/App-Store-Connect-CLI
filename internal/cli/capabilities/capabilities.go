@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
+	"io"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -62,12 +62,12 @@ type capabilityFilter struct {
 	areas    map[string]struct{}
 }
 
-// Command returns the capabilities command.
-func Command() *ffcli.Command {
-	fs := flag.NewFlagSet("capabilities", flag.ExitOnError)
+// NewCommand returns the capabilities command built on d.
+func NewCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("capabilities", flag.ExitOnError)
 	status := fs.String("status", "", "Filter by status: cli-supported, partial, client-only, web-session, not-public-api")
 	area := fs.String("area", "", "Filter by area (comma-separated, e.g. release,monetization)")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "capabilities",
@@ -81,17 +81,13 @@ through web-session commands, or blocked by Apple's public API.
 
 Examples:
   asc capabilities
-  asc capabilities --status not-public-api --output table
+  asc capabilities --status web-session --output table
   asc capabilities --area release,monetization --output markdown
   asc capabilities --output json --pretty`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) > 0 {
-				return shared.UsageErrorf("unexpected arguments: %s", strings.Join(args, " "))
-			}
-
-			filter, err := parseCapabilityFilter(*status, *area)
+			filter, err := parseCapabilityFilter(d, *status, *area)
 			if err != nil {
 				return err
 			}
@@ -101,23 +97,23 @@ Examples:
 				return fmt.Errorf("capabilities: %w", err)
 			}
 
-			return shared.PrintOutputWithRenderers(
+			return d.PrintOutputWithRenderers(
 				report,
 				*output.Output,
 				*output.Pretty,
-				func() error { return renderTable(report) },
-				func() error { return renderMarkdown(report) },
+				func() error { return renderTable(d.IO.Out, report) },
+				func() error { return renderMarkdown(d.IO.Out, report) },
 			)
 		},
 	}
 }
 
-func parseCapabilityFilter(statusCSV, areaCSV string) (capabilityFilter, error) {
+func parseCapabilityFilter(d *shared.Deps, statusCSV, areaCSV string) (capabilityFilter, error) {
 	filter := capabilityFilter{}
 
 	statuses, err := parseCSVSet(statusCSV)
 	if err != nil {
-		return filter, shared.UsageErrorf("invalid --status: %s", err)
+		return filter, d.UsageErrorf("invalid --status: %s", err)
 	}
 	if len(statuses) > 0 {
 		allowed := make(map[string]struct{}, len(allowedCapabilityStatuses))
@@ -126,7 +122,7 @@ func parseCapabilityFilter(statusCSV, areaCSV string) (capabilityFilter, error) 
 		}
 		for status := range statuses {
 			if _, ok := allowed[status]; !ok {
-				return filter, shared.UsageErrorf("invalid --status %q (allowed: %s)", status, strings.Join(allowedCapabilityStatuses, ", "))
+				return filter, d.UsageErrorf("invalid --status %q (allowed: %s)", status, strings.Join(allowedCapabilityStatuses, ", "))
 			}
 		}
 		filter.statuses = statuses
@@ -134,14 +130,14 @@ func parseCapabilityFilter(statusCSV, areaCSV string) (capabilityFilter, error) 
 
 	areas, err := parseCSVSet(areaCSV)
 	if err != nil {
-		return filter, shared.UsageErrorf("invalid --area: %s", err)
+		return filter, d.UsageErrorf("invalid --area: %s", err)
 	}
 	if len(areas) > 0 {
 		allowed := knownAreas()
 		allowedList := sortedKeys(allowed)
 		for area := range areas {
 			if _, ok := allowed[area]; !ok {
-				return filter, shared.UsageErrorf("invalid --area %q (allowed: %s)", area, strings.Join(allowedList, ", "))
+				return filter, d.UsageErrorf("invalid --area %q (allowed: %s)", area, strings.Join(allowedList, ", "))
 			}
 		}
 		filter.areas = areas
@@ -224,8 +220,8 @@ func knownAreas() map[string]struct{} {
 
 func capabilityRows() []Capability {
 	return []Capability{
-		{Area: "metadata", Capability: "Localized header and search image assignment", Status: statusCLISupported, Commands: []string{"asc localizations placements create", "asc localizations placements delete --confirm", "asc localizations placements list", "asc localizations placements reorder", "asc localizations placements swap --confirm", "asc product-pages custom-pages localizations placements", "asc product-pages experiments treatments localizations placements", "asc app-events localizations placements"}, APIResources: []string{"appAssetLibraryPlacements", "appAssetLibraryPlacementOrderingRequests"}, Notes: []string{"Official OpenAPI 4.5.1 documents core placement resources. Assign and inspect library images/videos in version, custom product page, optimization treatment, and event localizations. Screenshots require images and previews require videos with an explicit device placement group; header/search/event creative media uses DEFAULT_PROFILE.", "Swap is a live-verified extension outside the official create schema, requires confirmation and the same media type, and leaves context/group compatibility to Apple. Ordering preserves caller order for version/CPP/PPO only; events have no ordering operation. Multiple confirmed deletions run sequentially, stop on failure, and report partial progress. Assignment and ACTIVE state do not submit review or establish storefront publication."}},
-		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library", "asc review submissions-create", "asc review items add", "asc review submissions-submit --confirm", "asc asset-library images upload", "asc asset-library videos upload", "asc asset-library images list", "asc asset-library videos list", "asc asset-library images rename", "asc asset-library images archive --confirm", "asc asset-library images unarchive", "asc asset-library images delete --confirm", "asc asset-library videos set-poster-frame"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryVideos", "appAssetLibraryPlacements", "appAssetLibraryRefData", "reviewSubmissions", "reviewSubmissionItems"}, Notes: []string{"Official OpenAPI 4.5.1 documents core Asset Library resources. Public reads, image upload and video upload support CREATIVE_ASSETS and APP_SCREENSHOTS_AND_PREVIEWS using current provider reference specifications. Collection filters cover category, state, specification IDs, asset IDs and reference names; sorting supports referenceName, createdDate and lastModifiedDate.", "Image/video rename, archive, unarchive and confirmed deletion are available; video poster-frame changes affect the shared library asset. Apple validates mutation eligibility based on the asset state and usage. Archive requires approved assets, and approved posters cannot be edited.", "Standalone image/video review commands already exist; separate asset review requires an approved app version, while first-version assets belong with that version. Generic review submission supports image/video items. Maintainers have not independently verified live image/video review-item acceptance or final App Review approval. Placement commands manage assignment separately. Readiness and placement state do not establish App Review approval or storefront publication."}},
+		{Area: "metadata", Capability: "Localized header and search image assignment", Status: statusCLISupported, Commands: []string{"asc localizations placements create", "asc localizations placements delete --confirm", "asc localizations placements list", "asc localizations placements view", "asc localizations placements reorder", "asc localizations placements swap --confirm", "asc product-pages custom-pages localizations placements", "asc product-pages experiments treatments localizations placements", "asc app-events localizations placements"}, APIResources: []string{"appAssetLibraryPlacements", "appAssetLibraryPlacementOrderingRequests"}, Notes: []string{"Official OpenAPI 4.5.1 documents core placement resources. Assign and inspect library images/videos in version, custom product page, optimization treatment, and event localizations. Screenshots require images and previews require videos with an explicit device placement group; header/search/event creative media uses DEFAULT_PROFILE.", "Swap is a live-verified extension outside the official create schema, requires confirmation and the same media type, and leaves context/group compatibility to Apple. Ordering preserves caller order for version/CPP/PPO only; events have no ordering operation. Multiple confirmed deletions run sequentially, stop on failure, and report partial progress. Assignment and ACTIVE state do not submit review or establish storefront publication."}},
+		{Area: "metadata", Capability: "Asset Library media and specifications", Status: statusCLISupported, Commands: []string{"asc asset-library", "asc review submissions-create", "asc review items add", "asc review submissions-submit --confirm", "asc asset-library images upload", "asc asset-library videos upload", "asc asset-library images list", "asc asset-library videos list", "asc asset-library images rename", "asc asset-library images archive --confirm", "asc asset-library images unarchive", "asc asset-library images delete --confirm", "asc asset-library videos set-poster-frame"}, APIResources: []string{"appAssetLibraries", "appAssetLibraryImages", "appAssetLibraryVideos", "appAssetLibraryPlacements", "appAssetLibraryRefData", "reviewSubmissions", "reviewSubmissionItems"}, Notes: []string{"Official OpenAPI 4.5.1 documents core Asset Library resources. Public reads, image upload and video upload support CREATIVE_ASSETS and APP_SCREENSHOTS_AND_PREVIEWS using current provider reference specifications. Collection filters cover category, state, specification IDs, asset IDs and reference names; sorting supports referenceName, createdDate and lastModifiedDate.", "Image/video rename, archive, unarchive and confirmed deletion are available; video poster-frame changes affect the shared library asset. Apple validates mutation eligibility based on the asset state and usage. Archive requires approved assets, and approved posters cannot be edited.", "Standalone image/video review commands already exist; separate asset review requires an approved app version, while first-version assets belong with that version. Generic review submission supports image/video items. Maintainers have not independently verified live image/video review-item acceptance or final App Review approval. Placement commands manage assignment separately. Readiness and placement state do not establish App Review approval or storefront publication.", "asc screenshots upload and asc video-previews upload accept --asset-library to upload and place media on a version localization; deprecated sets remain their default."}},
 		{
 			Area:       "release",
 			Capability: "App Store release submission",
@@ -263,14 +259,7 @@ func capabilityRows() []Capability {
 				"builds",
 				"preReleaseVersions",
 			},
-			Notes: []string{"The CLI wraps Apple's supported upload tooling and build-processing APIs."},
-		},
-		{
-			Area:       "builds",
-			Capability: "Direct REST build upload",
-			Status:     statusNotPublicAPI,
-			Notes:      []string{"Apple does not expose direct IPA upload as a normal public App Store Connect REST endpoint."},
-			NextAction: "Use asc builds upload, Xcode, Transporter, or asc publish workflows.",
+			Notes: []string{"Uploads through the public buildUploads and buildUploadFiles REST APIs, then tracks build processing."},
 		},
 		{
 			Area:         "app-management",
@@ -323,6 +312,14 @@ func capabilityRows() []Capability {
 			NextAction: "Use App Store Connect web UI, or asc web removed-apps list.",
 		},
 		{
+			Area:       "app-management",
+			Capability: "App bundle management",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web app-bundles"},
+			Notes:      []string{"App Store app bundles are not present in the embedded public OpenAPI snapshot, and the public API answers that the resource does not exist."},
+			NextAction: "Use asc web app-bundles list, view --id BUNDLE_ID, create --name NAME --sku SKU --apps APP_ID,APP_ID --confirm, or apps set --id BUNDLE_ID --apps APP_ID,APP_ID --confirm.",
+		},
+		{
 			Area:         "app-management",
 			Capability:   "Initial app availability bootstrap",
 			Status:       statusPartial,
@@ -346,6 +343,14 @@ func capabilityRows() []Capability {
 			Commands:   []string{"asc versions list --paginate --output json", "asc versions view --output json", "asc versions update --downloadable"},
 			Notes:      []string{"App Store Connect's Last-Compatible Version Settings screen is the nullable downloadable attribute on appStoreVersions. Public versions JSON preserves it when Apple returns it; the default table omits the field. asc versions update --downloadable writes it, and --downloadable false requires --confirm."},
 			NextAction: "Read with asc versions list --app APP_ID --paginate --output json or asc versions view --version-id VERSION_ID --output json. Enable downloads with asc versions update --version-id VERSION_ID --downloadable true, or disable them with asc versions update --version-id VERSION_ID --downloadable false --confirm.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App age ratings via web sessions",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps age-ratings list", "asc web apps age-ratings territories", "asc web apps age-ratings edit"},
+			Notes:      []string{"Read age rating declarations and territory ratings, or edit the declaration fields observed in the web form."},
+			NextAction: "Run asc web apps age-ratings list --app APP_ID to find the app info and declaration IDs. Read territory ratings with asc web apps age-ratings territories --app-info APP_INFO_ID or edit with asc web apps age-ratings edit --id DECLARATION_ID --input PATH --confirm.",
 		},
 		{
 			Area:       "app-management",
@@ -420,6 +425,16 @@ func capabilityRows() []Capability {
 				"App Store Regulations and Permits requirements are not present in the embedded public OpenAPI snapshot. Listing reports each app-scoped requirement Apple returns; the web command supports captured medical-device app-level declarations and the detailed regional setter, while personal-service and unsupported detailed medical fields remain website-only. EU DSA trader status is account-level and is not part of this listing.",
 			},
 			NextAction: "Use App Store Connect web UI, or asc web apps declarations list.",
+		},
+		{
+			Area:       "app-management",
+			Capability: "App Compliance requirements",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web apps compliance list", "asc web apps compliance set"},
+			Notes: []string{
+				"App Compliance requirements, such as the China mainland Security Assessment and AI Generated or Synthetic Content declarations, are not present in the embedded public OpenAPI snapshot. Listing reports every requirement Apple returns for the app, answered or not. Setting answers one of those two requirements, with its evidence files and filing details for an affirmative answer, and saves nothing when Apple's form asks for a field the command does not know.",
+			},
+			NextAction: "Read with asc web apps compliance list --app APP_ID. Answer with asc web apps compliance set --app APP_ID --requirement SECURITY_ASSESSMENT|AI_GENERATED_CONTENT --declared true|false --confirm, or check an answer first with --dry-run.",
 		},
 		{
 			Area:       "monetization",
@@ -579,9 +594,17 @@ func capabilityRows() []Capability {
 			Area:       "signing",
 			Capability: "Sign in with Apple private keys",
 			Status:     statusWebSession,
-			Commands:   []string{"asc web sign-in-keys list", "asc web sign-in-keys view", "asc web sign-in-keys create", "asc web sign-in-keys download"},
-			Notes:      []string{"Uses private Developer Portal authentication-key endpoints. Creation verifies the primary Bundle ID association; one-time P8 download saves private files on macOS or Linux. Revoke is not exposed."},
+			Commands:   []string{"asc web sign-in-keys list", "asc web sign-in-keys view", "asc web sign-in-keys create", "asc web sign-in-keys download", "asc web sign-in-keys revoke"},
+			Notes:      []string{"Uses private Developer Portal authentication-key endpoints. Creation verifies the primary Bundle ID association; one-time P8 download saves private files on macOS or Linux. Revoke refuses keys of another service and verifies the key is no longer listed."},
 			NextAction: "Use list and view to inspect existing keys, then create with --name, --bundle-id, --output-dir, and --confirm, or recover a download with --key-id, --output-dir, and --confirm.",
+		},
+		{
+			Area:       "signing",
+			Capability: "APNs private keys",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web push-keys create", "asc web push-keys download", "asc web push-keys revoke"},
+			Notes:      []string{"Uses the same private Developer Portal authentication-key endpoints as Sign in with Apple keys. Creates team-scoped keys for sandbox and production; topic-scoped and single-environment keys are not exposed. Revoke refuses keys of another service and verifies the key is no longer listed."},
+			NextAction: "Use asc web sign-in-keys list to inspect existing keys, then create with --name, --output-dir, and --confirm, or recover a download with --key-id, --output-dir, and --confirm.",
 		},
 		{
 			Area:         "signing",
@@ -695,6 +718,22 @@ func capabilityRows() []Capability {
 		},
 		{
 			Area:       "access",
+			Capability: "Developer Portal teams",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web teams list"},
+			Notes:      []string{"Lists every Developer Portal team on the web session's Apple Account with its ID, name, and status. Membership expiry is not reported."},
+			NextAction: "Use asc web teams list to find a --developer-team value for other asc web commands.",
+		},
+		{
+			Area:       "access",
+			Capability: "App Store Connect Business agreements",
+			Status:     statusWebSession,
+			Commands:   []string{"asc web business agreements"},
+			Notes:      []string{"Lists Business contracts and accepts an explicitly selected updated configuration, including the Paid Applications Schedule. Active contracts can still have updated terms pending. Developer Program licenses use asc web agreements instead."},
+			NextAction: "Use asc web business agreements list, review updated terms in Business, then accept with --contract-config-id and --confirm.",
+		},
+		{
+			Area:       "access",
 			Capability: "App Store Connect API key web-session management",
 			Status:     statusWebSession,
 			Commands:   []string{"asc web api-keys"},
@@ -736,12 +775,25 @@ func capabilityRows() []Capability {
 			},
 			Notes: []string{"Reviewer-message and rejection-detail surfaces, plus next-version subscription and IAP attachment, are richer or only available in App Store Connect web-session flows. The reply path requires --confirm, has no attachment, and does not automatically retry an ambiguous send; the draft path provides unsent create/update/delete without attachments or automatic retries. Source capture has not proven provider acceptance."},
 		},
+		{
+			Area:       "review",
+			Capability: "macOS App Sandbox Information",
+			Status:     statusWebSession,
+			Commands: []string{
+				"asc web review sandbox-entitlements catalog",
+				"asc web review sandbox-entitlements list",
+				"asc web review sandbox-entitlements set",
+				"asc web review sandbox-entitlements delete",
+			},
+			APIResources: []string{"appSandboxEntitlements", "appSandboxEntitlementUsages"},
+			Notes:        []string{"Reads and writes the entitlement usage information of a macOS version's App Review details, which the public API does not expose. set and delete require --confirm, read the current rows first, and verify the result with a fresh read. Reads and writes were live-verified with a built-CLI canary on 2026-10-27."},
+		},
 	}
 }
 
-func renderTable(report Report) error {
-	fmt.Fprintf(os.Stdout, "Total: %d  Schema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
-	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+func renderTable(w io.Writer, report Report) error {
+	fmt.Fprintf(w, "Total: %d  Schema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "AREA\tCAPABILITY\tSTATUS\tCOMMANDS\tNOTES")
 	for _, entry := range report.Capabilities {
 		_, _ = fmt.Fprintf(
@@ -757,13 +809,13 @@ func renderTable(report Report) error {
 	return tw.Flush()
 }
 
-func renderMarkdown(report Report) error {
-	fmt.Fprintf(os.Stdout, "Total: %d  \nSchema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
-	fmt.Fprintln(os.Stdout, "| Area | Capability | Status | Commands | Notes |")
-	fmt.Fprintln(os.Stdout, "| --- | --- | --- | --- | --- |")
+func renderMarkdown(w io.Writer, report Report) error {
+	fmt.Fprintf(w, "Total: %d  \nSchema endpoints: %d\n\n", report.Summary.Total, report.Summary.SchemaEndpointCount)
+	fmt.Fprintln(w, "| Area | Capability | Status | Commands | Notes |")
+	fmt.Fprintln(w, "| --- | --- | --- | --- | --- |")
 	for _, entry := range report.Capabilities {
 		fmt.Fprintf(
-			os.Stdout,
+			w,
 			"| %s | %s | %s | %s | %s |\n",
 			escapeMarkdownTable(entry.Area),
 			escapeMarkdownTable(entry.Capability),

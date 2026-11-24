@@ -107,7 +107,7 @@ func TestSubscriptionsPricingPricesListSendsQueryControls(t *testing.T) {
 		"--subscription-id", "8000000001",
 		"--price-point-id", "point-1, point-2",
 		"--plan-type", "monthly",
-		"--territory", "United States",
+		"--territory", "United States,gb",
 		"--fields", "startDate,preserved",
 		"--territory-fields", "currency",
 		"--price-point-fields", "customerPrice,proceeds",
@@ -127,7 +127,7 @@ func TestSubscriptionsPricingPricesListSendsQueryControls(t *testing.T) {
 	wantQuery := url.Values{
 		"filter[planType]":                {"MONTHLY"},
 		"filter[subscriptionPricePoint]":  {"point-1,point-2"},
-		"filter[territory]":               {"USA"},
+		"filter[territory]":               {"USA,GBR"},
 		"fields[subscriptionPrices]":      {"startDate,preserved,territory,subscriptionPricePoint"},
 		"fields[territories]":             {"currency"},
 		"fields[subscriptionPricePoints]": {"customerPrice,proceeds"},
@@ -275,6 +275,7 @@ func TestSubscriptionsPricingPricesListRejectsInvalidQuerySelections(t *testing.
 		{name: "subscription prices fields", flag: "fields", value: "name", want: "--fields must be one of"},
 		{name: "territory fields", flag: "territory-fields", value: "name", want: "--territory-fields must be one of"},
 		{name: "price point fields", flag: "price-point-fields", value: "name", want: "--price-point-fields must be one of"},
+		{name: "territory", flag: "territory", value: "USA,Narnia", want: `territory "Narnia" could not be mapped`},
 	}
 
 	for _, test := range tests {
@@ -297,68 +298,29 @@ func TestSubscriptionsPricingPricesListRejectsInvalidQuerySelections(t *testing.
 	}
 }
 
-func TestSubscriptionsPricingPricesListRejectsNewQueryControlsWithNext(t *testing.T) {
-	const nextURL = "https://api.appstoreconnect.apple.com/v1/subscriptions/8000000001/prices?cursor=next"
-	tests := []struct {
-		name string
+func TestSubscriptionsPricingPricesListRejectsQueryControlsWithNextOrResolved(t *testing.T) {
+	modes := []struct {
 		flag string
+		args []string
 	}{
-		{name: "price point filter", flag: "price-point-id"},
-		{name: "subscription price fields", flag: "fields"},
-		{name: "territory fields", flag: "territory-fields"},
-		{name: "price point fields", flag: "price-point-fields"},
-		{name: "include", flag: "include"},
+		{flag: "--next", args: []string{"--next", "https://api.appstoreconnect.apple.com/v1/subscriptions/8000000001/prices?cursor=next"}},
+		{flag: "--resolved", args: []string{"--subscription-id", "8000000001", "--resolved"}},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			captured := subscriptionPricesListQuerySurfaceStub(t)
-			_, stderr, err := runSubscriptionPricesListQuerySurface(
-				t,
-				"subscriptions", "pricing", "prices", "list",
-				"--next", nextURL,
-				"--"+test.flag, "value",
-			)
-			if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
-				t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
-			}
-			if !strings.Contains(stderr, "--next cannot be combined with --"+test.flag) {
-				t.Fatalf("expected next conflict for --%s, got %q", test.flag, stderr)
-			}
-			captured.assertNoRequest(t)
-		})
-	}
-}
-
-func TestSubscriptionsPricingPricesListRejectsRawQueryControlsWithResolved(t *testing.T) {
-	tests := []struct {
-		name string
-		flag string
-	}{
-		{name: "price point filter", flag: "price-point-id"},
-		{name: "subscription price fields", flag: "fields"},
-		{name: "territory fields", flag: "territory-fields"},
-		{name: "price point fields", flag: "price-point-fields"},
-		{name: "include", flag: "include"},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			captured := subscriptionPricesListQuerySurfaceStub(t)
-			_, stderr, err := runSubscriptionPricesListQuerySurface(
-				t,
-				"subscriptions", "pricing", "prices", "list",
-				"--subscription-id", "8000000001",
-				"--resolved",
-				"--"+test.flag, "value",
-			)
-			if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
-				t.Fatalf("exit code = %d, want %d (err=%v)", got, rootcmd.ExitUsage, err)
-			}
-			if !strings.Contains(stderr, "--resolved cannot be combined with --"+test.flag) {
-				t.Fatalf("expected resolved conflict for --%s, got %q", test.flag, stderr)
-			}
-			captured.assertNoRequest(t)
-		})
+	for _, mode := range modes {
+		for _, flagName := range []string{"price-point-id", "fields", "territory-fields", "price-point-fields", "include"} {
+			t.Run(mode.flag+" with "+flagName, func(t *testing.T) {
+				captured := subscriptionPricesListQuerySurfaceStub(t)
+				args := append([]string{"subscriptions", "pricing", "prices", "list"}, mode.args...)
+				_, stderr, err := runSubscriptionPricesListQuerySurface(t, append(args, "--"+flagName, "value")...)
+				if got := rootcmd.ExitCodeFromError(err); got != rootcmd.ExitUsage {
+					t.Fatalf("exit code = %d, want %d (err=%v, requests=%d, path=%q)", got, rootcmd.ExitUsage, err, captured.calls, captured.path)
+				}
+				if want := mode.flag + " cannot be combined with --" + flagName; !strings.Contains(stderr, want) {
+					t.Fatalf("expected %q, got %q", want, stderr)
+				}
+				captured.assertNoRequest(t)
+			})
+		}
 	}
 }

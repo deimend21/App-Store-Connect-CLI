@@ -3,7 +3,6 @@ package web
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
@@ -37,12 +36,12 @@ func (flags developerPortalFlags) developerTeamWasSet() bool {
 	return set
 }
 
-func validateDeveloperPortalFlags(flags developerPortalFlags) error {
+func validateDeveloperPortalFlagsWith(d *shared.Deps, flags developerPortalFlags) error {
 	if !flags.developerTeamWasSet() {
 		return nil
 	}
 	if flags.developerTeam == nil || strings.TrimSpace(*flags.developerTeam) == "" {
-		return shared.UsageError("--developer-team must be a Developer Portal team ID or exact team name")
+		return d.UsageError("--developer-team must be a Developer Portal team ID or exact team name")
 	}
 	return nil
 }
@@ -58,8 +57,8 @@ func newDeveloperPortalClient(session *webcore.AuthSession, flags developerPorta
 	return client
 }
 
-func persistDeveloperPortalSession(session *webcore.AuthSession) {
+func persistDeveloperPortalSessionWith(d *shared.Deps, session *webcore.AuthSession) {
 	if err := persistWebSessionFn(session); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Warning: failed to persist refreshed web session: %v\n", err)
+		_, _ = fmt.Fprintf(d.IO.ErrOut, "Warning: failed to persist refreshed web session: %v\n", err)
 	}
 }

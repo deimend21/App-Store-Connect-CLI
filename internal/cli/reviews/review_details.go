@@ -2,9 +2,10 @@ package reviews
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"os"
+	"net/http"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -27,57 +28,105 @@ const (
 	reviewDetailDemoPasswordMaxLength    = 100
 )
 
-// ReviewDetailsGetCommand returns the review details get subcommand.
-func ReviewDetailsGetCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("details-get", flag.ExitOnError)
+func newReviewDetailsGetCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("details-get", flag.ExitOnError)
 
-	detailID := shared.BindResourceIDFlag(fs, "id", "appStoreReviewDetails", "App Store review detail ID (required)")
+	detailID := shared.BindResourceIDFlag(fs, "id", "appStoreReviewDetails", "App Store review detail ID")
+	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID: get that version's review detail")
+	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact name: get the review detail of its editable (else live) version, or require --version-id to be this app's")
+	platform := fs.String("platform", "", "Platform of the version --app picks when the app has several: IOS, MAC_OS, TV_OS, VISION_OS")
 	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "details-get",
-		ShortUsage: "asc review details-get --id \"DETAIL_ID\"",
-		ShortHelp:  "Get an App Store review detail by ID.",
-		LongHelp: `Get an App Store review detail by ID.
+		ShortUsage: "asc review details-get --id \"DETAIL_ID\" | --version-id \"VERSION_ID\" | --app \"APP_ID\"",
+		ShortHelp:  "Get an App Store review detail by ID, version, or app.",
+		LongHelp: `Get an App Store review detail by ID, by its App Store version, or for an
+app's editable version (its live version when none is editable).
+
+With --version-id, --app also checks that the version belongs to the app.
 
 Examples:
-  asc review details-get --id "DETAIL_ID"`,
+  asc review details-get --id "DETAIL_ID"
+  asc review details-get --version-id "VERSION_ID"
+  asc review details-get --app "APP_ID"
+  asc review details-get --app "APP_ID" --version-id "VERSION_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			detailValue := strings.TrimSpace(*detailID)
-			if detailValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return shared.MissingRequiredUsageError("--id")
+			versionValue := strings.TrimSpace(*versionID)
+			appValue := strings.TrimSpace(*appID)
+			platformValue := strings.TrimSpace(*platform)
+			if detailValue == "" && versionValue == "" && appValue == "" {
+				return d.RequiredFlag("--id")
+			}
+			if detailValue != "" && versionValue != "" {
+				return shared.WithDiagnostic(d.UsageError("--id and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "--version-id")
+			}
+			if detailValue != "" && appValue != "" {
+				return shared.WithDiagnostic(d.UsageError("--app selects the review detail through the app's version; pass --app with or without --version-id, not with --id"), shared.DiagnosticConflictingInput, "--app")
+			}
+			if platformValue != "" {
+				if appValue == "" || versionValue != "" {
+					return shared.WithDiagnostic(d.UsageError("--platform picks the version for --app; pass it with --app and without --version-id"), shared.DiagnosticConflictingInput, "--platform")
+				}
+				normalized, err := shared.NormalizeAppStoreVersionPlatform(platformValue)
+				if err != nil {
+					return shared.WithDiagnostic(d.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
+				}
+				platformValue = normalized
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review details-get: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetAppStoreReviewDetail(requestCtx, detailValue)
-			if err != nil {
-				return fmt.Errorf("review details-get: failed to fetch: %w", err)
+			if detailValue != "" {
+				resp, err := client.GetAppStoreReviewDetail(requestCtx, detailValue)
+				if err != nil {
+					return fmt.Errorf("review details-get: failed to fetch: %w", err)
+				}
+
+				shared.WarnIncludeSensitive(d.IO.ErrOut, *includeSensitive)
+				return d.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
 			}
 
-			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
-			return shared.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
+			if appValue != "" {
+				resolvedAppID, err := shared.ResolveAppIDWithLookup(requestCtx, client, appValue)
+				if err != nil {
+					return fmt.Errorf("review details-get: %w", err)
+				}
+				if versionValue != "" {
+					if _, err := shared.ResolveOwnedAppStoreVersionByID(requestCtx, client, resolvedAppID, versionValue, ""); err != nil {
+						return fmt.Errorf("review details-get: %w", err)
+					}
+				} else {
+					selected, err := shared.ResolveDefaultAppStoreVersion(requestCtx, client, resolvedAppID, platformValue)
+					if err != nil {
+						return fmt.Errorf("review details-get: %w", err)
+					}
+					fmt.Fprintln(d.IO.ErrOut, selected.Note("--version-id"))
+					versionValue = selected.ID
+				}
+			}
+
+			return printReviewDetailForVersion(requestCtx, d, client, "review details-get", versionValue, *includeSensitive, output)
 		},
 	}
 }
 
-// ReviewDetailsForVersionCommand returns the review details for-version subcommand.
-func ReviewDetailsForVersionCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("details-for-version", flag.ExitOnError)
+func newReviewDetailsForVersionCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("details-for-version", flag.ExitOnError)
 
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "details-for-version",
@@ -88,61 +137,65 @@ func ReviewDetailsForVersionCommand() *ffcli.Command {
 Examples:
   asc review details-for-version --version-id "VERSION_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			versionValue := strings.TrimSpace(*versionID)
 			if versionValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return shared.MissingRequiredUsageError("--version-id")
+				return d.RequiredFlag("--version-id")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review details-for-version: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
-			resp, err := client.GetAppStoreReviewDetailForVersion(requestCtx, versionValue)
-			if err != nil {
-				if asc.IsNotFound(err) {
-					if _, versionErr := client.GetAppStoreVersion(requestCtx, versionValue); versionErr != nil {
-						return fmt.Errorf("review details-for-version: failed to fetch: %w", versionErr)
-					}
-					message := reviewDetailNotConfiguredMessage(versionValue)
-					warnNotConfigured(message)
-					result := reviewDetailNotConfiguredResult{
-						VersionID:  versionValue,
-						Configured: false,
-						Message:    message,
-					}
-					return shared.PrintOutputWithRenderers(
-						result,
-						*output.Output,
-						*output.Pretty,
-						func() error {
-							renderNotConfiguredState("Review Detail", "versionId", versionValue, message, false)
-							return nil
-						},
-						func() error {
-							renderNotConfiguredState("Review Detail", "versionId", versionValue, message, true)
-							return nil
-						},
-					)
-				}
-				return fmt.Errorf("review details-for-version: failed to fetch: %w", err)
-			}
-
-			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
-			return shared.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
+			return printReviewDetailForVersion(requestCtx, d, client, "review details-for-version", versionValue, *includeSensitive, output)
 		},
 	}
 }
 
-// ReviewDetailsCreateCommand returns the review details create subcommand.
-func ReviewDetailsCreateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("details-create", flag.ExitOnError)
+// printReviewDetailForVersion prints the review detail of versionID, or the
+// not-configured state when the version exists without one.
+func printReviewDetailForVersion(ctx context.Context, d *shared.Deps, client *asc.Client, command, versionValue string, includeSensitive bool, output shared.OutputFlags) error {
+	resp, err := client.GetAppStoreReviewDetailForVersion(ctx, versionValue)
+	if err != nil {
+		if asc.IsNotFound(err) {
+			if _, versionErr := client.GetAppStoreVersion(ctx, versionValue); versionErr != nil {
+				return fmt.Errorf("%s: failed to fetch: %w", command, versionErr)
+			}
+			message := reviewDetailNotConfiguredMessage(versionValue)
+			warnNotConfigured(d, message)
+			result := reviewDetailNotConfiguredResult{
+				VersionID:  versionValue,
+				Configured: false,
+				Message:    message,
+			}
+			return d.PrintOutputWithRenderers(
+				result,
+				*output.Output,
+				*output.Pretty,
+				func() error {
+					renderNotConfiguredState(d, "Review Detail", "versionId", versionValue, message, false)
+					return nil
+				},
+				func() error {
+					renderNotConfiguredState(d, "Review Detail", "versionId", versionValue, message, true)
+					return nil
+				},
+			)
+		}
+		return fmt.Errorf("%s: failed to fetch: %w", command, err)
+	}
+
+	shared.WarnIncludeSensitive(d.IO.ErrOut, includeSensitive)
+	return d.PrintOutput(presentableReviewDetail(resp, includeSensitive), *output.Output, *output.Pretty)
+}
+
+func newReviewDetailsCreateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("details-create", flag.ExitOnError)
 
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID (required)")
 	contactFirstName := fs.String("contact-first-name", "", "Contact first name (required for new review details)")
@@ -155,7 +208,7 @@ func ReviewDetailsCreateCommand() *ffcli.Command {
 	notes := fs.String("notes", "", reviewDetailNotesUsage)
 	ifExists := shared.BindIfExistsFlag(fs, shared.IfExistsSkip, shared.IfExistsUpdate)
 	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "details-create",
@@ -184,14 +237,13 @@ skip reads the existing detail back, prints it unchanged, and exits 0. update
 applies the same flags to the existing detail with asc review details-update.
 Any other 409 keeps failing.`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			versionValue := strings.TrimSpace(*versionID)
 			if versionValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --version-id is required")
-				return shared.MissingRequiredUsageError("--version-id")
+				return d.RequiredFlag("--version-id")
 			}
-			ifExistsMode, err := shared.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
+			ifExistsMode, err := d.ParseIfExistsMode(*ifExists, shared.IfExistsSkip, shared.IfExistsUpdate)
 			if err != nil {
 				return err
 			}
@@ -205,21 +257,21 @@ Any other 409 keeps failing.`,
 				visited["demo-account-required"] && *demoAccountRequired &&
 				(!visited["demo-account-name"] || !visited["demo-account-password"])
 			if visited["demo-account-required"] && *demoAccountRequired && !needsExistingDemoCredentials {
-				if err := validateReviewDetailDemoCredentialValues(strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword)); err != nil {
+				if err := validateReviewDetailDemoCredentialValues(d, strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword)); err != nil {
 					return err
 				}
 			} else if visited["demo-account-password"] {
-				if err := validateReviewDetailDemoPasswordLength(strings.TrimSpace(*demoAccountPassword)); err != nil {
+				if err := validateReviewDetailDemoPasswordLength(d, strings.TrimSpace(*demoAccountPassword)); err != nil {
 					return err
 				}
 			}
-			if err := validateReviewDetailInputValues(visited, strings.TrimSpace(*notes), strings.TrimSpace(*contactPhone)); err != nil {
+			if err := validateReviewDetailInputValues(d, visited, strings.TrimSpace(*notes), strings.TrimSpace(*contactPhone)); err != nil {
 				return err
 			}
 			// With --if-exists skip or update the version may already carry its
 			// contact fields, so only a plain create must supply them.
 			if ifExistsMode == shared.IfExistsFail {
-				if err := validateReviewDetailCreateContacts(visited, map[string]string{
+				if err := validateReviewDetailCreateContacts(d, visited, map[string]string{
 					"contact-first-name": *contactFirstName,
 					"contact-phone":      *contactPhone,
 				}); err != nil {
@@ -265,12 +317,12 @@ Any other 409 keeps failing.`,
 				attrsPtr = &attrs
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review details-create: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			var resp *asc.AppStoreReviewDetailResponse
@@ -280,7 +332,7 @@ Any other 409 keeps failing.`,
 				existing, err = client.GetAppStoreReviewDetailForVersion(requestCtx, versionValue)
 				if err != nil {
 					if asc.IsNotFound(err) {
-						return validateReviewDetailDemoCredentialValues(strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword))
+						return validateReviewDetailDemoCredentialValues(d, strings.TrimSpace(*demoAccountName), strings.TrimSpace(*demoAccountPassword))
 					}
 					return fmt.Errorf("review details-create: failed to read existing review details for demo credential validation: %w", err)
 				}
@@ -288,7 +340,7 @@ Any other 409 keeps failing.`,
 					return fmt.Errorf("review details-create: existing review detail response did not include an id")
 				}
 
-				if err := validateReviewDetailDemoCredentialsWithExisting(
+				if err := validateReviewDetailDemoCredentialsWithExisting(d,
 					existing.Data.Attributes,
 					visited,
 					strings.TrimSpace(*demoAccountName),
@@ -310,7 +362,7 @@ Any other 409 keeps failing.`,
 					return detail, strings.TrimSpace(detail.Data.ID) != "", nil
 				})
 				if resolveErr != nil {
-					return fmt.Errorf("review details-create: failed to create: %w", resolveErr)
+					return withReviewDetailExistsHint(ifExistsMode, fmt.Errorf("review details-create: failed to create: %w", resolveErr))
 				}
 				if !handled {
 					return fmt.Errorf("review details-create: failed to create: %w", err)
@@ -327,18 +379,17 @@ Any other 409 keeps failing.`,
 					resp = updated
 					outcome = "updated it in place"
 				}
-				fmt.Fprintf(os.Stderr, "review details-create: review detail %s already exists for version %s; %s (--if-exists %s)\n", existing.Data.ID, versionValue, outcome, ifExistsMode)
+				fmt.Fprintf(d.IO.ErrOut, "review details-create: review detail %s already exists for version %s; %s (--if-exists %s)\n", existing.Data.ID, versionValue, outcome, ifExistsMode)
 			}
 
-			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
-			return shared.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
+			shared.WarnIncludeSensitive(d.IO.ErrOut, *includeSensitive)
+			return d.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
 		},
 	}
 }
 
-// ReviewDetailsUpdateCommand returns the review details update subcommand.
-func ReviewDetailsUpdateCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("details-update", flag.ExitOnError)
+func newReviewDetailsUpdateCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("details-update", flag.ExitOnError)
 
 	detailID := shared.BindResourceIDFlag(fs, "id", "appStoreReviewDetails", "App Store review detail ID (required)")
 	contactFirstName := fs.String("contact-first-name", "", "Contact first name")
@@ -350,7 +401,7 @@ func ReviewDetailsUpdateCommand() *ffcli.Command {
 	demoAccountRequired := fs.Bool("demo-account-required", false, reviewDetailDemoAccountRequiredUsage)
 	notes := fs.String("notes", "", reviewDetailNotesUsage)
 	includeSensitive := shared.BindIncludeSensitiveFlag(fs)
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "details-update",
@@ -369,12 +420,11 @@ Examples:
   asc review details-update --id "DETAIL_ID" --notes "Reviewer can use the guest flow from the welcome screen."
   asc review details-update --id "DETAIL_ID" --demo-account-required=true --demo-account-name "reviewer@example.com" --demo-account-password "rotated-password" --notes "This account has full reviewer access."`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
 			detailValue := strings.TrimSpace(*detailID)
 			if detailValue == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id is required")
-				return shared.MissingRequiredUsageError("--id")
+				return d.RequiredFlag("--id")
 			}
 
 			visited := map[string]bool{}
@@ -383,27 +433,26 @@ Examples:
 			})
 
 			if !hasReviewDetailUpdates(visited) {
-				fmt.Fprintln(os.Stderr, "Error: at least one update flag is required")
-				return shared.MissingRequiredUsageError("")
+				return d.UpdateFlagRequired(fs, contactFirstName, contactLastName, contactEmail, contactPhone, demoAccountName, demoAccountPassword, demoAccountRequired, notes)
 			}
 			if visited["demo-account-password"] {
-				if err := validateReviewDetailDemoPasswordLength(strings.TrimSpace(*demoAccountPassword)); err != nil {
+				if err := validateReviewDetailDemoPasswordLength(d, strings.TrimSpace(*demoAccountPassword)); err != nil {
 					return err
 				}
 			}
-			if err := validateReviewDetailInputValues(visited, strings.TrimSpace(*notes), strings.TrimSpace(*contactPhone)); err != nil {
+			if err := validateReviewDetailInputValues(d, visited, strings.TrimSpace(*notes), strings.TrimSpace(*contactPhone)); err != nil {
 				return err
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review details-update: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
-			if err := validateReviewDetailUpdateDemoCredentials(
+			if err := validateReviewDetailUpdateDemoCredentials(d,
 				requestCtx,
 				client,
 				detailValue,
@@ -454,9 +503,24 @@ Examples:
 				return fmt.Errorf("review details-update: failed to update: %w", err)
 			}
 
-			shared.WarnIncludeSensitive(os.Stderr, *includeSensitive)
-			return shared.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
+			shared.WarnIncludeSensitive(d.IO.ErrOut, *includeSensitive)
+			return d.PrintOutput(presentableReviewDetail(resp, *includeSensitive), *output.Output, *output.Pretty)
 		},
+	}
+}
+
+// withReviewDetailExistsHint names the one-flag retry when the version already
+// has review details and the caller left --if-exists at fail: the create flags
+// can be applied to the existing detail instead.
+func withReviewDetailExistsHint(mode shared.IfExistsMode, err error) error {
+	apiErr, ok := errors.AsType[*asc.APIError](err)
+	if mode != shared.IfExistsFail || !ok || apiErr.StatusCode != http.StatusConflict ||
+		(apiErr.Code != "STATE_ERROR.ALREADY_EXISTS" && !strings.Contains(apiErr.Detail, "already has an existing review")) {
+		return err
+	}
+	return &shared.HintedError{
+		Err:  err,
+		Hint: "This version already has review details. Rerun the same command with --if-exists update to apply these flags to them, or --if-exists skip to keep them as they are.",
 	}
 }
 
@@ -503,7 +567,7 @@ func hasReviewDetailUpdates(visited map[string]bool) bool {
 		visited["notes"]
 }
 
-func validateReviewDetailUpdateDemoCredentials(
+func validateReviewDetailUpdateDemoCredentials(d *shared.Deps,
 	ctx context.Context,
 	client *asc.Client,
 	detailID string,
@@ -517,7 +581,7 @@ func validateReviewDetailUpdateDemoCredentials(
 	}
 
 	if visited["demo-account-name"] && visited["demo-account-password"] {
-		return validateReviewDetailDemoCredentialValues(demoAccountName, demoAccountPassword)
+		return validateReviewDetailDemoCredentialValues(d, demoAccountName, demoAccountPassword)
 	}
 
 	resp, err := client.GetAppStoreReviewDetail(ctx, detailID)
@@ -525,10 +589,10 @@ func validateReviewDetailUpdateDemoCredentials(
 		return fmt.Errorf("review details-update: failed to fetch existing review details for demo credential validation: %w", err)
 	}
 
-	return validateReviewDetailDemoCredentialsWithExisting(resp.Data.Attributes, visited, demoAccountName, demoAccountPassword)
+	return validateReviewDetailDemoCredentialsWithExisting(d, resp.Data.Attributes, visited, demoAccountName, demoAccountPassword)
 }
 
-func validateReviewDetailDemoCredentialsWithExisting(
+func validateReviewDetailDemoCredentialsWithExisting(d *shared.Deps,
 	existing asc.AppStoreReviewDetailAttributes,
 	visited map[string]bool,
 	demoAccountName string,
@@ -542,24 +606,24 @@ func validateReviewDetailDemoCredentialsWithExisting(
 	if !visited["demo-account-password"] {
 		effectivePassword = strings.TrimSpace(existing.DemoAccountPassword)
 	}
-	return validateReviewDetailDemoCredentialValues(effectiveName, effectivePassword)
+	return validateReviewDetailDemoCredentialValues(d, effectiveName, effectivePassword)
 }
 
-func validateReviewDetailDemoCredentialValues(demoAccountName, demoAccountPassword string) error {
+func validateReviewDetailDemoCredentialValues(d *shared.Deps, demoAccountName, demoAccountPassword string) error {
 	if strings.TrimSpace(demoAccountName) == "" || strings.TrimSpace(demoAccountPassword) == "" {
-		fmt.Fprintln(os.Stderr, reviewDetailDemoCredentialsError)
+		fmt.Fprintln(d.IO.ErrOut, reviewDetailDemoCredentialsError)
 		return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticRequiredInputMissing, "")
 	}
 
-	return validateReviewDetailDemoPasswordLength(demoAccountPassword)
+	return validateReviewDetailDemoPasswordLength(d, demoAccountPassword)
 }
 
-func validateReviewDetailDemoPasswordLength(demoAccountPassword string) error {
+func validateReviewDetailDemoPasswordLength(d *shared.Deps, demoAccountPassword string) error {
 	if utf8.RuneCountInString(strings.TrimSpace(demoAccountPassword)) <= reviewDetailDemoPasswordMaxLength {
 		return nil
 	}
 
-	fmt.Fprintln(os.Stderr, reviewDetailDemoPasswordLengthError)
+	fmt.Fprintln(d.IO.ErrOut, reviewDetailDemoPasswordLengthError)
 	return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticInvalidInput, "--demo-account-password")
 }
 
@@ -574,19 +638,19 @@ var reviewDetailCreateContactFlags = []string{
 // validateReviewDetailInputValues checks the notes and contact phone the
 // command is about to send. App Store Connect otherwise rejects them only after
 // the request, without saying by how much the notes are over the limit.
-func validateReviewDetailInputValues(visited map[string]bool, notes, contactPhone string) error {
+func validateReviewDetailInputValues(d *shared.Deps, visited map[string]bool, notes, contactPhone string) error {
 	if visited["notes"] {
-		if err := validateReviewDetailNotesLength(notes); err != nil {
+		if err := validateReviewDetailNotesLength(d, notes); err != nil {
 			return err
 		}
 	}
 	if visited["contact-phone"] {
-		return validateReviewDetailContactPhone(contactPhone)
+		return validateReviewDetailContactPhone(d, contactPhone)
 	}
 	return nil
 }
 
-func validateReviewDetailNotesLength(notes string) error {
+func validateReviewDetailNotesLength(d *shared.Deps, notes string) error {
 	length := validation.ReviewNotesLength(notes)
 	if length <= validation.LimitReviewNotes {
 		return nil
@@ -603,14 +667,14 @@ func validateReviewDetailNotesLength(notes string) error {
 		formatReviewDetailCount(over),
 		unit,
 	)
-	return reportReviewDetailUsageError(shared.UsageErrorInvalidValue, shared.DiagnosticInvalidInput, "--notes", message)
+	return reportReviewDetailUsageError(d, shared.UsageErrorInvalidValue, shared.DiagnosticInvalidInput, "--notes", message)
 }
 
 // validateReviewDetailContactPhone rejects only +1 numbers whose digit count
 // cannot be a North American number. App Store Connect accepts numbers without
 // a plus sign and validates other country codes against numbering data the CLI
 // does not carry, so every other value is left to App Store Connect.
-func validateReviewDetailContactPhone(contactPhone string) error {
+func validateReviewDetailContactPhone(d *shared.Deps, contactPhone string) error {
 	count, ok := validation.NANPNationalDigitCount(contactPhone)
 	if !ok || count == validation.NANPNationalNumberDigits {
 		return nil
@@ -620,13 +684,13 @@ func validateReviewDetailContactPhone(contactPhone string) error {
 		count,
 		validation.NANPNationalNumberDigits,
 	)
-	return reportReviewDetailUsageError(shared.UsageErrorInvalidValue, shared.DiagnosticInvalidInput, "--contact-phone", message)
+	return reportReviewDetailUsageError(d, shared.UsageErrorInvalidValue, shared.DiagnosticInvalidInput, "--contact-phone", message)
 }
 
 // validateReviewDetailCreateContacts requires the contact fields App Store
 // Connect demands on a new review detail; it rejects the POST one missing field
 // at a time.
-func validateReviewDetailCreateContacts(visited map[string]bool, values map[string]string) error {
+func validateReviewDetailCreateContacts(d *shared.Deps, visited map[string]bool, values map[string]string) error {
 	var missing []string
 	for _, name := range reviewDetailCreateContactFlags {
 		if !visited[name] || strings.TrimSpace(values[name]) == "" {
@@ -640,13 +704,13 @@ func validateReviewDetailCreateContacts(visited map[string]bool, values map[stri
 		"review details-create needs %s; App Store Connect rejects a new review detail without them. To change a version that already has review details, use asc review details-update or --if-exists update.",
 		strings.Join(missing, " and "),
 	)
-	return reportReviewDetailUsageError(shared.UsageErrorMissingRequired, shared.DiagnosticRequiredInputMissing, missing[0], message)
+	return reportReviewDetailUsageError(d, shared.UsageErrorMissingRequired, shared.DiagnosticRequiredInputMissing, missing[0], message)
 }
 
 // reportReviewDetailUsageError prints one diagnostic line and returns a usage
 // error (exit 2) without the full usage page.
-func reportReviewDetailUsageError(kind shared.UsageErrorKind, code shared.DiagnosticCode, parameter, message string) error {
-	fmt.Fprintf(os.Stderr, "Error: %s\n", message)
+func reportReviewDetailUsageError(d *shared.Deps, kind shared.UsageErrorKind, code shared.DiagnosticCode, parameter, message string) error {
+	fmt.Fprintf(d.IO.ErrOut, "Error: %s\n", message)
 	return shared.WithDiagnostic(shared.NewReportedUsageError(kind, message), code, parameter)
 }
 

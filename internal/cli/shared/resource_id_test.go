@@ -32,6 +32,12 @@ func TestResourceIDFromValue(t *testing.T) {
 			want:         "2f1a3c4d",
 		},
 		{
+			name:         "enterprise self link",
+			value:        "https://api.enterprise.developer.apple.com/v1/certificates/2f1a3c4d",
+			resourceType: "certificates",
+			want:         "2f1a3c4d",
+		},
+		{
 			name:         "self link any type",
 			value:        "https://api.appstoreconnect.apple.com/v2/appStoreVersions/abc",
 			resourceType: "",
@@ -173,7 +179,7 @@ func TestAppIDFlagValue(t *testing.T) {
 		{value: "com.example.app", want: "com.example.app"},
 		{value: "https://api.appstoreconnect.apple.com/v1/apps/123456789", want: "123456789"},
 	} {
-		got, err := AppIDFlagValue(test.value)
+		got, err := DefaultDeps().AppIDFlagValue(test.value)
 		if err != nil {
 			t.Fatalf("AppIDFlagValue(%q) error: %v", test.value, err)
 		}
@@ -185,12 +191,12 @@ func TestAppIDFlagValue(t *testing.T) {
 	wrong := "https://api.appstoreconnect.apple.com/v1/builds/abc"
 	var err error
 	stderr := captureStderr(t, func() {
-		_, err = AppIDFlagValue(wrong)
+		_, err = DefaultDeps().AppIDFlagValue(wrong)
 	})
 	if err == nil || !IsReportedUsageError(err) {
 		t.Fatalf("error = %v, want reported usage error", err)
 	}
-	want := `Error: invalid value "` + wrong + `" for flag -app: expected a self-link of type apps, got builds`
+	want := `Error: invalid value "` + wrong + `" for flag --app: expected a self-link of type apps, got builds`
 	if strings.TrimSpace(stderr) != want {
 		t.Fatalf("stderr = %q, want %q", stderr, want)
 	}

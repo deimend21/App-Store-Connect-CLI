@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,14 +47,23 @@ func TestValidateTestOptions(t *testing.T) {
 			opts: TestOptions{Action: string(TestActionTestWithoutBuilding), XctestrunPath: "Demo.xctestrun", Destinations: []string{"generic/platform=iOS"}},
 		},
 		{
+			name: "package test",
+			opts: TestOptions{PackagePath: "DemoPackage", Scheme: "Demo", Destinations: []string{"generic/platform=iOS"}},
+		},
+		{
 			name:    "missing selector",
 			opts:    TestOptions{Scheme: "Demo", Destinations: []string{"generic/platform=iOS"}},
-			wantErr: "exactly one of --workspace or --project",
+			wantErr: "exactly one of --workspace, --project, or --package-path",
 		},
 		{
 			name:    "both selectors",
 			opts:    TestOptions{ProjectPath: "Demo.xcodeproj", WorkspacePath: "Demo.xcworkspace", Scheme: "Demo", Destinations: []string{"generic/platform=iOS"}},
-			wantErr: "exactly one of --workspace or --project",
+			wantErr: "exactly one of --workspace, --project, or --package-path",
+		},
+		{
+			name:    "package and project",
+			opts:    TestOptions{PackagePath: "DemoPackage", ProjectPath: "Demo.xcodeproj", Scheme: "Demo", Destinations: []string{"generic/platform=iOS"}},
+			wantErr: "exactly one of --workspace, --project, or --package-path",
 		},
 		{
 			name:    "missing destination",
@@ -74,6 +84,11 @@ func TestValidateTestOptions(t *testing.T) {
 			name:    "without building rejects project",
 			opts:    TestOptions{Action: string(TestActionTestWithoutBuilding), ProjectPath: "Demo.xcodeproj", XctestrunPath: "Demo.xctestrun", Destinations: []string{"generic/platform=iOS"}},
 			wantErr: "--project and --workspace cannot be used",
+		},
+		{
+			name:    "without building rejects package path",
+			opts:    TestOptions{Action: string(TestActionTestWithoutBuilding), PackagePath: "DemoPackage", XctestrunPath: "Demo.xctestrun", Destinations: []string{"generic/platform=iOS"}},
+			wantErr: "--package-path cannot be used",
 		},
 		{
 			name:    "without building rejects clean",
@@ -227,21 +242,6 @@ func TestNormalizeTestOptionsPreservesTestSelectorValues(t *testing.T) {
 	}
 }
 
-func TestBuildTestCommandOmitsDerivedDataForTestWithoutBuilding(t *testing.T) {
-	args := buildTestCommand(TestOptions{
-		Action:          string(TestActionTestWithoutBuilding),
-		XctestrunPath:   "Demo.xctestrun",
-		Destinations:    []string{"generic/platform=iOS"},
-		Configuration:   "Debug",
-		DerivedDataPath: "/tmp/DerivedData",
-	})
-	for index, arg := range args {
-		if arg == "-derivedDataPath" || arg == "-configuration" || (index > 0 && (args[index-1] == "-derivedDataPath" || args[index-1] == "-configuration")) {
-			t.Fatalf("argv = %#v, must not include build-only paths for test-without-building", args)
-		}
-	}
-}
-
 func TestValidateTestOptionsAuthenticationPassthroughValues(t *testing.T) {
 	base := TestOptions{
 		ProjectPath:   "Demo.xcodeproj",
@@ -385,6 +385,38 @@ func TestParseTestResultCasesPreservesDurationMilliseconds(t *testing.T) {
 	}
 }
 
+func TestParseTestResultCasesPreferNumericSeconds(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		fields string
+		wantMS int64
+	}{
+		{"localized", `"duration":"1秒","durationInSeconds":1.0637269020080566`, 1063},
+		{"zero seconds", `"duration":"1秒","durationInSeconds":0`, 0},
+		{"milliseconds first", `"durationMs":0,"durationInSeconds":1.5,"duration":"1秒"`, 0},
+		{"legacy duration", `"duration":"0.25s"`, 250},
+		{"null seconds", `"durationInSeconds":null,"duration":"0.25s"`, 250},
+	} {
+		for _, shape := range []struct {
+			name   string
+			format string
+		}{
+			{"flat", `[{"identifier":"Demo/test","status":"passed",%s}]`},
+			{"tree", `{"testNodes":[{"nodeType":"Test Case","nodeIdentifier":"Demo/test","result":"Passed",%s}]}`},
+		} {
+			t.Run(shape.name+"/"+tt.name, func(t *testing.T) {
+				cases, err := ParseTestResultCases([]byte(fmt.Sprintf(shape.format, tt.fields)))
+				if err != nil {
+					t.Fatalf("ParseTestResultCases() error = %v", err)
+				}
+				if len(cases) != 1 || cases[0].DurationMS != tt.wantMS {
+					t.Fatalf("cases = %+v, want one case with duration %dms", cases, tt.wantMS)
+				}
+			})
+		}
+	}
+}
+
 func TestParseTestResultSummaryPreservesDurationMilliseconds(t *testing.T) {
 	data := []byte(`{"totalTestCount":1,"passedTests":1,"failedTests":0,"skippedTests":0,"durationMs":17}`)
 	summary, err := ParseTestResultSummary(data)
@@ -467,6 +499,9 @@ func TestBuildTestCommandSupportsWithoutBuilding(t *testing.T) {
 		Destinations:     []string{"platform=iOS Simulator,name=iPhone 17 Pro"},
 		ResultBundlePath: "/tmp/App-tests.xcresult",
 		OnlyTesting:      []string{"AppTests/Smoke"},
+		// Build-only settings must not reach test-without-building.
+		Configuration:   "Debug",
+		DerivedDataPath: "/tmp/DerivedData",
 	}
 	want := []string{
 		"-destination", "platform=iOS Simulator,name=iPhone 17 Pro",
@@ -1026,7 +1061,7 @@ func TestTestRunsActionAndParsesResult(t *testing.T) {
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
 	var gotArgs []string
-	runXcodeTestCommand = func(_ context.Context, args []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, args []string, _ io.Writer) error {
 		gotArgs = append([]string(nil), args...)
 		for index, arg := range args {
 			if arg == "-resultBundlePath" && index+1 < len(args) {
@@ -1065,6 +1100,139 @@ func TestTestRunsActionAndParsesResult(t *testing.T) {
 	}
 }
 
+func TestTestCodeCoverageReportsLineCoverageWithoutChangingOutcome(t *testing.T) {
+	report := `[{"buildProductPath":"/x/DemoKit.framework/DemoKit","name":"DemoKit.framework","coveredLines":10,"executableLines":15,"lineCoverage":0.6666},{"buildProductPath":"/x/Demo.app/Demo","name":"Demo.app","coveredLines":20,"executableLines":25,"lineCoverage":0.8}]`
+	tests := []struct {
+		name         string
+		xccovScript  string
+		wantCoverage *Coverage
+		wantWarning  string
+	}{
+		{
+			name:        "report",
+			xccovScript: "printf '%s' '" + report + "'",
+			wantCoverage: &Coverage{LineCoverage: 0.75, CoveredLines: 30, ExecutableLines: 40, Targets: []Coverage{
+				{Name: "Demo.app", LineCoverage: 0.8, CoveredLines: 20, ExecutableLines: 25},
+				{Name: "DemoKit.framework", LineCoverage: 0.6666, CoveredLines: 10, ExecutableLines: 15},
+			}},
+		},
+		{name: "xccov fails", xccovScript: "echo no coverage data >&2; exit 1", wantWarning: "Warning: code coverage unavailable: "},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			originalRuntimeGOOS, originalLookPath, originalCommandContext := runtimeGOOS, lookPathFn, commandContextFn
+			originalRun, originalRead := runXcodeTestCommand, readTestResultSummaryFn
+			useLookPathAsTrustedResolver(t)
+			t.Cleanup(func() {
+				runtimeGOOS, lookPathFn, commandContextFn = originalRuntimeGOOS, originalLookPath, originalCommandContext
+				runXcodeTestCommand, readTestResultSummaryFn = originalRun, originalRead
+			})
+			runtimeGOOS = "darwin"
+			lookPathFn = func(tool string) (string, error) { return "/usr/bin/" + tool, nil }
+			commandContextFn = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+				if len(args) > 0 && args[0] == "xccov" {
+					return exec.CommandContext(ctx, "/bin/sh", "-c", test.xccovScript)
+				}
+				return exec.CommandContext(ctx, "true")
+			}
+			projectPath := filepath.Join(t.TempDir(), "Demo.xcodeproj")
+			if err := os.Mkdir(projectPath, 0o755); err != nil {
+				t.Fatalf("Mkdir() error = %v", err)
+			}
+			var gotArgs []string
+			runXcodeTestCommand = func(_ context.Context, _ string, args []string, _ io.Writer) error {
+				gotArgs = append([]string(nil), args...)
+				return os.Mkdir(args[slices.Index(args, "-resultBundlePath")+1], 0o755)
+			}
+			readTestResultSummaryFn = func(context.Context, string) (*TestSummary, error) {
+				return &TestSummary{Total: 1, Passed: 1}, nil
+			}
+			var log strings.Builder
+
+			result, err := Test(context.Background(), TestOptions{
+				ProjectPath:      projectPath,
+				Scheme:           "Demo",
+				Destinations:     []string{"platform=macOS"},
+				DerivedDataPath:  filepath.Join(t.TempDir(), "DerivedData"),
+				ResultBundlePath: filepath.Join(t.TempDir(), "Demo.xcresult"),
+				CodeCoverage:     true,
+				LogWriter:        &log,
+			})
+			if err != nil || !result.Success || result.ExitStatus == nil || *result.ExitStatus != 0 {
+				t.Fatalf("Test() = %+v, %v; want unchanged successful outcome", result, err)
+			}
+			if index := slices.Index(gotArgs, "-enableCodeCoverage"); index < 0 || gotArgs[index+1] != "YES" {
+				t.Fatalf("xcodebuild args = %#v, want -enableCodeCoverage YES", gotArgs)
+			}
+			if !reflect.DeepEqual(result.Coverage, test.wantCoverage) {
+				t.Fatalf("Coverage = %+v, want %+v", result.Coverage, test.wantCoverage)
+			}
+			if got := log.String(); (test.wantWarning == "") != (got == "") || !strings.HasPrefix(got, test.wantWarning) || strings.Count(got, "\n") > 1 {
+				t.Fatalf("log = %q, want warning %q", log.String(), test.wantWarning)
+			}
+		})
+	}
+}
+
+func TestTestRunsPackageFromItsDirectoryWithoutContainerArguments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a POSIX shell as the fake xcodebuild")
+	}
+	originalRuntimeGOOS := runtimeGOOS
+	originalLookPath := lookPathFn
+	originalCommandContext := commandContextFn
+	useLookPathAsTrustedResolver(t)
+	t.Cleanup(func() {
+		runtimeGOOS = originalRuntimeGOOS
+		lookPathFn = originalLookPath
+		commandContextFn = originalCommandContext
+	})
+	runtimeGOOS = "darwin"
+	lookPathFn = func(string) (string, error) { return "/usr/bin/xcodebuild", nil }
+	recordPath := filepath.Join(t.TempDir(), "invocation.txt")
+	commandContextFn = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		script := `pwd -P > "$0"; printf '%s\n' "$@" >> "$0"`
+		return exec.CommandContext(ctx, "/bin/sh", append([]string{"-c", script, recordPath}, args...)...)
+	}
+	packagePath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(packagePath, "Package.swift"), []byte("// swift-tools-version:6.0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	result, err := Test(context.Background(), TestOptions{
+		PackagePath:     packagePath,
+		Scheme:          "DemoPackage",
+		Action:          string(TestActionBuildForTesting),
+		Destinations:    []string{"platform=macOS"},
+		DerivedDataPath: filepath.Join(t.TempDir(), "DerivedData"),
+	})
+	if err != nil {
+		t.Fatalf("Test() error = %v", err)
+	}
+	if result.PackagePath != packagePath {
+		t.Fatalf("result.PackagePath = %q, want %q", result.PackagePath, packagePath)
+	}
+	recorded, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(recorded)), "\n")
+	wantDir, err := filepath.EvalSymlinks(packagePath)
+	if err != nil {
+		t.Fatalf("EvalSymlinks() error = %v", err)
+	}
+	if lines[0] != wantDir {
+		t.Fatalf("xcodebuild working directory = %q, want %q", lines[0], wantDir)
+	}
+	args := lines[1:]
+	if slices.Contains(args, "-project") || slices.Contains(args, "-workspace") {
+		t.Fatalf("xcodebuild args = %#v, want no -project or -workspace", args)
+	}
+	if !slices.Contains(args, "DemoPackage") || args[len(args)-1] != string(TestActionBuildForTesting) {
+		t.Fatalf("xcodebuild args = %#v, want scheme and build-for-testing action", args)
+	}
+}
+
 func TestTestRejectsFailedPostProcessingSummary(t *testing.T) {
 	originalRuntimeGOOS := runtimeGOOS
 	originalLookPath := lookPathFn
@@ -1089,7 +1257,7 @@ func TestTestRejectsFailedPostProcessingSummary(t *testing.T) {
 		t.Fatalf("Mkdir() error = %v", err)
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
-	runXcodeTestCommand = func(_ context.Context, args []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, args []string, _ io.Writer) error {
 		for index, arg := range args {
 			if arg == "-resultBundlePath" && index+1 < len(args) {
 				return os.Mkdir(args[index+1], 0o755)
@@ -1158,7 +1326,7 @@ func TestTestRejectsResultBundleSymlinkCreatedAfterPreflight(t *testing.T) {
 		t.Fatalf("Mkdir() error = %v", err)
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
-	runXcodeTestCommand = func(_ context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, _ []string, _ io.Writer) error {
 		return os.Symlink(filepath.Join(filepath.Dir(resultPath), "outside.xcresult"), resultPath)
 	}
 	readCalls := 0
@@ -1208,7 +1376,7 @@ func TestTestPreservesProcessFailureAndPartialSummary(t *testing.T) {
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
 	processErr := exec.Command("sh", "-c", "exit 65").Run()
-	runXcodeTestCommand = func(_ context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, _ []string, _ io.Writer) error {
 		if err := os.Mkdir(resultPath, 0o755); err != nil {
 			return err
 		}
@@ -1259,7 +1427,7 @@ func TestTestRecoversPartialSummaryWithFreshPostProcessingContextAfterCancellati
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	runXcodeTestCommand = func(_ context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, _ []string, _ io.Writer) error {
 		if err := os.Mkdir(resultPath, 0o755); err != nil {
 			return err
 		}
@@ -1330,7 +1498,7 @@ func TestTestOmitsExitStatusForContextCancellation(t *testing.T) {
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	runXcodeTestCommand = func(ctx context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(ctx context.Context, _ string, _ []string, _ io.Writer) error {
 		cancel()
 		<-ctx.Done()
 		return ctx.Err()
@@ -1379,7 +1547,7 @@ func TestTestOmitsExitStatusForResultPostProcessingFailure(t *testing.T) {
 		t.Fatalf("Mkdir() error = %v", err)
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
-	runXcodeTestCommand = func(_ context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, _ []string, _ io.Writer) error {
 		return os.Mkdir(resultPath, 0o755)
 	}
 	readTestResultSummaryFn = func(context.Context, string) (*TestSummary, error) {
@@ -1425,7 +1593,7 @@ func TestTestRetainsAggregateWhenCaseEnrichmentFails(t *testing.T) {
 		t.Fatalf("Mkdir() error = %v", err)
 	}
 	resultPath := filepath.Join(t.TempDir(), "Demo-tests.xcresult")
-	runXcodeTestCommand = func(_ context.Context, _ []string, _ io.Writer) error {
+	runXcodeTestCommand = func(_ context.Context, _ string, _ []string, _ io.Writer) error {
 		return os.Mkdir(resultPath, 0o755)
 	}
 	enrichmentErr := errors.New("tests enrichment unavailable")

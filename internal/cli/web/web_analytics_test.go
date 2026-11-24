@@ -10,11 +10,13 @@ import (
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
 func TestWebAnalyticsCommandHierarchy(t *testing.T) {
-	cmd := WebAnalyticsCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAnalyticsCommand(d)
 	if cmd.Name != "analytics" {
 		t.Fatalf("expected command name %q, got %q", "analytics", cmd.Name)
 	}
@@ -56,12 +58,12 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 	resolveErr := errors.New("stop before network call")
 	tests := []struct {
 		name  string
-		build func() *ffcli.Command
+		build func(*shared.Deps) *ffcli.Command
 		args  []string
 	}{
 		{
 			name:  "sources",
-			build: WebAnalyticsSourcesCommand,
+			build: newWebAnalyticsSourcesCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -71,15 +73,25 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "product-pages",
-			build: WebAnalyticsProductPagesCommand,
+			build: newWebAnalyticsProductPagesCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
 			},
 		},
 		{
+			name:  "experiments list",
+			build: newWebAnalyticsExperimentsListCommand,
+			args:  []string{"--apple-id", "user@example.com", "--app", "123456789"},
+		},
+		{
+			name:  "experiment results",
+			build: newWebAnalyticsExperimentResultsCommand,
+			args:  []string{"--apple-id", "user@example.com", "--experiment", "11111111-1111-1111-1111-111111111111"},
+		},
+		{
 			name:  "in-app-events",
-			build: WebAnalyticsInAppEventsCommand,
+			build: newWebAnalyticsInAppEventsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -89,7 +101,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "app-clips",
-			build: WebAnalyticsAppClipsCommand,
+			build: newWebAnalyticsAppClipsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -97,7 +109,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "campaigns",
-			build: WebAnalyticsCampaignsCommand,
+			build: newWebAnalyticsCampaignsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -107,7 +119,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "sales",
-			build: WebAnalyticsSalesCommand,
+			build: newWebAnalyticsSalesCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -117,7 +129,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "overview",
-			build: WebAnalyticsOverviewCommand,
+			build: newWebAnalyticsOverviewCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -127,7 +139,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "subscriptions",
-			build: WebAnalyticsSubscriptionsCommand,
+			build: newWebAnalyticsSubscriptionsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -137,7 +149,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "offers",
-			build: WebAnalyticsOffersCommand,
+			build: newWebAnalyticsOffersCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -145,7 +157,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "metrics",
-			build: WebAnalyticsMetricsCommand,
+			build: newWebAnalyticsMetricsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -156,7 +168,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "benchmarks",
-			build: WebAnalyticsBenchmarksCommand,
+			build: newWebAnalyticsBenchmarksCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -164,7 +176,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "retention",
-			build: WebAnalyticsRetentionCommand,
+			build: newWebAnalyticsRetentionCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -174,7 +186,7 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 		},
 		{
 			name:  "cohorts",
-			build: WebAnalyticsCohortsCommand,
+			build: newWebAnalyticsCohortsCommand,
 			args: []string{
 				"--apple-id", "user@example.com",
 				"--app", "app-1",
@@ -194,7 +206,8 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 				return nil, "", resolveErr
 			}
 
-			cmd := tt.build()
+			d, _, _ := newWebTestDeps()
+			cmd := tt.build(d)
 			if err := cmd.FlagSet.Parse(tt.args); err != nil {
 				t.Fatalf("parse error: %v", err)
 			}
@@ -211,8 +224,6 @@ func TestWebAnalyticsSubcommandsResolveSessionBeforeTimeoutContext(t *testing.T)
 }
 
 func TestWebAnalyticsOverviewCommandOutputsJSON(t *testing.T) {
-	_ = stubWebProgressLabels(t)
-
 	origResolveSession := resolveSessionFn
 	origGetOverview := getAnalyticsOverviewFn
 	t.Cleanup(func() {
@@ -237,7 +248,8 @@ func TestWebAnalyticsOverviewCommandOutputsJSON(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAnalyticsOverviewCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAnalyticsOverviewCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "app-1",
 		"--start", "2025-12-24",
@@ -247,7 +259,7 @@ func TestWebAnalyticsOverviewCommandOutputsJSON(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, _ := captureOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("exec error: %v", err)
 		}
@@ -265,8 +277,6 @@ func TestWebAnalyticsOverviewCommandOutputsJSON(t *testing.T) {
 }
 
 func TestWebAnalyticsSubscriptionsCommandTableIncludesSummaryLabels(t *testing.T) {
-	_ = stubWebProgressLabels(t)
-
 	origResolveSession := resolveSessionFn
 	origGetSubscriptions := getAnalyticsSubscriptionsSummaryFn
 	t.Cleanup(func() {
@@ -289,7 +299,8 @@ func TestWebAnalyticsSubscriptionsCommandTableIncludesSummaryLabels(t *testing.T
 		}, nil
 	}
 
-	cmd := WebAnalyticsSubscriptionsCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAnalyticsSubscriptionsCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "app-1",
 		"--start", "2025-12-24",
@@ -299,7 +310,7 @@ func TestWebAnalyticsSubscriptionsCommandTableIncludesSummaryLabels(t *testing.T
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, _ := captureOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("exec error: %v", err)
 		}
@@ -332,8 +343,6 @@ func TestAnalyticsPercentChangeStringUsesRatioValues(t *testing.T) {
 }
 
 func TestWebAnalyticsOverviewCommandTableUsesSectionedLayout(t *testing.T) {
-	_ = stubWebProgressLabels(t)
-
 	origResolveSession := resolveSessionFn
 	origGetOverview := getAnalyticsOverviewFn
 	t.Cleanup(func() {
@@ -358,7 +367,8 @@ func TestWebAnalyticsOverviewCommandTableUsesSectionedLayout(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAnalyticsOverviewCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAnalyticsOverviewCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "app-1",
 		"--start", "2025-12-24",
@@ -368,7 +378,7 @@ func TestWebAnalyticsOverviewCommandTableUsesSectionedLayout(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, _ := captureOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("exec error: %v", err)
 		}
@@ -386,7 +396,8 @@ func TestWebAnalyticsOverviewCommandTableUsesSectionedLayout(t *testing.T) {
 }
 
 func TestWebAnalyticsMetricsCommandRequiresMeasures(t *testing.T) {
-	cmd := WebAnalyticsMetricsCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAnalyticsMetricsCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "app-1",
 		"--start", "2025-12-24",
@@ -395,7 +406,7 @@ func TestWebAnalyticsMetricsCommandRequiresMeasures(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	_, stderr := captureOutput(t, func() {
+	_, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		err := cmd.Exec(context.Background(), nil)
 		if !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -407,8 +418,6 @@ func TestWebAnalyticsMetricsCommandRequiresMeasures(t *testing.T) {
 }
 
 func TestWebAnalyticsMetricsCommandOutputsJSON(t *testing.T) {
-	_ = stubWebProgressLabels(t)
-
 	origResolveSession := resolveSessionFn
 	origGetMeasures := getAnalyticsMeasuresFn
 	t.Cleanup(func() {
@@ -432,7 +441,8 @@ func TestWebAnalyticsMetricsCommandOutputsJSON(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAnalyticsMetricsCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAnalyticsMetricsCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "app-1",
 		"--start", "2025-12-24",
@@ -443,7 +453,7 @@ func TestWebAnalyticsMetricsCommandOutputsJSON(t *testing.T) {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, _ := captureOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("exec error: %v", err)
 		}

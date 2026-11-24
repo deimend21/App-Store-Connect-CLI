@@ -14,6 +14,9 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
 
+// buildBundlesIncludeLimit is Apple's maximum for limit[buildBundles].
+const buildBundlesIncludeLimit = 50
+
 // ReadinessOptions defines inputs for App Store version readiness validation.
 type ReadinessOptions struct {
 	AppID     string
@@ -29,14 +32,15 @@ type ReadinessOptions struct {
 	IPA *LocalIPA
 }
 
-// BuildReadinessReport fetches live App Store Connect data and returns a
-// structured readiness report without printing output.
-func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validation.Report, error) {
-	client, err := clientFactory()
+// BuildReadinessReportWith fetches live App Store Connect data and returns a
+// structured readiness report without printing output. The client, request
+// timeout and clock come from d.
+func BuildReadinessReportWith(ctx context.Context, d *shared.Deps, opts ReadinessOptions) (validation.Report, error) {
+	client, err := d.Client()
 	if err != nil {
 		return validation.Report{}, err
 	}
-	ctx = withReadinessRequestGate(ctx)
+	ctx = withReadinessRequestGate(withReadinessRequestTimeout(ctx, d.Timeout))
 
 	resolvedVersionID := strings.TrimSpace(opts.VersionID)
 	if resolvedVersionID == "" {
@@ -99,13 +103,28 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 	pricingTerritories := []string(nil)
 	pricingCoverageSkipReason := ""
 	var screenshotSets []validation.ScreenshotSet
+	var mediaDelivery mediaDeliveryData
 	var subscriptions []validation.Subscription
 	subscriptionFetchSkipReason := ""
 	var iaps []validation.IAP
 	iapFetchSkipReason := ""
+	platform := strings.TrimSpace(opts.Platform)
+	if platform == "" {
+		platform = string(versionData.response.Data.Attributes.Platform)
+	}
+
+	var customProductPageLocalizations []validation.CustomProductPageLocalization
+	customProductPageKeywordsSkipReason := ""
+	var firstVersion *bool
 
 	if err := runReadinessTasks(
 		ctx,
+		func(taskCtx context.Context) error {
+			// Best effort: a failed read leaves firstVersion unknown, and the
+			// What's New check falls back to the version number.
+			firstVersion = readinessFirstVersion(taskCtx, client, opts.AppID, resolvedVersionID, platform)
+			return nil
+		},
 		func(taskCtx context.Context) error {
 			return resolveMultipleAppInfoAgeRating(
 				taskCtx,
@@ -117,6 +136,12 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		},
 		func(taskCtx context.Context) error {
 			return populateBuildEncryptionDeclaration(taskCtx, client, attachedBuild)
+		},
+		func(taskCtx context.Context) error {
+			if !validation.UploadRequirementApplies(platform) {
+				return nil
+			}
+			return populateBuildBundles(taskCtx, client, attachedBuild)
 		},
 		func(taskCtx context.Context) error {
 			priceScheduleResp, fetchErr := doReadinessRequest(taskCtx, func(requestCtx context.Context) (*asc.AppPriceScheduleResponse, error) {
@@ -133,7 +158,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 				return fmt.Errorf("failed to fetch app price schedule: %w", fetchErr)
 			}
 			priceScheduleID = priceScheduleResp.Data.ID
-			basePrice, fetchErr := pricing.FetchAppBasePriceStatus(taskCtx, client, priceScheduleID, runReadinessRequest)
+			basePrice, fetchErr := pricing.FetchAppBasePriceStatus(taskCtx, client, priceScheduleID, runReadinessRequest, d.Now)
 			switch {
 			case fetchErr != nil:
 				if errors.Is(fetchErr, context.Canceled) {
@@ -150,7 +175,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 				basePriceMissing = !basePrice.HasPrice
 			}
 			if opts.Deep {
-				hasPaidAppPrice, appPricingKnown = fetchCurrentAppPaidPricingEvidence(taskCtx, client, priceScheduleID)
+				hasPaidAppPrice, appPricingKnown = fetchCurrentAppPaidPricingEvidence(taskCtx, client, priceScheduleID, d.Now)
 			}
 			return nil
 		},
@@ -187,6 +212,11 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 			return fetchErr
 		},
 		func(taskCtx context.Context) error {
+			var fetchErr error
+			mediaDelivery, fetchErr = fetchMediaDelivery(taskCtx, client, versionData.localizations)
+			return fetchErr
+		},
+		func(taskCtx context.Context) error {
 			fetchedSubscriptions, fetchErr := fetchSubscriptionsFn(taskCtx, client, opts.AppID)
 			if fetchErr != nil {
 				switch {
@@ -203,9 +233,13 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 			return nil
 		},
 		func(taskCtx context.Context) error {
-			fetchedIAPs, fetchErr := fetchIAPsFn(taskCtx, client, opts.AppID)
+			fetchedIAPs, fetchErr := fetchIAPsFn(taskCtx, client, opts.AppID, opts.Deep)
 			if fetchErr != nil {
 				switch {
+				case taskCtx.Err() != nil:
+					return taskCtx.Err()
+				case opts.Deep:
+					iapFetchSkipReason = "The complete IAP catalog could not be verified through the public API"
 				case errors.Is(fetchErr, asc.ErrForbidden) || asc.IsUnauthorized(fetchErr):
 					iapFetchSkipReason = "IAP readiness checks were skipped because this App Store Connect account cannot read in-app purchase resources"
 				case asc.IsRetryable(fetchErr):
@@ -216,6 +250,34 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 				return nil
 			}
 			iaps = fetchedIAPs
+			return nil
+		},
+		func(taskCtx context.Context) error {
+			// Apple supports custom product pages only on iOS and iPadOS, which
+			// share the IOS version platform.
+			if !strings.EqualFold(platform, string(asc.PlatformIOS)) {
+				customProductPageKeywordsSkipReason = fmt.Sprintf("Custom product page keyword checks were skipped because custom product pages apply only to iOS and iPadOS, and this version's platform is %s", platform)
+				return nil
+			}
+			fetched, fetchErr := fetchCustomProductPageKeywords(taskCtx, client, opts.AppID)
+			if fetchErr != nil {
+				// The keyword check is advisory, so any failure other than
+				// cancellation reads as unverified instead of aborting validation.
+				switch {
+				case taskCtx.Err() != nil:
+					return taskCtx.Err()
+				case errors.Is(fetchErr, context.Canceled):
+					return fetchErr
+				case errors.Is(fetchErr, asc.ErrForbidden) || asc.IsUnauthorized(fetchErr):
+					customProductPageKeywordsSkipReason = "Custom product page keyword checks were skipped because this App Store Connect account cannot read custom product pages"
+				case asc.IsRetryable(fetchErr):
+					customProductPageKeywordsSkipReason = "Custom product page keyword checks were skipped because the App Store Connect custom product page endpoints were temporarily unavailable or rate limited"
+				default:
+					customProductPageKeywordsSkipReason = fmt.Sprintf("Custom product page keyword checks were skipped because App Store Connect custom product page data could not be read: %v", fetchErr)
+				}
+				return nil
+			}
+			customProductPageLocalizations = fetched
 			return nil
 		},
 	); err != nil {
@@ -253,6 +315,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 			Subtitle:          attrs.Subtitle,
 			PrivacyPolicyURL:  attrs.PrivacyPolicyURL,
 			PrivacyChoicesURL: attrs.PrivacyChoicesURL,
+			PrivacyPolicyText: attrs.PrivacyPolicyText,
 		})
 	}
 	sort.SliceStable(appInfoLocalizations, func(i, j int) bool {
@@ -262,12 +325,8 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		return appInfoLocalizations[i].ID < appInfoLocalizations[j].ID
 	})
 
-	platform := strings.TrimSpace(opts.Platform)
-	if platform == "" {
-		platform = string(versionData.response.Data.Attributes.Platform)
-	}
-
 	var supportsIPad *bool
+	buildSDKName := ""
 	if opts.IPA != nil {
 		if err := checkLocalIPAMatchesVersion(
 			opts.IPA,
@@ -280,6 +339,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		}
 		value := opts.IPA.SupportsIPad()
 		supportsIPad = &value
+		buildSDKName = opts.IPA.SDKName
 	}
 
 	report := validation.Validate(validation.Input{
@@ -288,6 +348,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		VersionID:                   resolvedVersionID,
 		VersionString:               versionData.response.Data.Attributes.VersionString,
 		VersionState:                shared.ResolveAppStoreVersionState(versionData.response.Data.Attributes),
+		FirstVersion:                firstVersion,
 		Platform:                    platform,
 		PrimaryLocale:               appInfoData.app.Attributes.PrimaryLocale,
 		VersionLocalizations:        versionLocalizations,
@@ -296,6 +357,7 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		PrimaryCategoryID:           appInfoData.primaryCategoryID,
 		ContentRightsDeclaration:    contentRightsDeclaration,
 		Build:                       attachedBuild,
+		BuildSDKName:                buildSDKName,
 		PriceScheduleID:             priceScheduleID,
 		PricingFetchSkipReason:      pricingFetchSkipReason,
 		BaseTerritory:               baseTerritory,
@@ -308,6 +370,9 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		AvailabilityFetchSkipReason: availabilityFetchSkipReason,
 		PricingCoverageSkipReason:   pricingCoverageSkipReason,
 		ScreenshotSets:              screenshotSets,
+		PreviewSets:                 mediaDelivery.previewSets,
+		MediaPlacements:             mediaDelivery.placements,
+		MediaReadGaps:               mediaDelivery.gaps,
 		SupportsIPad:                supportsIPad,
 		Subscriptions:               subscriptions,
 		SubscriptionFetchSkipReason: subscriptionFetchSkipReason,
@@ -319,11 +384,25 @@ func BuildReadinessReport(ctx context.Context, opts ReadinessOptions) (validatio
 		Copyright:                   versionData.response.Data.Attributes.Copyright,
 		HasPaidAppPrice:             hasPaidAppPrice,
 		AppPricingKnown:             appPricingKnown,
+
+		CustomProductPageLocalizations:      customProductPageLocalizations,
+		CustomProductPageKeywordsSkipReason: customProductPageKeywordsSkipReason,
 	}, opts.Strict)
+	if opts.Deep {
+		check, finding := collectIAPAttachmentDeepCheck(ctx, client, report, iaps, iapFetchSkipReason)
+		if ctx.Err() != nil {
+			return validation.Report{}, ctx.Err()
+		}
+		findings := []validation.CheckResult{}
+		if finding != nil {
+			findings = append(findings, *finding)
+		}
+		report = validation.ApplyDeepValidation(report, validation.DeepReport{Checks: []validation.DeepCheck{check}}, findings)
+	}
 	if opts.CheckURLs {
 		targets := validateURLTargets(versionLocalizations, appInfoLocalizations)
 		if len(targets) > 0 {
-			urlChecks, checkErr := checkValidateURLs(ctx, newValidateURLChecker(), targets)
+			urlChecks, checkErr := checkValidateURLs(ctx, newValidateURLChecker(d.HTTPTransport()), targets)
 			if checkErr != nil {
 				return validation.Report{}, checkErr
 			}
@@ -359,6 +438,45 @@ func populateBuildEncryptionDeclaration(ctx context.Context, client *asc.Client,
 
 	build.AppEncryptionDeclarationID = strings.TrimSpace(declarationResp.Data.ID)
 	build.AppEncryptionDeclarationState = strings.TrimSpace(string(declarationResp.Data.Attributes.AppEncryptionDeclarationState))
+	return nil
+}
+
+// populateBuildBundles reads the bundles behind the upload requirement check.
+// The result is evidence only, so a failed read is recorded on the build
+// instead of aborting the report.
+func populateBuildBundles(ctx context.Context, client *asc.Client, build *validation.Build) error {
+	if build == nil || client == nil || len(build.Bundles) > 0 || strings.TrimSpace(build.ID) == "" {
+		return nil
+	}
+
+	response, err := doReadinessRequest(ctx, func(requestCtx context.Context) (*asc.BuildBundlesResponse, error) {
+		return client.GetBuildBundlesForBuild(requestCtx, strings.TrimSpace(build.ID), asc.WithBuildBundlesLimit(buildBundlesIncludeLimit))
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		reason, ok := metadataCheckSkipReason(err, "build bundles")
+		if !ok {
+			reason = fmt.Sprintf("Validation skipped build bundles because their App Store Connect data could not be read: %v", err)
+		}
+		build.BundlesUnreadReason = reason
+		return nil
+	}
+
+	for _, bundle := range response.Data {
+		item := validation.BuildBundle{}
+		if bundle.Attributes.BundleType != nil {
+			item.Type = string(*bundle.Attributes.BundleType)
+		}
+		if bundle.Attributes.SDKBuild != nil {
+			item.SDKBuild = *bundle.Attributes.SDKBuild
+		}
+		build.Bundles = append(build.Bundles, item)
+	}
 	return nil
 }
 
@@ -404,4 +522,38 @@ func readinessAvailabilitySkipReason(err error) (string, bool) {
 		return "Review app availability in App Store Connect; readiness could not verify it automatically because the Pricing and Availability endpoints could not be reached", true
 	}
 	return "", false
+}
+
+// readinessFirstVersion reports whether versionID is the app's only App Store
+// version on platform, which App Store Connect treats as its first version
+// (no What's New). It returns nil when the answer is unknown: no platform, a
+// failed read, or more versions than one page holds.
+func readinessFirstVersion(ctx context.Context, client *asc.Client, appID, versionID, platform string) *bool {
+	appID, versionID, platform = strings.TrimSpace(appID), strings.TrimSpace(versionID), strings.TrimSpace(platform)
+	if appID == "" || versionID == "" || platform == "" {
+		return nil
+	}
+	resp, err := doReadinessRequest(ctx, func(requestCtx context.Context) (*asc.AppStoreVersionsResponse, error) {
+		return client.GetAppStoreVersions(requestCtx, appID,
+			asc.WithAppStoreVersionsPlatforms([]string{platform}),
+			asc.Limit[asc.AppStoreVersionsOption](200),
+		)
+	})
+	if err != nil || resp == nil {
+		return nil
+	}
+	first := strings.TrimSpace(resp.Links.Next) == ""
+	seen := false
+	for _, item := range resp.Data {
+		if item.ID == versionID {
+			seen = true
+			continue
+		}
+		first = false
+	}
+	if !seen && first {
+		// The listing does not hold the version being checked; don't guess.
+		return nil
+	}
+	return &first
 }

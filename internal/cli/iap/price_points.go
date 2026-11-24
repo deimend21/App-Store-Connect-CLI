@@ -4,19 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/ascterritory"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-// IAPPricePointsCommand returns the canonical pricing price points command group.
-func IAPPricePointsCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("price-points", flag.ExitOnError)
+// newIAPPricePointsCommand returns the canonical pricing price points command group.
+func newIAPPricePointsCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("price-points", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "price-points",
@@ -28,10 +26,10 @@ Examples:
   asc iap pricing price-points list --iap-id "IAP_ID"
   asc iap pricing price-points equalizations --id "PRICE_POINT_ID"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			IAPPricePointsListCommand(),
-			IAPPricePointsEqualizationsCommand(),
+			newIAPPricePointsListCommand(d),
+			newIAPPricePointsEqualizationsCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -39,20 +37,22 @@ Examples:
 	}
 }
 
-// IAPPricePointsListCommand returns the price points list subcommand.
-func IAPPricePointsListCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("price-points list", flag.ExitOnError)
+// newIAPPricePointsListCommand returns the price points list subcommand.
+func newIAPPricePointsListCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("price-points list", flag.ExitOnError)
 
 	iapID := shared.BindResourceIDFlag(fs, "iap-id", "inAppPurchases", "In-app purchase ID, product ID, or exact current name")
 	appID := addIAPLookupAppFlag(fs)
-	territory := fs.String("territory", "", "Territory input (accepts alpha-2, alpha-3, or exact English country name)")
+	territory := fs.String("territory", "", "Territory filter, comma-separated (accepts alpha-2, alpha-3, or exact English country name)")
+	include := fs.String("include", "", "Relationships to include (comma-separated): territory")
+	includedFields := shared.BindIncludedFieldFlags(fs, map[string]string{"territory": "territories"})
 	price := fs.String("price", "", "Filter by exact customer price (e.g., 4.99)")
 	minPrice := fs.String("min-price", "", "Filter by minimum customer price")
 	maxPrice := fs.String("max-price", "", "Filter by maximum customer price")
-	limit := fs.Int("limit", 0, "Maximum results per page (1-200)")
-	next := fs.String("next", "", "Fetch next page using a links.next URL")
-	paginate := fs.Bool("paginate", false, "Automatically fetch all pages (aggregate results)")
-	output := shared.BindOutputFlags(fs)
+	limit := fs.Int("limit", 0, shared.LimitFlagUsage(200))
+	next := fs.String("next", "", shared.NextFlagUsage)
+	paginate := fs.Bool("paginate", false, shared.PaginateFlagUsage)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "list",
@@ -61,23 +61,39 @@ func IAPPricePointsListCommand() *ffcli.Command {
 		LongHelp: `List price points for an in-app purchase.
 
 Use --price to find a specific customer price, or --min-price/--max-price for
-a range. These filters are applied client-side after fetching.
+a range. These filters are applied client-side and read every page, so they
+cover the whole ladder with or without --paginate.
+
+--territory accepts several territories. Use --include territory to return each
+price point's territory and currency.
 
 Examples:
   asc iap pricing price-points list --iap-id "IAP_ID"
   asc iap pricing price-points list --iap-id "IAP_ID" --territory "United States"
+  asc iap pricing price-points list --iap-id "IAP_ID" --territory "DEU,GBR" --include territory --paginate
+  asc iap pricing price-points list --iap-id "IAP_ID" --territory "USA" --price "4.99"
   asc iap pricing price-points list --iap-id "IAP_ID" --territory "FR" --paginate --price "4.99"
   asc iap pricing price-points list --iap-id "IAP_ID" --paginate`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if *limit != 0 && (*limit < 1 || *limit > 200) {
-				return shared.UsageError("iap price-points list: --limit must be between 1 and 200")
+			if err := d.ValidatePaginationFlags(ctx, fs, "iap pricing price-points list", 200, "territory", "include"); err != nil {
+				return err
 			}
-			if err := shared.ValidateNextURL(*next); err != nil {
-				return shared.UsageErrorf("iap price-points list: %v", err)
+
+			iapValue := strings.TrimSpace(*iapID)
+			if iapValue == "" && strings.TrimSpace(*next) == "" {
+				return d.RequiredFlag("--iap-id")
 			}
-			if err := shared.RejectNextFlagConflicts(fs, *next, "iap price-points list", "territory"); err != nil {
+
+			includes := shared.SplitCSV(*include)
+			for _, value := range includes {
+				if value != "territory" {
+					return d.UsageError("--include must be: territory")
+				}
+			}
+			included, err := includedFields.ResolveWith(d, "iap price-points list", *next, includes)
+			if err != nil {
 				return err
 			}
 
@@ -87,52 +103,48 @@ Examples:
 				MaxPrice: strings.TrimSpace(*maxPrice),
 			}
 			if err := priceFilter.Validate(); err != nil {
-				return shared.UsageError(err.Error())
+				return d.UsageError(err.Error())
 			}
 
-			iapValue := strings.TrimSpace(*iapID)
-			if iapValue == "" && strings.TrimSpace(*next) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --iap-id is required")
-				return shared.MissingRequiredUsageError("--iap-id")
-			}
-
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("iap price-points list: %w", err)
 			}
 
 			if strings.TrimSpace(*next) == "" {
-				iapValue, err = resolveIAPLookupIDWithTimeout(ctx, client, *appID, iapValue)
+				iapValue, err = resolveIAPLookupIDWithTimeout(ctx, d, client, *appID, iapValue)
 				if err != nil {
 					return err
 				}
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
-			defer cancel()
-
 			opts := []asc.IAPPricePointsOption{
-				asc.WithIAPPricePointsLimit(*limit),
-				asc.WithIAPPricePointsNextURL(*next),
+				asc.Limit[asc.IAPPricePointsOption](*limit),
+				asc.NextURL[asc.IAPPricePointsOption](*next),
+				asc.WithIAPPricePointsInclude(includes),
+				asc.WithIncludedFields[asc.IAPPricePointsOption](included),
 			}
-			territoryID := strings.TrimSpace(*territory)
-			if territoryID != "" {
-				territoryID, err = ascterritory.Normalize(territoryID)
-				if err != nil {
-					return shared.UsageError(err.Error())
-				}
-				opts = append(opts, asc.WithIAPPricePointsTerritory(territoryID))
+			territoryIDs, err := shared.NormalizeASCTerritoryCSV(*territory)
+			if err != nil {
+				return d.UsageError(err.Error())
+			}
+			if len(territoryIDs) > 0 {
+				opts = append(opts, asc.WithIAPPricePointsTerritory(strings.Join(territoryIDs, ",")))
 			}
 
-			if *paginate {
-				paginateOpts := append(opts, asc.WithIAPPricePointsLimit(200))
-				firstPage, err := client.GetInAppPurchasePricePoints(requestCtx, iapValue, paginateOpts...)
+			if *paginate || (priceFilter.HasFilter() && strings.TrimSpace(*next) == "") {
+				paginateOpts := append(opts, asc.Limit[asc.IAPPricePointsOption](8000))
+				firstPageCtx, firstPageCancel := d.Timeout(ctx)
+				firstPage, err := client.GetInAppPurchasePricePoints(firstPageCtx, iapValue, paginateOpts...)
+				firstPageCancel()
 				if err != nil {
 					return fmt.Errorf("iap price-points list: failed to fetch: %w", err)
 				}
 
-				resp, err := asc.PaginateAll(requestCtx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-					return client.GetInAppPurchasePricePoints(ctx, iapValue, asc.WithIAPPricePointsNextURL(nextURL))
+				resp, err := asc.PaginateAll(ctx, firstPage, func(_ context.Context, nextURL string) (asc.PaginatedResponse, error) {
+					pageCtx, pageCancel := d.Timeout(ctx)
+					defer pageCancel()
+					return client.GetInAppPurchasePricePoints(pageCtx, iapValue, asc.NextURL[asc.IAPPricePointsOption](nextURL))
 				})
 				if err != nil {
 					return fmt.Errorf("iap price-points list: %w", err)
@@ -141,13 +153,15 @@ Examples:
 				if priceFilter.HasFilter() {
 					if typed, ok := resp.(*asc.InAppPurchasePricePointsResponse); ok {
 						filterIAPPricePoints(typed, priceFilter)
-						return shared.PrintOutput(typed, *output.Output, *output.Pretty)
+						return d.PrintOutput(typed, *output.Output, *output.Pretty)
 					}
 				}
 
-				return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+				return d.PrintOutput(resp, *output.Output, *output.Pretty)
 			}
 
+			requestCtx, cancel := d.Timeout(ctx)
+			defer cancel()
 			resp, err := client.GetInAppPurchasePricePoints(requestCtx, iapValue, opts...)
 			if err != nil {
 				return fmt.Errorf("iap price-points list: failed to fetch: %w", err)
@@ -157,7 +171,7 @@ Examples:
 				filterIAPPricePoints(resp, priceFilter)
 			}
 
-			return shared.PrintOutput(resp, *output.Output, *output.Pretty)
+			return d.PrintOutput(resp, *output.Output, *output.Pretty)
 		},
 	}
 }
@@ -173,9 +187,10 @@ func filterIAPPricePoints(resp *asc.InAppPurchasePricePointsResponse, pf shared.
 	resp.Data = filtered
 }
 
-// IAPPricePointsEqualizationsCommand returns the price point equalizations subcommand.
-func IAPPricePointsEqualizationsCommand() *ffcli.Command {
+// newIAPPricePointsEqualizationsCommand returns the price point equalizations subcommand.
+func newIAPPricePointsEqualizationsCommand(d *shared.Deps) *ffcli.Command {
 	return shared.BuildPricePointEqualizationsCommand(shared.PricePointEqualizationsCommandConfig{
+		Deps:        d,
 		FlagSetName: "price-points equalizations",
 		Name:        "equalizations",
 		ShortUsage:  `asc iap pricing price-points equalizations --id "PRICE_POINT_ID"`,
@@ -185,10 +200,12 @@ func IAPPricePointsEqualizationsCommand() *ffcli.Command {
 		ParentUsage: "In-app purchase price point ID",
 		LimitMax:    8000,
 		ErrorPrefix: "iap price-points equalizations",
-		FetchPage: func(ctx context.Context, client *asc.Client, pricePointID string, limit int, next string) (asc.PaginatedResponse, error) {
+		FetchPage: func(ctx context.Context, client *asc.Client, pricePointID string, limit int, next string, include []string, included asc.IncludedFields) (asc.PaginatedResponse, error) {
 			opts := []asc.IAPPricePointsOption{
-				asc.WithIAPPricePointsLimit(limit),
-				asc.WithIAPPricePointsNextURL(next),
+				asc.Limit[asc.IAPPricePointsOption](limit),
+				asc.NextURL[asc.IAPPricePointsOption](next),
+				asc.WithIAPPricePointsInclude(include),
+				asc.WithIncludedFields[asc.IAPPricePointsOption](included),
 			}
 			return client.GetInAppPurchasePricePointEqualizations(ctx, pricePointID, opts...)
 		},

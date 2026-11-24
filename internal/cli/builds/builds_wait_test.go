@@ -126,9 +126,16 @@ func TestWaitForBuildProcessingStateToleratesTransientLookupFailures(t *testing.
 
 	var buildResp *asc.BuildResponse
 	var err error
-	stderr := captureBuildsWaitStderr(t, func() {
-		buildResp, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
+	d := shared.DefaultDeps()
+	var depsStderr bytes.Buffer
+	d.IO.ErrOut = &depsStderr
+	processStderr := captureBuildsWaitStderr(t, func() {
+		buildResp, err = waitForBuildProcessingState(context.Background(), d, client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
 	})
+	if processStderr != "" {
+		t.Fatalf("process stderr = %q, want empty", processStderr)
+	}
+	stderr := depsStderr.String()
 	if err != nil {
 		t.Fatalf("waitForBuildProcessingState() error: %v", err)
 	}
@@ -159,7 +166,7 @@ func TestWaitForBuildProcessingStateFailsAfterConsecutiveTransientLimit(t *testi
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
 	})
 	if err == nil {
 		t.Fatal("expected error once transient failures exceed the ceiling, got nil")
@@ -194,7 +201,7 @@ func TestWaitForBuildProcessingStateReturnsTerminalFailure(t *testing.T) {
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -294,7 +301,7 @@ func TestWaitForBuildProcessingStateFailureIncludesProcessingDetails(t *testing.
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{}, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -386,7 +393,7 @@ func TestWaitForBuildProcessingStateFailurePrefersUploadLinkedToBuild(t *testing
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -459,7 +466,7 @@ func TestWaitForBuildProcessingStateFailureFallsBackWhenLinkedUploadLookupFails(
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -522,7 +529,7 @@ func TestWaitForBuildProcessingStateFailureLeavesStateErrorWhenFallbackIsAmbiguo
 			})
 			var err error
 			captureBuildsWaitStderr(t, func() {
-				_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{AppID: "app-1"}, nil)
+				_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{AppID: "app-1"}, nil)
 			})
 			if err == nil {
 				t.Fatal("expected terminal FAILED error, got nil")
@@ -567,7 +574,7 @@ func TestWaitForBuildProcessingStateFailureSkipsUploadMatchWithUnknownMarketingV
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -623,7 +630,7 @@ func TestWaitForBuildProcessingStateFailureSkipsAppLookupWhenSelectorProvidesApp
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -689,7 +696,7 @@ func TestWaitForBuildProcessingStateFailurePrefersBuildReportedVersionAndPlatfor
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+		_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 	})
 	if err == nil {
 		t.Fatal("expected terminal FAILED error, got nil")
@@ -798,7 +805,7 @@ func TestWaitForBuildProcessingStateFailureKeepsStateErrorWhenDetailsUnavailable
 
 			var err error
 			captureBuildsWaitStderr(t, func() {
-				_, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, false, failureContext, nil)
+				_, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, false, failureContext, nil)
 			})
 			if err == nil {
 				t.Fatal("expected terminal FAILED error, got nil")
@@ -859,7 +866,7 @@ func TestWaitForBuildProcessingStateFailureKeepsStateErrorWhenDetailsOutlastDead
 		synctest.Test(t, func(*testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
-			_, err = waitForBuildProcessingState(ctx, client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{AppID: "app-1"}, nil)
+			_, err = waitForBuildProcessingState(ctx, shared.DefaultDeps(), client, "build-1", time.Millisecond, false, shared.BuildProcessingFailureContext{AppID: "app-1"}, nil)
 		})
 	})
 	if err == nil {
@@ -937,7 +944,7 @@ func TestWaitForBuildProcessingStateInvalidFetchesDetailsOnlyWhenFailing(t *test
 			var buildResp *asc.BuildResponse
 			var err error
 			captureBuildsWaitStderr(t, func() {
-				buildResp, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, test.failOnInvalid, failureContext, nil)
+				buildResp, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, test.failOnInvalid, failureContext, nil)
 			})
 
 			if !test.wantErr {
@@ -997,7 +1004,7 @@ func TestWaitForBuildProcessingStateValidSkipsProcessingDetails(t *testing.T) {
 	var buildResp *asc.BuildResponse
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		buildResp, err = waitForBuildProcessingState(context.Background(), client, "build-1", time.Millisecond, true, failureContext, nil)
+		buildResp, err = waitForBuildProcessingState(context.Background(), shared.DefaultDeps(), client, "build-1", time.Millisecond, true, failureContext, nil)
 	})
 	if err != nil {
 		t.Fatalf("waitForBuildProcessingState() error: %v", err)
@@ -1042,9 +1049,16 @@ func TestWaitForBuildDiscoveryToleratesTransientLookupFailures(t *testing.T) {
 
 	var buildResp *asc.BuildResponse
 	var err error
-	stderr := captureBuildsWaitStderr(t, func() {
-		buildResp, err = waitForBuildDiscovery(context.Background(), client, selector, time.Millisecond, nil)
+	d := shared.DefaultDeps()
+	var depsStderr bytes.Buffer
+	d.IO.ErrOut = &depsStderr
+	processStderr := captureBuildsWaitStderr(t, func() {
+		buildResp, err = waitForBuildDiscovery(context.Background(), d, client, selector, time.Millisecond, nil)
 	})
+	if processStderr != "" {
+		t.Fatalf("process stderr = %q, want empty", processStderr)
+	}
+	stderr := depsStderr.String()
 	if err != nil {
 		t.Fatalf("waitForBuildDiscovery() error: %v", err)
 	}
@@ -1081,7 +1095,7 @@ func TestWaitForBuildDiscoveryFailsAfterConsecutiveTransientLimit(t *testing.T) 
 
 	var err error
 	captureBuildsWaitStderr(t, func() {
-		_, err = waitForBuildDiscovery(context.Background(), client, selector, time.Millisecond, nil)
+		_, err = waitForBuildDiscovery(context.Background(), shared.DefaultDeps(), client, selector, time.Millisecond, nil)
 	})
 	if err == nil {
 		t.Fatal("expected error once transient failures exceed the ceiling, got nil")
@@ -1113,6 +1127,7 @@ func TestResolveBuildByNumberSelectionSinceReportsCandidatesWithoutClaimingLater
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelectionSince(
 		context.Background(),
+		shared.DefaultDeps(),
 		client,
 		"123456789",
 		"42",
@@ -1157,7 +1172,8 @@ func TestResolveBuildByNumberSelectionSinceDoesNotClaimUninspectedNextPageMatche
 
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelectionSince(
-		context.Background(), client, "123456789", "42", "", "IOS",
+		context.Background(),
+		shared.DefaultDeps(), client, "123456789", "42", "", "IOS",
 		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
 	)
 	if err == nil {
@@ -1198,7 +1214,8 @@ func TestResolveBuildByNumberSelectionSinceRejectsRepeatedNextURL(t *testing.T) 
 
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelectionSince(
-		context.Background(), client, "123456789", "42", "", "IOS",
+		context.Background(),
+		shared.DefaultDeps(), client, "123456789", "42", "", "IOS",
 		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
 	)
 	if !errors.Is(err, asc.ErrRepeatedPaginationURL) {
@@ -1236,7 +1253,8 @@ func TestResolveBuildByNumberSelectionSinceRejectsEquivalentReorderedNextURL(t *
 
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelectionSince(
-		context.Background(), client, "123456789", "42", "", "IOS",
+		context.Background(),
+		shared.DefaultDeps(), client, "123456789", "42", "", "IOS",
 		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
 	)
 	if !errors.Is(err, asc.ErrRepeatedPaginationURL) {
@@ -1262,14 +1280,15 @@ func TestResolveBuildByNumberSelectionSinceStopsAtPageSafetyLimit(t *testing.T) 
 
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelectionSince(
-		context.Background(), client, "123456789", "42", "", "IOS",
+		context.Background(),
+		shared.DefaultDeps(), client, "123456789", "42", "", "IOS",
 		[]asc.BuildsOption{asc.WithBuildsVersion("42")}, &since, false,
 	)
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSinceMaxPages)) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSelectionMaxPages)) {
 		t.Fatalf("expected page safety limit error, got %v", err)
 	}
-	if calls != resolveBuildSinceMaxPages {
-		t.Fatalf("requests = %d, want %d before page-limit rejection", calls, resolveBuildSinceMaxPages)
+	if calls != resolveBuildSelectionMaxPages {
+		t.Fatalf("requests = %d, want %d before page-limit rejection", calls, resolveBuildSelectionMaxPages)
 	}
 }
 
@@ -1289,6 +1308,7 @@ func TestResolveBuildByNumberSelectionSinceBoundsPreReleaseVersionPagination(t *
 	since := time.Date(2026, 3, 2, 17, 0, 0, 0, time.UTC)
 	_, err := resolveBuildByNumberSelection(
 		context.Background(),
+		shared.DefaultDeps(),
 		client,
 		buildNumberSelectionOptions{
 			AppID:       "123456789",
@@ -1299,10 +1319,64 @@ func TestResolveBuildByNumberSelectionSinceBoundsPreReleaseVersionPagination(t *
 		},
 		false,
 	)
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSinceMaxPages)) {
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("%d-page safety limit", resolveBuildSelectionMaxPages)) {
 		t.Fatalf("expected pre-release pagination safety-limit error, got %v", err)
 	}
-	if preReleaseCalls != resolveBuildSinceMaxPages {
-		t.Fatalf("pre-release requests = %d, want %d before page-limit rejection", preReleaseCalls, resolveBuildSinceMaxPages)
+	if preReleaseCalls != resolveBuildSelectionMaxPages {
+		t.Fatalf("pre-release requests = %d, want %d before page-limit rejection", preReleaseCalls, resolveBuildSelectionMaxPages)
+	}
+}
+
+func TestResolveBuildByNumberSelectionFollowsEmptyPages(t *testing.T) {
+	const (
+		next          = "https://api.appstoreconnect.apple.com/v1/builds?cursor=NEXT"
+		emptyWithNext = `{"data":[],"links":{"next":"` + next + `"}}`
+		found         = `{"data":[{"type":"builds","id":"build-42","attributes":{"version":"42"}}]`
+	)
+	for _, tc := range []struct {
+		name       string
+		nextStatus int
+		nextBody   string
+		wantErr    string
+	}{
+		{name: "match after empty page", nextStatus: http.StatusOK, nextBody: found + `}`},
+		{name: "match with more pages stays ambiguous", nextStatus: http.StatusOK, nextBody: found + `,"links":{"next":"https://api.appstoreconnect.apple.com/v1/builds?cursor=UNREAD"}}`, wantErr: "listed builds are a sample"},
+		{name: "loop", nextStatus: http.StatusOK, nextBody: emptyWithNext, wantErr: "repeated pagination URL"},
+		{name: "continuation failed", nextStatus: http.StatusBadRequest, nextBody: `{"errors":[{"code":"BAD_REQUEST","detail":"continuation failed"}]}`, wantErr: "continuation failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			client := newBuildsWaitTestClient(t, func(req *http.Request) (*http.Response, error) {
+				calls++
+				switch calls {
+				case 1:
+					if req.URL.Query().Get("filter[version]") != "42" || req.URL.Query().Get("filter[preReleaseVersion.platform]") != "IOS" {
+						t.Fatalf("missing exact selector on %s", req.URL)
+					}
+					return buildsWaitJSONResponse(http.StatusOK, emptyWithNext)
+				case 2:
+					if req.URL.String() != next {
+						t.Fatalf("continuation = %s, want %s", req.URL, next)
+					}
+					return buildsWaitJSONResponse(tc.nextStatus, tc.nextBody)
+				default:
+					t.Fatalf("unexpected request %s", req.URL)
+					return nil, nil
+				}
+			})
+			got, err := resolveBuildByNumberSelection(context.Background(), shared.DefaultDeps(), client, buildNumberSelectionOptions{
+				AppID: "123456789", BuildNumber: "42", Platform: "IOS",
+			}, false)
+			if tc.wantErr != "" {
+				if got != nil || err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("got build=%v, error=%v, want %q", got, err, tc.wantErr)
+				}
+			} else if err != nil || got == nil || got.Data.ID != "build-42" {
+				t.Fatalf("got build=%v, error=%v, want build-42", got, err)
+			}
+			if calls != 2 {
+				t.Fatalf("requests = %d, want 2", calls)
+			}
+		})
 	}
 }

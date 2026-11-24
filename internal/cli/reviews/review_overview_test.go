@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	validatecli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/validate"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/validation"
 )
@@ -71,6 +72,33 @@ func TestBuildReviewStatusResultMissingVersion(t *testing.T) {
 	}
 	if len(result.Blockers) != 1 {
 		t.Fatalf("expected one blocker, got %d", len(result.Blockers))
+	}
+}
+
+// TestStaleReviewSubmissionNextActionNamesDraftItems checks that status and
+// doctor name the subscription items a reusable draft holds: submitting the
+// draft sends them to App Review with the version, so the advice must say so
+// and how to remove one first.
+func TestStaleReviewSubmissionNextActionNamesDraftItems(t *testing.T) {
+	snapshot := reviewSnapshot{
+		AppID:                 "123456789",
+		Version:               &reviewVersionContext{ID: "ver-1", Version: "1.2.3", Platform: "IOS", State: "DEVELOPER_REJECTED"},
+		ReviewDetailID:        "detail-1",
+		LatestSubmission:      &reviewSubmissionContext{ID: "review-sub-1", State: "COMPLETE"},
+		SubmissionItems:       &reviewSubmissionItemsContext{TotalCount: 1, RemovedCount: 1},
+		DraftSubmissionID:     "draft-1",
+		DraftHoldsOnlyVersion: true,
+		DraftStagedItems: []asc.ReviewSubmissionReceiptItem{
+			{Type: "subscriptionVersions", ID: "sub-ver-1", ReviewSubmissionItemID: "item-s"},
+		},
+	}
+	want := "Reuse draft review submission \"draft-1\": run `asc review items add --submission \"draft-1\" --item-type appStoreVersions --item-id \"ver-1\" --if-exists skip`, then `asc review submissions-submit --id \"draft-1\" --confirm`. It also holds subscriptionVersions sub-ver-1 (review item item-s), which go to App Review with it; to leave one out, first run `asc review items remove --id \"ITEM_ID\" --confirm`."
+
+	if got := buildReviewStatusResult(snapshot).NextAction; got != want {
+		t.Fatalf("status next action = %q, want %q", got, want)
+	}
+	if got := buildReviewDoctorResult(snapshot, validation.Report{}).NextAction; got != want {
+		t.Fatalf("doctor next action = %q, want %q", got, want)
 	}
 }
 
@@ -177,6 +205,28 @@ func TestBuildReviewDoctorResultAddsSyntheticUnresolvedIssuesBlocker(t *testing.
 	if result.NextAction == "" {
 		t.Fatal("expected next action")
 	}
+	// The remediation must name the asc commands for this submission, not
+	// send the user back to App Store Connect, and must not suggest a cancel
+	// App Store Connect refuses in this state.
+	for _, check := range result.BlockingChecks {
+		if check.ID != "review.submission.unresolved_issues" {
+			continue
+		}
+		for _, want := range []string{
+			`asc web review show --app "123456789" --submission "review-sub-1"`,
+			`asc review submissions-submit --id "review-sub-1" --confirm`,
+		} {
+			if !strings.Contains(check.Remediation, want) {
+				t.Fatalf("expected unresolved issues remediation to contain %q, got %q", want, check.Remediation)
+			}
+		}
+		// App Store Connect refuses to cancel an UNRESOLVED_ISSUES submission.
+		if strings.Contains(check.Remediation, "submissions-cancel") {
+			t.Fatalf("expected unresolved issues remediation not to suggest canceling, got %q", check.Remediation)
+		}
+		return
+	}
+	t.Fatal("expected unresolved issues blocker")
 }
 
 func TestBuildReviewDoctorResultAddsRemovedItemsOnlyBlocker(t *testing.T) {
@@ -296,9 +346,9 @@ func TestRenderReviewDoctorDisclosesWebOnlyCoverage(t *testing.T) {
 		{name: "markdown", markdown: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			output := captureReviewStdout(t, func() {
-				renderReviewDoctor(result, test.markdown)
-			})
+			d, stdout, _ := newReviewTestDeps(nil)
+			renderReviewDoctor(d, result, test.markdown)
+			output := stdout.String()
 			for _, want := range []string{
 				"Coverage Warnings",
 				"review.coverage.app_store_regulations_and_permits",
@@ -312,36 +362,6 @@ func TestRenderReviewDoctorDisclosesWebOnlyCoverage(t *testing.T) {
 			}
 		})
 	}
-}
-
-func captureReviewStdout(t *testing.T, fn func()) string {
-	t.Helper()
-
-	oldStdout := os.Stdout
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("create stdout pipe: %v", err)
-	}
-	os.Stdout = writer
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = reader.Close()
-		_ = writer.Close()
-	})
-
-	done := make(chan []byte, 1)
-	go func() {
-		output, _ := io.ReadAll(reader)
-		done <- output
-	}()
-
-	fn()
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close stdout writer: %v", err)
-	}
-	os.Stdout = oldStdout
-
-	return string(<-done)
 }
 
 func TestBuildReviewOverviewResultsExposeReviewDetailConfiguredState(t *testing.T) {
@@ -610,14 +630,12 @@ func TestReviewDoctorUsesTimedContextForReadinessReport(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
 
 	origBuilder := reviewReadinessReportBuilder
-	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
 		reviewReadinessReportBuilder = origBuilder
-		http.DefaultTransport = origTransport
 	})
 
 	builderCalled := false
-	reviewReadinessReportBuilder = func(ctx context.Context, opts validatecli.ReadinessOptions) (validation.Report, error) {
+	reviewReadinessReportBuilder = func(ctx context.Context, _ *shared.Deps, opts validatecli.ReadinessOptions) (validation.Report, error) {
 		builderCalled = true
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("expected readiness report builder to receive timeout-bound context")
@@ -628,7 +646,11 @@ func TestReviewDoctorUsesTimedContextForReadinessReport(t *testing.T) {
 		}, nil
 	}
 
-	http.DefaultTransport = reviewRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
+	if err := os.WriteFile(keyPath, []byte(os.Getenv("ASC_PRIVATE_KEY")), 0o600); err != nil {
+		t.Fatalf("write test key: %v", err)
+	}
+	transport := reviewRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
 		case "/v1/appStoreVersions/ver-1":
 			if req.URL.Query().Get("include") != "app" {
@@ -659,7 +681,10 @@ func TestReviewDoctorUsesTimedContextForReadinessReport(t *testing.T) {
 		}
 	})
 
-	cmd := ReviewDoctorCommand()
+	d, _, _ := newReviewTestDeps(func() (*asc.Client, error) {
+		return asc.NewClientWithHTTPClient("KEY_ID", "ISSUER_ID", keyPath, &http.Client{Transport: transport})
+	})
+	cmd := newReviewDoctorCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.FlagSet.Parse([]string{"--app", "123456789", "--version-id", "ver-1"}); err != nil {
 		t.Fatalf("parse flags: %v", err)
@@ -669,5 +694,81 @@ func TestReviewDoctorUsesTimedContextForReadinessReport(t *testing.T) {
 	}
 	if !builderCalled {
 		t.Fatal("expected readiness report builder to be called")
+	}
+}
+
+func TestSelectReusableDraftReviewSubmission(t *testing.T) {
+	submission := func(id string, state asc.ReviewSubmissionState, versionID string) asc.ReviewSubmissionResource {
+		resource := asc.ReviewSubmissionResource{
+			ID:         id,
+			Attributes: asc.ReviewSubmissionAttributes{SubmissionState: state},
+		}
+		if versionID != "" {
+			resource.Relationships = &asc.ReviewSubmissionRelationships{
+				AppStoreVersionForReview: &asc.Relationship{
+					Data: asc.ResourceData{ID: versionID, Type: asc.ResourceTypeAppStoreVersions},
+				},
+			}
+		}
+		return resource
+	}
+
+	tests := []struct {
+		name        string
+		submissions []asc.ReviewSubmissionResource
+		versionID   string
+		want        string
+	}{
+		{
+			name: "empty draft is reused",
+			submissions: []asc.ReviewSubmissionResource{
+				submission("complete-1", asc.ReviewSubmissionStateComplete, "ver-1"),
+				submission("draft-1", asc.ReviewSubmissionStateReadyForReview, ""),
+			},
+			versionID: "ver-1",
+			want:      "draft-1",
+		},
+		{
+			name: "draft holding the version wins over an empty draft",
+			submissions: []asc.ReviewSubmissionResource{
+				submission("draft-empty", asc.ReviewSubmissionStateReadyForReview, ""),
+				submission("draft-ver", asc.ReviewSubmissionStateReadyForReview, "ver-1"),
+			},
+			versionID: "ver-1",
+			want:      "draft-ver",
+		},
+		{
+			name: "draft for another version is not reused",
+			submissions: []asc.ReviewSubmissionResource{
+				submission("draft-other", asc.ReviewSubmissionStateReadyForReview, "ver-2"),
+			},
+			versionID: "ver-1",
+			want:      "",
+		},
+		{
+			name: "submissions past the draft state are ignored",
+			submissions: []asc.ReviewSubmissionResource{
+				submission("waiting-1", asc.ReviewSubmissionStateWaitingForReview, ""),
+				submission("unresolved-1", asc.ReviewSubmissionStateUnresolvedIssues, "ver-1"),
+			},
+			versionID: "ver-1",
+			want:      "",
+		},
+		{
+			name: "no version selected",
+			submissions: []asc.ReviewSubmissionResource{
+				submission("draft-1", asc.ReviewSubmissionStateReadyForReview, ""),
+			},
+			versionID: "",
+			want:      "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := selectReusableDraftReviewSubmission(test.submissions, test.versionID); got != test.want {
+				t.Fatalf("selectReusableDraftReviewSubmission() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

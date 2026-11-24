@@ -4,12 +4,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/builds"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	submitcli "github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/submit"
@@ -27,21 +27,23 @@ type reviewSubmitResult struct {
 	AlreadySubmitted bool                             `json:"alreadySubmitted,omitempty"`
 	WouldSubmit      bool                             `json:"wouldSubmit,omitempty"`
 	BuildAttachment  *submitcli.BuildAttachmentResult `json:"buildAttachment,omitempty"`
-	Messages         []string                         `json:"messages,omitempty"`
+	// ReviewItems lists every item submitted (or, with --dry-run, to be
+	// submitted) to App Review, the version first.
+	ReviewItems []asc.ReviewSubmissionReceiptItem `json:"reviewItems,omitempty"`
+	Messages    []string                          `json:"messages,omitempty"`
 }
 
-// ReviewSubmitCommand returns the high-level review submit command.
-func ReviewSubmitCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("submit", flag.ExitOnError)
+func newReviewSubmitCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("submit", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID)")
 	version := fs.String("version", "", "App Store version string")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
 	platform := fs.String("platform", "IOS", "Platform: IOS, MAC_OS, TV_OS, VISION_OS")
-	build := builds.BindVersionBuildSelector(fs)
+	build := builds.BindVersionBuildSelectorWith(d, fs)
 	confirm := fs.Bool("confirm", false, "Confirm submission (required unless --dry-run)")
 	dryRun := fs.Bool("dry-run", false, "Preview the review submission flow without mutating")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "submit",
@@ -59,17 +61,25 @@ Select the build with --build-id, or with --build-number or --latest, which
 only match builds of the version's app, version string, and platform. A
 selected build must be VALID; --wait waits for processing first.
 
+When the version is already in a draft review submission that also holds
+subscription or subscription group versions (for example staged with
+` + "`asc web review subscriptions attach --review-items`" + `), submitting the draft
+sends those items to App Review too. The command names each one on stderr
+before submitting (and with --dry-run), with how to remove it first, and the
+JSON receipt lists every submitted item in reviewItems, with named false for
+the items the command line did not name.
+
 Examples:
   asc review submit --app "123456789" --version "1.2.3" --build-id "BUILD_ID" --confirm
   asc review submit --app "123456789" --version "1.2.3" --build-number "45" --confirm
   asc review submit --app "123456789" --version "1.2.3" --build-number "46" --wait --confirm
   asc review submit --app "123456789" --version-id "VERSION_ID" --build-id "BUILD_ID" --dry-run`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			resolvedAppID := shared.ResolveAppID(*appID)
+			resolvedAppID := d.ResolveAppID(*appID)
 			if resolvedAppID == "" {
-				fmt.Fprintln(os.Stderr, "Error: --app is required (or set ASC_APP_ID)")
+				fmt.Fprintln(d.IO.ErrOut, "Error: --app is required (or set ASC_APP_ID)")
 				return shared.MissingRequiredUsageError("--app")
 			}
 
@@ -77,15 +87,14 @@ Examples:
 				return err
 			}
 			if strings.TrimSpace(*version) == "" && strings.TrimSpace(*versionID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --version or --version-id is required")
+				fmt.Fprintln(d.IO.ErrOut, "Error: --version or --version-id is required")
 				return shared.MissingRequiredUsageError("")
 			}
 			if strings.TrimSpace(*version) != "" && strings.TrimSpace(*versionID) != "" {
-				return shared.WithDiagnostic(shared.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
+				return shared.WithDiagnostic(d.UsageError("--version and --version-id are mutually exclusive"), shared.DiagnosticConflictingInput, "")
 			}
-			if !*confirm && !*dryRun {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required unless --dry-run is set")
-				return shared.MissingRequiredUsageError("--confirm")
+			if err := d.RequireConfirmUnlessDryRun(*dryRun, *confirm); err != nil {
+				return err
 			}
 
 			visited := map[string]bool{}
@@ -97,17 +106,17 @@ Examples:
 			if strings.TrimSpace(*version) != "" || visited["platform"] {
 				normalizedPlatform, err := shared.NormalizeAppStoreVersionPlatform(*platform)
 				if err != nil {
-					return shared.WithDiagnostic(shared.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
+					return shared.WithDiagnostic(d.UsageError(err.Error()), shared.DiagnosticInvalidInput, "--platform")
 				}
 				requestedPlatform = normalizedPlatform
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("review submit: %w", err)
 			}
 
-			lookupCtx, lookupCancel := shared.ContextWithTimeout(ctx)
+			lookupCtx, lookupCancel := d.Timeout(ctx)
 			defer lookupCancel()
 
 			resolvedVersionID := strings.TrimSpace(*versionID)
@@ -148,7 +157,7 @@ Examples:
 				return fmt.Errorf("review submit: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			existingSubmissionID, err := submitcli.LookupExistingSubmissionForVersion(requestCtx, client, resolvedVersionID, 0)
@@ -166,15 +175,18 @@ Examples:
 					SubmissionID:     existingSubmissionID,
 					AlreadySubmitted: true,
 				}
-				return printReviewSubmitResult(result, *output.Output, *output.Pretty)
+				return printReviewSubmitResult(d, result, *output.Output, *output.Pretty)
 			}
 
-			if err := submitcli.SubmissionLocalizationPreflight(requestCtx, client, resolvedAppID, resolvedVersionID, effectivePlatform, "asc review submit"); err != nil {
+			if err := submitcli.SubmissionLocalizationPreflightWith(requestCtx, d, client, resolvedAppID, resolvedVersionID, effectivePlatform, "asc review submit"); err != nil {
 				return fmt.Errorf("review submit: %w", err)
 			}
-			submitcli.SubmissionSubscriptionPreflight(requestCtx, client, resolvedAppID, "asc review submit")
+			if err := submitcli.SubmissionAgeRatingPreflightWith(requestCtx, d, client, resolvedAppID, resolvedVersionID, 0, "asc review submit"); err != nil {
+				return fmt.Errorf("review submit: %w", err)
+			}
+			submitcli.SubmissionSubscriptionPreflightWith(requestCtx, d, client, resolvedAppID, "asc review submit")
 
-			submitResult, err := submitcli.SubmitResolvedVersion(requestCtx, client, submitcli.SubmitResolvedVersionOptions{
+			submitResult, err := submitcli.SubmitResolvedVersionWith(requestCtx, d, client, submitcli.SubmitResolvedVersionOptions{
 				AppID:                    resolvedAppID,
 				VersionID:                resolvedVersionID,
 				BuildID:                  buildID,
@@ -183,7 +195,7 @@ Examples:
 				LookupExistingSubmission: false,
 				DryRun:                   *dryRun,
 				Emit: func(message string) {
-					fmt.Fprintln(os.Stderr, message)
+					fmt.Fprintln(d.IO.ErrOut, message)
 				},
 			})
 			if err != nil {
@@ -202,15 +214,16 @@ Examples:
 				AlreadySubmitted: submitResult.AlreadySubmitted,
 				WouldSubmit:      submitResult.WouldSubmit,
 				BuildAttachment:  submitResult.BuildAttachment,
+				ReviewItems:      submitResult.ReviewItems,
 				Messages:         submitResult.Messages,
 			}
 
-			return printReviewSubmitResult(result, *output.Output, *output.Pretty)
+			return printReviewSubmitResult(d, result, *output.Output, *output.Pretty)
 		},
 	}
 }
 
-func printReviewSubmitResult(result reviewSubmitResult, format string, pretty bool) error {
+func printReviewSubmitResult(d *shared.Deps, result reviewSubmitResult, format string, pretty bool) error {
 	headers := []string{"App ID", "Version ID", "Build ID", "Platform", "Submission ID", "Already Submitted", "Dry Run"}
 	rows := [][]string{{
 		result.AppID,
@@ -221,5 +234,5 @@ func printReviewSubmitResult(result reviewSubmitResult, format string, pretty bo
 		strconv.FormatBool(result.AlreadySubmitted),
 		strconv.FormatBool(result.DryRun),
 	}}
-	return shared.PrintOutputRows(result, format, pretty, headers, rows)
+	return d.PrintOutputRows(result, format, pretty, headers, rows)
 }

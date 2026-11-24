@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -23,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 type assetsUploadRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -234,6 +236,9 @@ func writeAssetsTestPNG(t *testing.T, dir, name string) string {
 			img.Set(x, y, color.RGBA{R: 10, G: 20, B: 30, A: 255})
 		}
 	}
+	// Distinct names get distinct pixels: uploads reject duplicate screenshots.
+	sum := crc32.ChecksumIEEE([]byte(name))
+	img.Set(0, 0, color.RGBA{R: byte(sum), G: byte(sum >> 8), B: byte(sum >> 16), A: 255})
 	if err := png.Encode(file, img); err != nil {
 		t.Fatalf("encode png: %v", err)
 	}
@@ -248,4 +253,8 @@ func fileSize(t *testing.T, path string) int64 {
 		t.Fatalf("stat file: %v", err)
 	}
 	return info.Size()
+}
+
+func uploadScreenshotsToSetFromRoot(ctx context.Context, client *asc.Client, setID string, files []string, sourceRootPath string, preserveExistingOrder bool) ([]asc.AssetUploadResultItem, error) {
+	return uploadScreenshotsToSetFromRootWithOpenedFiles(ctx, nil, shared.ContextWithTimeout, client, setID, files, sourceRootPath, preserveExistingOrder, nil)
 }

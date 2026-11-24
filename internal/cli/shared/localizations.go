@@ -187,13 +187,13 @@ func ValidateAppInfoLocalizationValueSet(valuesByLocale map[string]map[string]st
 
 type versionLocalizationClient interface {
 	GetAppStoreVersionLocalizations(context.Context, string, ...asc.AppStoreVersionLocalizationsOption) (*asc.AppStoreVersionLocalizationsResponse, error)
-	CreateAppStoreVersionLocalization(context.Context, string, asc.AppStoreVersionLocalizationAttributes) (*asc.AppStoreVersionLocalizationResponse, error)
+	CreateAppStoreVersionLocalization(context.Context, string, asc.AppStoreVersionLocalizationCreateAttributes) (*asc.AppStoreVersionLocalizationResponse, error)
 	UpdateAppStoreVersionLocalizationFields(context.Context, string, map[string]string) (*asc.AppStoreVersionLocalizationResponse, error)
 }
 
 type appInfoLocalizationClient interface {
 	GetAppInfoLocalizations(context.Context, string, ...asc.AppInfoLocalizationsOption) (*asc.AppInfoLocalizationsResponse, error)
-	CreateAppInfoLocalization(context.Context, string, asc.AppInfoLocalizationAttributes) (*asc.AppInfoLocalizationResponse, error)
+	CreateAppInfoLocalization(context.Context, string, asc.AppInfoLocalizationCreateAttributes) (*asc.AppInfoLocalizationResponse, error)
 	UpdateAppInfoLocalizationFields(context.Context, string, map[string]string) (*asc.AppInfoLocalizationResponse, error)
 }
 
@@ -429,21 +429,37 @@ func ReadLocalizationStrings(inputPath string, locales []string) (map[string]map
 	return values, nil
 }
 
-func UploadVersionLocalizations(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool) ([]asc.LocalizationUploadLocaleResult, error) {
-	results, _, err := UploadVersionLocalizationsWithWarnings(ctx, client, versionID, valuesByLocale, dryRun, SubmitReadinessOptions{})
+// UploadVersionLocalizations is UploadVersionLocalizationsWithWarnings without
+// the submit-readiness warnings, with the whatsNew retry warning written to d's
+// stderr.
+func (d *Deps) UploadVersionLocalizations(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool) ([]asc.LocalizationUploadLocaleResult, error) {
+	results, _, err := d.UploadVersionLocalizationsWithWarnings(ctx, client, versionID, valuesByLocale, dryRun, SubmitReadinessOptions{})
 	return results, err
 }
 
-func UploadVersionLocalizationsWithWarnings(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
+// UploadVersionLocalizationsWithWarnings validates valuesByLocale and uploads
+// the version localizations, returning the per-locale results and the
+// submit-readiness create warnings. The whatsNew retry warning goes to d's
+// stderr.
+func (d *Deps) UploadVersionLocalizationsWithWarnings(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
+	return uploadVersionLocalizationsWithWarningsTo(ctx, d.IO.ErrOut, client, versionID, valuesByLocale, dryRun, submitOpts)
+}
+
+func uploadVersionLocalizationsWithWarningsTo(ctx context.Context, stderr io.Writer, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
 	if err := ValidateVersionLocalizationValueSet(valuesByLocale); err != nil {
 		return nil, nil, err
 	}
-	return UploadPrevalidatedVersionLocalizationsWithWarnings(ctx, client, versionID, valuesByLocale, dryRun, submitOpts)
+	return uploadPrevalidatedVersionLocalizationsWithWarningsTo(ctx, stderr, client, versionID, valuesByLocale, dryRun, submitOpts)
 }
 
-// UploadPrevalidatedVersionLocalizationsWithWarnings uploads version localizations
-// after the caller has already validated the input value set.
-func UploadPrevalidatedVersionLocalizationsWithWarnings(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
+// UploadPrevalidatedVersionLocalizationsWithWarnings uploads version
+// localizations after the caller has already validated the input value set,
+// with the whatsNew retry warning written to d's stderr.
+func (d *Deps) UploadPrevalidatedVersionLocalizationsWithWarnings(ctx context.Context, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
+	return uploadPrevalidatedVersionLocalizationsWithWarningsTo(ctx, d.IO.ErrOut, client, versionID, valuesByLocale, dryRun, submitOpts)
+}
+
+func uploadPrevalidatedVersionLocalizationsWithWarningsTo(ctx context.Context, stderr io.Writer, client versionLocalizationClient, versionID string, valuesByLocale map[string]map[string]string, dryRun bool, submitOpts SubmitReadinessOptions) ([]asc.LocalizationUploadLocaleResult, []SubmitReadinessCreateWarning, error) {
 	existing, err := fetchAllVersionLocalizations(ctx, client, versionID)
 	if err != nil {
 		return nil, nil, err
@@ -483,7 +499,7 @@ func UploadPrevalidatedVersionLocalizationsWithWarnings(ctx context.Context, cli
 			id, reconciled, err := runLocalizationMutationWithReadback(
 				ctx,
 				func(requestCtx context.Context) (string, error) {
-					resp, err := client.CreateAppStoreVersionLocalization(requestCtx, versionID, attributes)
+					resp, err := client.CreateAppStoreVersionLocalization(requestCtx, versionID, attributes.CreateAttributes())
 					if err != nil {
 						return "", err
 					}
@@ -517,7 +533,7 @@ func UploadPrevalidatedVersionLocalizationsWithWarnings(ctx context.Context, cli
 				// A rejected whatsNew mutation is known not to have applied, so the
 				// documented initial-release fallback remains safe to send immediately.
 				if err != nil && strings.TrimSpace(updateFields["whatsNew"]) != "" && isWhatsNewUnsupportedError(err) {
-					fmt.Fprintln(os.Stderr, "Warning: 'whatsNew' cannot be set for this version (initial releases have no What's New section). Retrying without it.")
+					fmt.Fprintln(stderr, "Warning: 'whatsNew' cannot be set for this version (initial releases have no What's New section). Retrying without it.")
 					delete(updateFields, "whatsNew")
 					delete(probeValues, "whatsNew")
 					resp, err = client.UpdateAppStoreVersionLocalizationFields(requestCtx, existingID, updateFields)
@@ -577,7 +593,7 @@ func UploadAppInfoLocalizations(ctx context.Context, client appInfoLocalizationC
 			id, reconciled, err := runLocalizationMutationWithReadback(
 				ctx,
 				func(requestCtx context.Context) (string, error) {
-					resp, err := client.CreateAppInfoLocalization(requestCtx, appInfoID, attributes)
+					resp, err := client.CreateAppInfoLocalization(requestCtx, appInfoID, attributes.CreateAttributes())
 					if err != nil {
 						return "", err
 					}
@@ -660,7 +676,7 @@ func findMatchingAppInfoLocalization(ctx context.Context, client appInfoLocaliza
 
 func fetchAllVersionLocalizations(ctx context.Context, client versionLocalizationClient, versionID string) ([]asc.Resource[asc.AppStoreVersionLocalizationAttributes], error) {
 	firstPage, err := RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
-		return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+		return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	})
 	if err != nil {
 		return nil, err
@@ -674,7 +690,7 @@ func fetchAllVersionLocalizations(ctx context.Context, client versionLocalizatio
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		nextPage, err := RetryReadWithFreshTimeout(pageCtx, func(requestCtx context.Context) (*asc.AppStoreVersionLocalizationsResponse, error) {
-			return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+			return client.GetAppStoreVersionLocalizations(requestCtx, versionID, asc.NextURL[asc.AppStoreVersionLocalizationsOption](nextURL))
 		})
 		if err != nil {
 			return nil, err
@@ -696,7 +712,7 @@ func fetchAllVersionLocalizations(ctx context.Context, client versionLocalizatio
 
 func fetchAllAppInfoLocalizations(ctx context.Context, client appInfoLocalizationClient, appInfoID string) ([]asc.Resource[asc.AppInfoLocalizationAttributes], error) {
 	firstPage, err := RetryReadWithFreshTimeout(ctx, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
-		return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsLimit(200))
+		return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.Limit[asc.AppInfoLocalizationsOption](200))
 	})
 	if err != nil {
 		return nil, err
@@ -710,7 +726,7 @@ func fetchAllAppInfoLocalizations(ctx context.Context, client appInfoLocalizatio
 
 	paginated, err := asc.PaginateAll(ctx, firstPage, func(pageCtx context.Context, nextURL string) (asc.PaginatedResponse, error) {
 		nextPage, err := RetryReadWithFreshTimeout(pageCtx, func(requestCtx context.Context) (*asc.AppInfoLocalizationsResponse, error) {
-			return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.WithAppInfoLocalizationsNextURL(nextURL))
+			return client.GetAppInfoLocalizations(requestCtx, appInfoID, asc.NextURL[asc.AppInfoLocalizationsOption](nextURL))
 		})
 		if err != nil {
 			return nil, err
@@ -881,6 +897,17 @@ type localizationUploadFailureArtifact struct {
 // versioned retry artifact for failed locales. Artifact failures are retained
 // in the result so callers can print the batch before returning an error.
 func FinalizeLocalizationUploadResult(result *asc.LocalizationUploadResult, command string) {
+	finalizeLocalizationUploadResult(result, command, time.Now, WriteStreamToFile)
+}
+
+// FinalizeLocalizationUploadResult is FinalizeLocalizationUploadResult with
+// the retry artifact written relative to d's working directory and stamped
+// with d's clock.
+func (d *Deps) FinalizeLocalizationUploadResult(result *asc.LocalizationUploadResult, command string) {
+	finalizeLocalizationUploadResult(result, command, d.Now, d.WriteStreamToFile)
+}
+
+func finalizeLocalizationUploadResult(result *asc.LocalizationUploadResult, command string, now func() time.Time, write func(string, io.Reader) (int64, error)) {
 	if result == nil {
 		return
 	}
@@ -897,7 +924,7 @@ func FinalizeLocalizationUploadResult(result *asc.LocalizationUploadResult, comm
 	if result.Failed == 0 {
 		return
 	}
-	path, err := writeLocalizationUploadFailureArtifact(result, command)
+	path, err := writeLocalizationUploadFailureArtifact(result, command, now, write)
 	if err != nil {
 		result.FailureArtifactError = err.Error()
 		return
@@ -905,16 +932,15 @@ func FinalizeLocalizationUploadResult(result *asc.LocalizationUploadResult, comm
 	result.FailureArtifactPath = path
 }
 
-// RenderLocalizationUploadResult renders both the batch summary and per-locale
-// details so interactive output includes retry artifact information.
-func RenderLocalizationUploadResult(result *asc.LocalizationUploadResult, markdown bool) error {
+func renderLocalizationUploadResultTo(w io.Writer, result *asc.LocalizationUploadResult, markdown bool) error {
 	if result == nil {
 		return fmt.Errorf("localization upload result is nil")
 	}
-	render := asc.RenderTable
+	renderTo := asc.RenderTableTo
 	if markdown {
-		render = asc.RenderMarkdown
+		renderTo = asc.RenderMarkdownTo
 	}
+	render := func(headers []string, rows [][]string) { renderTo(w, headers, rows) }
 	render(
 		[]string{"Type", "Input Path", "Dry Run", "Total", "Succeeded", "Failed", "Failure Artifact", "Failure Artifact Error"},
 		[][]string{{
@@ -936,7 +962,7 @@ func RenderLocalizationUploadResult(result *asc.LocalizationUploadResult, markdo
 	return nil
 }
 
-func writeLocalizationUploadFailureArtifact(result *asc.LocalizationUploadResult, command string) (string, error) {
+func writeLocalizationUploadFailureArtifact(result *asc.LocalizationUploadResult, command string, now func() time.Time, write func(string, io.Reader) (int64, error)) (string, error) {
 	failures := make([]asc.LocalizationUploadLocaleResult, 0, result.Failed)
 	for _, item := range result.Results {
 		if item.Status == "failed" || item.Error != "" {
@@ -952,15 +978,15 @@ func writeLocalizationUploadFailureArtifact(result *asc.LocalizationUploadResult
 		AppInfoID:     result.AppInfoID,
 		InputPath:     result.InputPath,
 		Failed:        result.Failed,
-		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		GeneratedAt:   now().UTC().Format(time.RFC3339),
 		Results:       failures,
 	}
 	data, err := json.MarshalIndent(artifact, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(".asc", "reports", "localizations-upload", fmt.Sprintf("failures-%d.json", time.Now().UTC().UnixNano()))
-	if _, err := WriteStreamToFile(path, bytes.NewReader(data)); err != nil {
+	path := filepath.Join(".asc", "reports", "localizations-upload", fmt.Sprintf("failures-%d.json", now().UTC().UnixNano()))
+	if _, err := write(path, bytes.NewReader(data)); err != nil {
 		return "", err
 	}
 	return path, nil

@@ -476,8 +476,8 @@ func inspectEnvironment(options DoctorOptions) DoctorSection {
 	if keyTypeRaw != "" && !keyTypeValid {
 		checks = append(checks, DoctorCheck{
 			Status:         DoctorWarn,
-			Message:        "ASC_KEY_TYPE is invalid (expected team or individual)",
-			Recommendation: "Set ASC_KEY_TYPE to team or individual, or clear it",
+			Message:        "ASC_KEY_TYPE is invalid (expected team, individual, or enterprise)",
+			Recommendation: "Set ASC_KEY_TYPE to team, individual, or enterprise, or clear it",
 		})
 	}
 	if envProvided && !envComplete {
@@ -597,8 +597,8 @@ func inspectSelectedProfile(options DoctorOptions) *DoctorCheck {
 	if shape.invalidEnvironmentKeyType {
 		return &DoctorCheck{
 			Status:         DoctorFail,
-			Message:        fmt.Sprintf("Selected profile %q cannot use environment fallback: ASC_KEY_TYPE must be team or individual", profile),
-			Recommendation: "Set ASC_KEY_TYPE to team or individual, or update the selected profile so fallback is unnecessary",
+			Message:        fmt.Sprintf("Selected profile %q cannot use environment fallback: ASC_KEY_TYPE must be team, individual, or enterprise", profile),
+			Recommendation: "Set ASC_KEY_TYPE to team, individual, or enterprise, or update the selected profile so fallback is unnecessary",
 		}
 	}
 	if len(shape.missing) > 0 {
@@ -633,8 +633,8 @@ func inspectDefaultCredentialFallback(options DoctorOptions) *DoctorCheck {
 	if shape.invalidEnvironmentKeyType {
 		return &DoctorCheck{
 			Status:         DoctorFail,
-			Message:        "Default stored credentials cannot use environment fallback: ASC_KEY_TYPE must be team or individual",
-			Recommendation: "Set ASC_KEY_TYPE to team or individual, or complete the default stored credentials",
+			Message:        "Default stored credentials cannot use environment fallback: ASC_KEY_TYPE must be team, individual, or enterprise",
+			Recommendation: "Set ASC_KEY_TYPE to team, individual, or enterprise, or complete the default stored credentials",
 		}
 	}
 	if len(shape.missing) > 0 {
@@ -732,7 +732,7 @@ func completeEnvironmentCredentialsPreemptStored() bool {
 		decoded, err := base64.StdEncoding.DecodeString(compact)
 		return err == nil && len(decoded) > 0 && environmentPrivateKeyCanMaterialize(len(decoded))
 	case strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY")) != "":
-		normalized := strings.ReplaceAll(strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY")), `\n`, "\n")
+		normalized := NormalizePrivateKeyPEM(strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY")))
 		return environmentPrivateKeyCanMaterialize(len(normalized))
 	default:
 		return false
@@ -796,7 +796,7 @@ func inspectEnvironmentPrivateKey(options DoctorOptions) *DoctorCheck {
 	}
 
 	if value := strings.TrimSpace(os.Getenv("ASC_PRIVATE_KEY")); value != "" {
-		value = strings.ReplaceAll(value, `\n`, "\n")
+		value = NormalizePrivateKeyPEM(value)
 		if _, err := LoadPrivateKeyFromPEM([]byte(value)); err != nil {
 			return &DoctorCheck{
 				Status:         DoctorFail,

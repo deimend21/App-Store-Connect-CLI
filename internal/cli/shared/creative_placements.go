@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -16,78 +17,73 @@ import (
 
 var placementLocalizationID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-// CreativePlacementsCommand manages reusable library placements for a localization.
-func CreativePlacementsCommand(resource, prefix, label string) *ffcli.Command {
-	subcommands := []*ffcli.Command{creativePlacementsListCommand(resource, prefix, label), creativePlacementCreateCommand(resource, prefix, label)}
+// CreativePlacementsCommand manages reusable library placements for a
+// localization, with every subcommand built on d.
+func (d *Deps) CreativePlacementsCommand(resource, prefix, label string) *ffcli.Command {
+	subcommands := []*ffcli.Command{creativePlacementsListCommand(d, resource, prefix, label), creativePlacementViewCommand(d, prefix), creativePlacementCreateCommand(d, resource, prefix, label)}
 	// Official ordering requests accept version, CPP, and PPO parents only.
 	if resource != "appEventLocalizations" {
-		subcommands = append(subcommands, creativePlacementReorderCommand(resource, prefix, label))
+		subcommands = append(subcommands, creativePlacementReorderCommand(d, resource, prefix, label))
 	}
-	subcommands = append(subcommands, creativePlacementSwapCommand(resource, prefix, label), creativePlacementDeleteCommand(prefix))
-	return &ffcli.Command{Name: "placements", ShortHelp: "Manage localized asset library placements.", FlagSet: flag.NewFlagSet("placements", flag.ExitOnError), UsageFunc: DefaultUsageFunc, Subcommands: subcommands, Exec: func(context.Context, []string) error { return flag.ErrHelp }}
+	subcommands = append(subcommands, creativePlacementSwapCommand(d, resource, prefix, label), creativePlacementDeleteCommand(d, prefix))
+	return &ffcli.Command{Name: "placements", ShortHelp: "Manage localized asset library placements.", FlagSet: d.NewFlagSet("placements", flag.ExitOnError), UsageFunc: d.DefaultUsageFunc, Subcommands: subcommands, Exec: func(context.Context, []string) error { return flag.ErrHelp }}
 }
 
-func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Command {
-	fs := flag.NewFlagSet("placements list", flag.ExitOnError)
+func creativePlacementsListCommand(d *Deps, resource, prefix, label string) *ffcli.Command {
+	fs := d.NewFlagSet("placements list", flag.ExitOnError)
 	id := BindResourceIDFlag(fs, "localization-id", resource, label+" ID or API self-link")
-	listTypes := creativePlacementTypes(resource)
-	if resource == "appCustomProductPageLocalizations" {
-		listTypes = append(listTypes, "IMESSAGE_APP_SCREENSHOT")
-	}
+	listTypes := creativePlacementFilterTypes(resource)
 	kind := fs.String("placement-type", "", "Filter by placement types, comma-separated: "+strings.Join(listTypes, ", "))
 	group := fs.String("placement-group", "", "Filter by placement group IDs, comma-separated")
-	include := fs.String("include", "", "Include related media, comma-separated: image, video")
-	sort := fs.String("sort", "", "Sort by placementGroupPosition")
+	includeValues := []string{"image", "video", "appEventLocalization", "appStoreVersionLocalization", "appCustomProductPageLocalization", "appStoreVersionExperimentTreatmentLocalization", "retentionMessageVersion"}
+	include := fs.String("include", "", "Include related resources, comma-separated: "+strings.Join(includeValues, ", "))
+	includedFields := BindIncludedFieldFlags(fs, map[string]string{"image": "appAssetLibraryImages", "video": "appAssetLibraryVideos", "retentionMessageVersion": "retentionMessageVersions"})
+	filters := BindPlacementFilters(fs, resource)
 	limit := fs.Int("limit", 0, "Maximum results per page (1-200; 0 uses server default)")
-	next := fs.String("next", "", "Fetch a links.next URL instead of selecting a localization")
-	paginate := fs.Bool("paginate", false, "Fetch all pages and aggregate the collection")
-	output := BindOutputFlags(fs)
+	next := fs.String("next", "", NextFlagUsage)
+	paginate := fs.Bool("paginate", false, PaginateFlagUsage)
+	output := d.BindOutputFlags(fs)
 	return &ffcli.Command{
 		Name: "list", ShortHelp: "List asset placements for " + label + ".",
-		ShortUsage: "asc " + prefix + " placements list [flags]", FlagSet: fs, UsageFunc: DefaultUsageFunc,
-		LongHelp: "List asset placements for " + label + ". These placement reads are documented in Apple's published OpenAPI 4.5.1. Apple enforces availability and permissions for the selected localization. Empty data means no matching asset is assigned. JSON preserves Apple's full envelope and included media.\n\nExamples:\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[0] + "\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[1] + " --include image,video\n  asc " + prefix + " placements list --localization-id ID --paginate --output table",
+		ShortUsage: "asc " + prefix + " placements list [flags]", FlagSet: fs, UsageFunc: d.DefaultUsageFunc,
+		LongHelp: "List asset placements for " + label + ". These placement reads are documented in Apple's published OpenAPI 4.5.1. Apple enforces availability and permissions for the selected localization. Empty data means no matching asset is assigned. JSON preserves Apple's full envelope and included media. Filter and sort flags cannot be combined with --next.\n\nExamples:\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[0] + "\n  asc " + prefix + " placements list --localization-id ID --placement-type " + listTypes[1] + " --include image,video\n  asc " + prefix + " placements list --localization-id ID --paginate --output table\n  asc " + prefix + " placements list --localization-id ID --state FAILED --sort -lastModifiedDate",
 		Exec: func(ctx context.Context, args []string) error {
-			if len(args) != 0 {
-				return UsageErrorf(prefix+" placements list: unexpected argument %q", args[0])
-			}
 			if err := ValidateBoundOutputFlags(fs); err != nil {
-				return UsageErrorf(prefix+" placements list: %v", err)
+				return d.UsageErrorf(prefix+" placements list: %v", err)
 			}
-			if *limit < 0 || *limit > 200 {
-				return UsageError(prefix + " placements list: --limit must be between 1 and 200 (0 uses server default)")
-			}
-			if err := ValidateNextURL(*next); err != nil {
-				return UsageErrorf(prefix+" placements list: %v", err)
-			}
-			if err := RejectNextFlagConflicts(fs, *next, prefix+" placements list", "localization-id", "placement-type", "placement-group", "include", "sort", "limit"); err != nil {
+			if err := d.ValidatePaginationFlags(ctx, fs, prefix+" placements list", 200, append([]string{"placement-type", "placement-group", "include", "limit"}, filters.Names()...)...); err != nil {
 				return err
+			}
+			localizationID := strings.TrimSpace(*id)
+			if *next == "" && localizationID == "" {
+				return d.UsageError(prefix + " placements list: --localization-id is required")
 			}
 			kinds, err := validatedPlacementCSV(*kind, listTypes)
 			if err != nil {
-				return UsageErrorf(prefix+" placements list: --placement-type %v", err)
+				return d.UsageErrorf(prefix+" placements list: --placement-type %v", err)
 			}
 			groups, err := placementIDsCSV(*group)
 			if err != nil {
-				return UsageErrorf(prefix+" placements list: --placement-group %v", err)
+				return d.UsageErrorf(prefix+" placements list: --placement-group %v", err)
 			}
-			includes, err := validatedPlacementCSV(*include, []string{"image", "video"})
+			includes, err := validatedPlacementCSV(*include, includeValues)
 			if err != nil {
-				return UsageErrorf(prefix+" placements list: --include %v", err)
+				return d.UsageErrorf(prefix+" placements list: --include %v", err)
 			}
-			if *sort != "" && *sort != "placementGroupPosition" {
-				return UsageError(prefix + " placements list: --sort must be placementGroupPosition")
+			included, err := includedFields.ResolveWith(d, prefix+" placements list", *next, SplitCSV(includes))
+			if err != nil {
+				return err
+			}
+			q := url.Values{}
+			if err := filters.Apply(q); err != nil {
+				return d.UsageErrorf(prefix+" placements list: %v", err)
 			}
 			target := *next
 			if target == "" {
-				localizationID := strings.TrimSpace(*id)
-				if localizationID == "" {
-					return UsageError(prefix + " placements list: --localization-id is required")
-				}
 				if !placementLocalizationID.MatchString(localizationID) {
-					return UsageError(prefix + " placements list: --localization-id must be a resource ID")
+					return d.UsageError(prefix + " placements list: --localization-id must be a resource ID")
 				}
 				target = "/v1/" + resource + "/" + url.PathEscape(localizationID) + "/placements"
-				q := url.Values{}
 				if kinds != "" {
 					q.Set("filter[placementType]", kinds)
 				}
@@ -97,9 +93,7 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 				if includes != "" {
 					q.Set("include", includes)
 				}
-				if *sort != "" {
-					q.Set("sort", *sort)
-				}
+				included.AddTo(q)
 				pageLimit := *limit
 				if *paginate && pageLimit == 0 {
 					pageLimit = 200
@@ -111,15 +105,15 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 					target += "?" + q.Encode()
 				}
 			}
-			client, err := GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf(prefix+" placements list: %w", err)
 			}
 			var response []byte
 			if *paginate {
-				response, err = client.RawPaginatedGET(ctx, target, ContextWithTimeout)
+				response, err = client.RawPaginatedGET(ctx, target, d.Timeout)
 			} else {
-				requestCtx, cancel := ContextWithTimeout(ctx)
+				requestCtx, cancel := d.Timeout(ctx)
 				defer cancel()
 				response, err = client.RawRequest(requestCtx, "GET", target, nil)
 			}
@@ -130,7 +124,86 @@ func creativePlacementsListCommand(resource, prefix, label string) *ffcli.Comman
 			if err != nil {
 				return err
 			}
-			return PrintOutputRows(json.RawMessage(response), *output.Output, *output.Pretty, headers, rows)
+			return d.PrintOutputRows(json.RawMessage(response), *output.Output, *output.Pretty, headers, rows)
+		},
+	}
+}
+
+// creativePlacementFilterTypes returns Apple's filter[placementType] enum, with
+// the context's write types first. Reads are wider than writes: filter support
+// does not establish creation support.
+func creativePlacementFilterTypes(resource string) []string {
+	kinds := creativePlacementTypes(resource)
+	// The spec also lists RETENTION_MESSAGE_ASSET, but Apple returns 400 "is not a valid filter value" for it.
+	for _, kind := range []string{"PRODUCT_PAGE_HEADER_ASSET", "APP_STORE_SEARCH_RESULTS_ASSET", "APP_SCREENSHOT", "APP_PREVIEW", "IMESSAGE_APP_SCREENSHOT", "EVENT_CARD_ASSET", "EVENT_DETAILS_PAGE_ASSET", "SEARCH_RESULTS_ADS_ASSET", "TODAY_TAB_ADS_ASSET"} {
+		if !slices.Contains(kinds, kind) {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
+}
+
+// Enums for GET /v1/appAssetLibraryPlacements/{id}.
+var (
+	creativePlacementViewIncludes = []string{"image", "video", "appEventLocalization", "appStoreVersionLocalization", "appCustomProductPageLocalization", "appStoreVersionExperimentTreatmentLocalization", "retentionMessageVersion"}
+	creativePlacementViewFields   = []string{"mediaType", "placementType", "placementGroup", "createdDate", "lastModifiedDate", "state", "stateDetails", "image", "video", "appEventLocalization", "appStoreVersionLocalization", "appCustomProductPageLocalization", "appStoreVersionExperimentTreatmentLocalization", "retentionMessageVersion"}
+)
+
+func creativePlacementViewCommand(d *Deps, prefix string) *ffcli.Command {
+	fs := d.NewFlagSet("placements view", flag.ExitOnError)
+	id := BindResourceIDFlag(fs, "id", "appAssetLibraryPlacements", "Asset library placement ID or API self-link")
+	include := fs.String("include", "", "Include related resources, comma-separated: "+strings.Join(creativePlacementViewIncludes, ", "))
+	fields := fs.String("fields", "", "Placement fields to return, comma-separated: "+strings.Join(creativePlacementViewFields, ", "))
+	output := d.BindOutputFlags(fs)
+	return &ffcli.Command{
+		Name: "view", ShortHelp: "Read one asset placement by ID.",
+		ShortUsage: "asc " + prefix + " placements view --id ID [flags]", FlagSet: fs, UsageFunc: d.DefaultUsageFunc,
+		LongHelp: "Read one asset placement with the public GET endpoint. IDs are authoritative: Apple's endpoint has no localization parent, so this command does not check that the placement belongs to this command group's localization type. JSON preserves Apple's full envelope and included resources.\n\nExamples:\n  asc " + prefix + " placements view --id PLACEMENT_ID\n  asc " + prefix + " placements view --id PLACEMENT_ID --include image,video\n  asc " + prefix + " placements view --id PLACEMENT_ID --fields state,stateDetails --output table",
+		Exec: func(ctx context.Context, args []string) error {
+			if err := ValidateBoundOutputFlags(fs); err != nil {
+				return d.UsageErrorf(prefix+" placements view: %v", err)
+			}
+			placementID := strings.TrimSpace(*id)
+			if placementID == "" {
+				return d.UsageError(prefix + " placements view: --id is required")
+			}
+			if !creativePlacementID.MatchString(placementID) {
+				return d.UsageError(prefix + " placements view: --id must be a resource ID")
+			}
+			includes, err := validatedPlacementCSV(*include, creativePlacementViewIncludes)
+			if err != nil {
+				return d.UsageErrorf(prefix+" placements view: --include %v", err)
+			}
+			selectedFields, err := validatedPlacementCSV(*fields, creativePlacementViewFields)
+			if err != nil {
+				return d.UsageErrorf(prefix+" placements view: --fields %v", err)
+			}
+			target := "/v1/appAssetLibraryPlacements/" + url.PathEscape(placementID)
+			q := url.Values{}
+			if includes != "" {
+				q.Set("include", includes)
+			}
+			if selectedFields != "" {
+				q.Set("fields[appAssetLibraryPlacements]", selectedFields)
+			}
+			if len(q) > 0 {
+				target += "?" + q.Encode()
+			}
+			client, err := d.Client()
+			if err != nil {
+				return fmt.Errorf(prefix+" placements view: %w", err)
+			}
+			requestCtx, cancel := d.Timeout(ctx)
+			defer cancel()
+			response, err := client.RawRequest(requestCtx, "GET", target, nil)
+			if err != nil {
+				return fmt.Errorf(prefix+" placements view: %w", err)
+			}
+			headers, rows, err := asc.CreativePlacementResourceRows(response)
+			if err != nil {
+				return err
+			}
+			return d.PrintOutputRows(json.RawMessage(response), *output.Output, *output.Pretty, headers, rows)
 		},
 	}
 }

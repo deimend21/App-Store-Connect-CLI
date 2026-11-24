@@ -20,10 +20,7 @@ func TestWebAppGroupsAuthenticationFailureUsesAuthExit(t *testing.T) {
 	})
 	t.Cleanup(restoreDelete)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json")
 	if code != cmd.ExitAuth {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitAuth, stderr)
 	}
@@ -46,10 +43,7 @@ func TestWebAppGroupsPortalRefusalSanitizesStderr(t *testing.T) {
 	})
 	t.Cleanup(restoreDelete)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json")
 	if code != cmd.ExitError {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitError, stderr)
 	}
@@ -64,29 +58,6 @@ func TestWebAppGroupsPortalRefusalSanitizesStderr(t *testing.T) {
 	for _, preserved := range []string{"request-1", "forged-request", "Denied", "forged-message"} {
 		if !strings.Contains(stderr, preserved) {
 			t.Fatalf("stderr lost sanitized text %q: %q", preserved, stderr)
-		}
-	}
-}
-
-func TestWebAppGroupsMutationSubcommandsAreRegistered(t *testing.T) {
-	root := RootCommand("1.2.3")
-	tests := []struct {
-		path  []string
-		flags []string
-	}{
-		{path: []string{"web", "app-groups", "delete"}, flags: []string{"group-id", "confirm", "apple-id", "output"}},
-		{path: []string{"web", "app-groups", "unassign"}, flags: []string{"bundle-id", "group-id", "confirm", "apple-id", "output"}},
-		{path: []string{"web", "app-groups", "set"}, flags: []string{"bundle-id", "group", "confirm", "apple-id", "output"}},
-	}
-	for _, test := range tests {
-		sub := findSubcommand(root, test.path...)
-		if sub == nil {
-			t.Fatalf("expected %s to be registered", strings.Join(test.path, " "))
-		}
-		for _, flagName := range test.flags {
-			if sub.FlagSet.Lookup(flagName) == nil {
-				t.Fatalf("expected --%s flag on %s", flagName, strings.Join(test.path, " "))
-			}
 		}
 	}
 }
@@ -108,10 +79,10 @@ func TestWebAppGroupsMutationsRequireConfirmBeforeAnyRequest(t *testing.T) {
 	})
 	t.Cleanup(restoreSession)
 
-	assertUsageExit(t, []string{"web", "app-groups", "delete", "--group-id", "GROUP1"}, "Error: --confirm is required")
-	assertUsageExit(t, []string{"web", "app-groups", "unassign", "--group-id", "GROUP1", "--bundle-id", "bundle-1"}, "Error: --confirm is required")
-	assertUsageExit(t, []string{"web", "app-groups", "set", "--group", "GROUP1", "--bundle-id", "bundle-1"}, "Error: --confirm is required")
-	assertUsageExit(t, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--confirm"}, "Error: at least one --group is required")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "delete", "--group-id", "GROUP1"}, "Error: --confirm is required")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "unassign", "--group-id", "GROUP1", "--bundle-id", "bundle-1"}, "Error: --confirm is required")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "set", "--group", "GROUP1", "--bundle-id", "bundle-1"}, "Error: --confirm is required")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--confirm"}, "Error: at least one --group is required")
 }
 
 func TestWebAppGroupsSetRejectsBlankGroupBeforeAnyRequest(t *testing.T) {
@@ -127,8 +98,8 @@ func TestWebAppGroupsSetRejectsBlankGroupBeforeAnyRequest(t *testing.T) {
 	})
 	t.Cleanup(restoreSet)
 
-	assertUsageExit(t, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "GROUP1", "--group", "   ", "--confirm"}, "value cannot be empty")
-	assertUsageExit(t, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "", "--confirm"}, "value cannot be empty")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "GROUP1", "--group", "   ", "--confirm"}, "value cannot be empty")
+	assertUsageExitWithDeps(t, nil, []string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "", "--confirm"}, "value cannot be empty")
 }
 
 func TestWebAppGroupsDeleteAssignedGroupExitsNonZeroAndNamesAssignments(t *testing.T) {
@@ -144,10 +115,7 @@ func TestWebAppGroupsDeleteAssignedGroupExitsNonZeroAndNamesAssignments(t *testi
 	})
 	t.Cleanup(restoreDelete)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "app-groups", "delete", "--group-id", "GROUP1", "--confirm", "--output", "json")
 	if code != cmd.ExitError {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitError, stderr)
 	}
@@ -168,10 +136,7 @@ func TestWebAppGroupsSetNoOpReportsUnchanged(t *testing.T) {
 	})
 	t.Cleanup(restoreSet)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "GROUP1", "--group", "GROUP2", "--confirm", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "app-groups", "set", "--bundle-id", "bundle-1", "--group", "GROUP1", "--group", "GROUP2", "--confirm", "--output", "json")
 	if code != cmd.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitSuccess, stderr)
 	}
@@ -194,10 +159,7 @@ func TestWebAppGroupsUnassignReportsReceiptAndWarns(t *testing.T) {
 	})
 	t.Cleanup(restoreUnassign)
 
-	var code int
-	stdout, stderr := captureOutput(t, func() {
-		code = cmd.Run([]string{"web", "app-groups", "unassign", "--bundle-id", "bundle-1", "--group-id", "GROUP1", "--confirm", "--output", "json"}, "1.0.0")
-	})
+	stdout, stderr, code := runWithDeps(t, nil, "web", "app-groups", "unassign", "--bundle-id", "bundle-1", "--group-id", "GROUP1", "--confirm", "--output", "json")
 	if code != cmd.ExitSuccess {
 		t.Fatalf("exit code = %d, want %d; stderr=%q", code, cmd.ExitSuccess, stderr)
 	}

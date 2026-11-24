@@ -217,6 +217,12 @@ func TestDoctorEnvironmentValidatesSelectedPrivateKey(t *testing.T) {
 			forbiddenSecret: "not-a-private-key-secret",
 		},
 		{
+			name:        "flattened onto one line",
+			privateKey:  strings.ReplaceAll(strings.TrimSpace(string(validKey)), "\n", " "),
+			wantStatus:  DoctorOK,
+			wantMessage: "ASC_PRIVATE_KEY contains a valid ECDSA private key",
+		},
+		{
 			name:        "mixed escaped and real newlines",
 			privateKey:  strings.Replace(string(validKey), "\n", `\n`, 1),
 			wantStatus:  DoctorOK,
@@ -411,11 +417,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-		if err := StoreCredentials("doctor-incomplete-selected", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-incomplete-selected", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-incomplete-selected"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-incomplete-selected", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -442,11 +448,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", filepath.Join(tempDir, "missing-env.p8"))
-		if err := StoreCredentials("doctor-selected-needs-key", "STOREDKEY", "12345678-abcd-1234-abcd-123456789012", ""); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-selected-needs-key", "STOREDKEY", "12345678-abcd-1234-abcd-123456789012", "", config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-selected-needs-key"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-selected-needs-key", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -472,11 +478,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-		if err := StoreCredentials("doctor-selected-individual-fallback", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-selected-individual-fallback", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-selected-individual-fallback"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-selected-individual-fallback", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -500,7 +506,7 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 			t.Fatalf("StoreCredentialsWithKeyType() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-selected-unsupported-key-type"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-selected-unsupported-key-type", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -536,18 +542,18 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-		if err := StoreCredentials("doctor-selected-invalid-key-type", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-selected-invalid-key-type", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-selected-invalid-key-type"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-selected-invalid-key-type", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
 
 		report := Doctor(DoctorOptions{Profile: "doctor-selected-invalid-key-type"})
 		section := findDoctorSection(t, report, "Environment")
-		if !sectionHasStatus(section, DoctorFail, "Selected profile \"doctor-selected-invalid-key-type\" cannot use environment fallback: ASC_KEY_TYPE must be team or individual") {
+		if !sectionHasStatus(section, DoctorFail, "Selected profile \"doctor-selected-invalid-key-type\" cannot use environment fallback: ASC_KEY_TYPE must be team, individual, or enterprise") {
 			t.Fatalf("expected invalid fallback key type failure, got %#v", section.Checks)
 		}
 	})
@@ -566,11 +572,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-		if err := StoreCredentials("doctor-selected-strict-mixed", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-selected-strict-mixed", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-selected-strict-mixed"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-selected-strict-mixed", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -587,11 +593,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		storedKeyPath := filepath.Join(tempDir, "stored.p8")
 		writeECDSAPEM(t, storedKeyPath, 0o600, true)
 
-		if err := StoreCredentials("doctor-default-strict-mixed", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-default-strict-mixed", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-default-strict-mixed"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-default-strict-mixed", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -622,7 +628,7 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 			t.Fatalf("StoreCredentialsWithKeyType() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-default-unsupported-key-type"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-default-unsupported-key-type", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -649,11 +655,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		storedKeyPath := filepath.Join(tempDir, "stored.p8")
 		writeECDSAPEM(t, storedKeyPath, 0o600, true)
 
-		if err := StoreCredentials("doctor-default-invalid-env-key-type", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-default-invalid-env-key-type", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-default-invalid-env-key-type"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-default-invalid-env-key-type", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -670,7 +676,7 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 
 		report := Doctor(DoctorOptions{})
 		section := findDoctorSection(t, report, "Environment")
-		if !sectionHasStatus(section, DoctorFail, "Default stored credentials cannot use environment fallback: ASC_KEY_TYPE must be team or individual") {
+		if !sectionHasStatus(section, DoctorFail, "Default stored credentials cannot use environment fallback: ASC_KEY_TYPE must be team, individual, or enterprise") {
 			t.Fatalf("expected invalid default fallback key type failure, got %#v", section.Checks)
 		}
 	})
@@ -688,11 +694,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 			t.Fatalf("WriteFile() error: %v", err)
 		}
 
-		if err := StoreCredentials("doctor-default-materialization-strict", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-default-materialization-strict", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-default-materialization-strict"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-default-materialization-strict", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -763,11 +769,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", filepath.Join(tempDir, "missing-env.p8"))
-		if err := StoreCredentials("doctor-default-keychain", "STOREDKEY", "12345678-abcd-1234-abcd-123456789012", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-default-keychain", "STOREDKEY", "12345678-abcd-1234-abcd-123456789012", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-default-keychain"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-default-keychain", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -796,11 +802,11 @@ func TestDoctorEnvironmentSkipsIgnoredPrivateKeys(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 		t.Setenv("ASC_PRIVATE_KEY_PATH", filepath.Join(tempDir, "unused-missing-env.p8"))
-		if err := StoreCredentials("doctor-partial-keychain", "STOREDKEY", "", storedKeyPath); err != nil {
+		if err := StoreCredentialsWithKeyType("doctor-partial-keychain", "STOREDKEY", "", storedKeyPath, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("StoreCredentials() error: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := RemoveCredentials("doctor-partial-keychain"); err != nil {
+			if err := RemoveCredentialsWithOptions("doctor-partial-keychain", RemoveOptions{}); err != nil {
 				t.Errorf("RemoveCredentials() error: %v", err)
 			}
 		})
@@ -1081,7 +1087,7 @@ func TestDoctorPrivateKeys_KeychainPEMWithoutFileStillPasses(t *testing.T) {
 
 	keyPath := filepath.Join(t.TempDir(), "AuthKey.p8")
 	writeECDSAPEM(t, keyPath, 0o600, true)
-	if err := StoreCredentials("keychain-only", "KEY123", "ISS456", keyPath); err != nil {
+	if err := StoreCredentialsWithKeyType("keychain-only", "KEY123", "ISS456", keyPath, config.CredentialKeyTypeTeam); err != nil {
 		t.Fatalf("StoreCredentials() error: %v", err)
 	}
 	credentials, err := ListCredentials()
@@ -1372,7 +1378,7 @@ func TestDoctorMigrationHintsPrefillsVersionFromXcodeAndAppID(t *testing.T) {
 	if !sliceContains(report.Migration.SuggestedCommands, `asc builds upload --app "123456789" --ipa app.ipa --version "2.3.4" --build-number "BUILD_NUMBER" --wait`) {
 		t.Fatalf("expected upload step for upload-only migration hints, got %#v", report.Migration.SuggestedCommands)
 	}
-	if !sliceContains(report.Migration.SuggestedCommands, `asc builds info --app "123456789" --build-number "BUILD_NUMBER" --version "2.3.4"`) {
+	if !sliceContains(report.Migration.SuggestedCommands, `asc builds info --build-id "UPLOADED_BUILD_ID"`) {
 		t.Fatalf("expected build lookup step for upload-only migration hints, got %#v", report.Migration.SuggestedCommands)
 	}
 	if !sliceContains(report.Migration.SuggestedCommands, `asc versions create --app "123456789" --version "2.3.4"`) {

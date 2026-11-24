@@ -126,7 +126,7 @@ covering 88 resource types:
 | `asc game-center` | `--version-id` | `gameCenterLeaderboardSetVersions` |
 | `asc game-center` | `--leaderboard-set-id`, `--set-id` | `gameCenterLeaderboardSets` |
 | `asc game-center` | `--version-id` | `gameCenterLeaderboardVersions` |
-| `asc game-center` | `--default-leaderboard-id`, `--leaderboard-id` | `gameCenterLeaderboards` |
+| `asc game-center` | `--default-leaderboard-id`, `--default-leaderboard-v2-id`, `--default-group-leaderboard-id`, `--default-group-leaderboard-v2-id`, `--leaderboard-id` | `gameCenterLeaderboards` |
 | `asc game-center` | `--queue-id` | `gameCenterMatchmakingQueues` |
 | `asc game-center` | `--experiment-rule-set-id`, `--rule-set-id` | `gameCenterMatchmakingRuleSets` |
 | `asc game-center` | `--rule-id` | `gameCenterMatchmakingRules` |
@@ -226,7 +226,9 @@ carried past flag parsing on purpose, so callers keep a plain `*string`.
   identifiers (`asc apps update --bundle-id`, `asc signing ...`,
   `asc shots ...`), Game Center vendor identifiers, in-app purchase and
   subscription `productId` attributes, `offerId` on
-  `asc win-back-offers create --offer-id`, seed IDs, scoped player IDs, and
+  `asc win-back-offers create --offer-id` and
+  `asc subscriptions offers retention create --offer-id`, seed IDs, scoped
+  player IDs, and
   locales or territories.
   A URL is never a valid value for these, so the normalizer would only add a
   misleading error message.
@@ -247,7 +249,7 @@ carried past flag parsing on purpose, so callers keep a plain `*string`.
   `inAppPurchasePricePoints`, and `gameCenterEnabledVersions` are only
   reachable through a parent or nested path, so there is no
   `/v<n>/<type>/<id>` self-link to accept.
-- `asc localizations update --id` names an `appStoreVersionLocalizations` or
+- `asc localizations update --id` and `asc localizations view --id` name an `appStoreVersionLocalizations` or
   an `appInfoLocalizations` resource depending on `--type`, like the
   type-dependent flags above.
 - `asc versions rating-reset` runs against a web session, so it is excluded
@@ -276,8 +278,8 @@ without an `-id` suffix. They are wired the same way now:
   `--app` default comes from `ASC_APP_ID` (`asc app-setup info set`,
   `asc app-setup categories set`, `asc categories set`) keep their plain
   string flag, so help is unchanged, and normalize it with
-  `shared.AppIDFlagValue`. A link of another type there prints the same
-  `invalid value ... for flag -app` message and exits 2 before any request.
+  `d.AppIDFlagValue`. A link of another type there prints the same
+  `invalid value ... for flag --app` message and exits 2 before any request.
 
 Flags wired in this pass (382 command flags in the tree):
 

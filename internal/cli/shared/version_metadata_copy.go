@@ -130,7 +130,7 @@ func CopyVersionMetadataFromSource(
 		}
 
 		if !opts.DryRun {
-			if _, err := client.UpdateAppStoreVersionLocalization(ctx, destinationLocalizationID, attributes); err != nil {
+			if _, err := client.UpdateAppStoreVersionLocalization(ctx, destinationLocalizationID, attributes.UpdateAttributes()); err != nil {
 				return nil, fmt.Errorf("failed to copy metadata for locale %q: %w", locale, err)
 			}
 		}
@@ -157,7 +157,7 @@ func findSourceAppStoreVersion(
 		appID,
 		asc.WithAppStoreVersionsVersionStrings([]string{versionValue}),
 		asc.WithAppStoreVersionsPlatforms([]string{platformValue}),
-		asc.WithAppStoreVersionsLimit(200),
+		asc.Limit[asc.AppStoreVersionsOption](200),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup source version %q: %w", versionValue, err)
@@ -213,12 +213,12 @@ func listAllAppStoreVersionLocalizations(
 	client *asc.Client,
 	versionID string,
 ) ([]asc.Resource[asc.AppStoreVersionLocalizationAttributes], error) {
-	firstPage, err := client.GetAppStoreVersionLocalizations(ctx, versionID, asc.WithAppStoreVersionLocalizationsLimit(200))
+	firstPage, err := client.GetAppStoreVersionLocalizations(ctx, versionID, asc.Limit[asc.AppStoreVersionLocalizationsOption](200))
 	if err != nil {
 		return nil, err
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetAppStoreVersionLocalizations(ctx, versionID, asc.WithAppStoreVersionLocalizationsNextURL(nextURL))
+		return client.GetAppStoreVersionLocalizations(ctx, versionID, asc.NextURL[asc.AppStoreVersionLocalizationsOption](nextURL))
 	})
 	if err != nil {
 		return nil, err

@@ -1,29 +1,36 @@
 package cmdtest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestAnalyticsSalesAllowMissingReturnsStructuredResultWithoutFile(t *testing.T) {
-	requestCount := setMissingSalesReportTestClient(t)
+	t.Run("no sales", func(t *testing.T) {
+		assertSalesReportUnavailable(t, "There were no sales for the date specified.")
+	})
+	t.Run("not published yet", func(t *testing.T) {
+		assertSalesReportUnavailable(t, "Report is not available yet. Daily reports for the Americas are available by 5 am Pacific Time.")
+	})
+}
+
+func assertSalesReportUnavailable(t *testing.T, detail string) {
+	t.Helper()
+	client, requestCount := newSalesReportNotFoundTestClient(t, detail)
 
 	outputPath := filepath.Join(t.TempDir(), "missing.tsv.gz")
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	if err := root.Parse([]string{
+	stdout, stderr, runErr := runRootWithDeps(t, client,
 		"analytics", "sales",
 		"--vendor", "12345678",
 		"--type", "SALES",
@@ -33,14 +40,7 @@ func TestAnalyticsSalesAllowMissingReturnsStructuredResultWithoutFile(t *testing
 		"--output", outputPath,
 		"--output-format", "json",
 		"--allow-missing",
-	}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = root.Run(context.Background())
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -79,12 +79,10 @@ func TestAnalyticsSalesAllowMissingReturnsStructuredResultWithoutFile(t *testing
 }
 
 func TestAnalyticsSalesMissingReportFailsByDefault(t *testing.T) {
-	setMissingSalesReportTestClient(t)
+	client, _ := newMissingSalesReportTestClient(t)
 
 	outputPath := filepath.Join(t.TempDir(), "missing.tsv.gz")
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	if err := root.Parse([]string{
+	stdout, _, runErr := runRootWithDeps(t, client,
 		"analytics", "sales",
 		"--vendor", "12345678",
 		"--type", "SALES",
@@ -93,14 +91,7 @@ func TestAnalyticsSalesMissingReportFailsByDefault(t *testing.T) {
 		"--date", "2026-08-18",
 		"--output", outputPath,
 		"--output-format", "json",
-	}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, _ := captureOutput(t, func() {
-		runErr = root.Run(context.Background())
-	})
+	)
 	if runErr == nil || !strings.Contains(runErr.Error(), "There were no sales for the date specified") {
 		t.Fatalf("run error = %v, want missing-report API error", runErr)
 	}
@@ -113,11 +104,9 @@ func TestAnalyticsSalesMissingReportFailsByDefault(t *testing.T) {
 }
 
 func TestAnalyticsSalesAllowMissingDoesNotSwallowUnrelatedNotFound(t *testing.T) {
-	setSalesReportNotFoundTestClient(t, "The requested vendor account was not found.")
+	client, _ := newSalesReportNotFoundTestClient(t, "The requested vendor account was not found.")
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	if err := root.Parse([]string{
+	stdout, _, runErr := runRootWithDeps(t, client,
 		"analytics", "sales",
 		"--vendor", "12345678",
 		"--type", "SALES",
@@ -126,14 +115,7 @@ func TestAnalyticsSalesAllowMissingDoesNotSwallowUnrelatedNotFound(t *testing.T)
 		"--date", "2026-08-18",
 		"--output-format", "json",
 		"--allow-missing",
-	}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, _ := captureOutput(t, func() {
-		runErr = root.Run(context.Background())
-	})
+	)
 	if runErr == nil || !strings.Contains(runErr.Error(), "requested vendor account was not found") {
 		t.Fatalf("run error = %v, want unrelated not-found error", runErr)
 	}
@@ -142,13 +124,141 @@ func TestAnalyticsSalesAllowMissingDoesNotSwallowUnrelatedNotFound(t *testing.T)
 	}
 }
 
-func setMissingSalesReportTestClient(t *testing.T) *int {
-	return setSalesReportNotFoundTestClient(t, "There were no sales for the date specified.")
+func TestAnalyticsSalesReportFailureHints(t *testing.T) {
+	const (
+		noSales      = "There were no sales for the date specified."
+		notPublished = "Report is not available yet. Daily reports for the Americas are available by 5 am Pacific Time."
+	)
+	// 2026-11-23 03:00 UTC is 2026-11-22 19:00 Pacific: Apple has published
+	// the DAILY report for 2026-11-21 but not the one for 2026-11-22.
+	now := time.Date(2026, 11, 23, 3, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		status    int
+		detail    string
+		frequency string
+		date      string
+		extraArgs []string
+		wantCode  int
+		wantHint  string
+	}{
+		{
+			name:      "no sales in a published day",
+			status:    http.StatusNotFound,
+			detail:    noSales,
+			frequency: "DAILY",
+			date:      "2026-11-01",
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple publishes no DAILY report for a period without sales, so 2026-11-01 had no sales (for example, it is before the first sale); count it as zero, re-running will not change it. When looping over dates, add --allow-missing to get available=false with exit 0 for such periods.",
+		},
+		{
+			name:      "month that has not been published",
+			status:    http.StatusNotFound,
+			detail:    noSales,
+			frequency: "MONTHLY",
+			date:      "2026-11",
+			extraArgs: []string{"--decompress"},
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple has not published the MONTHLY report for 2026-11 yet: MONTHLY reports appear five days after the month ends, by about 8 a.m. Pacific, so this one should appear on 2026-12-05. The latest MONTHLY report that should be published is 2026-10: asc analytics sales --vendor 12345678 --type SALES --subtype SUMMARY --frequency MONTHLY --date 2026-10 --decompress",
+		},
+		{
+			name:      "today has not been published",
+			status:    http.StatusNotFound,
+			detail:    notPublished,
+			frequency: "DAILY",
+			date:      "2026-11-22",
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple has not published the DAILY report for 2026-11-22 yet: DAILY reports appear the day after, by about 8 a.m. Pacific, so this one should appear on 2026-11-23. The latest DAILY report that should be published is 2026-11-21: asc analytics sales --vendor 12345678 --type SALES --subtype SUMMARY --frequency DAILY --date 2026-11-21",
+		},
+		{
+			name:      "week that has not ended",
+			status:    http.StatusNotFound,
+			detail:    noSales,
+			frequency: "WEEKLY",
+			date:      "2026-11-16",
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple has not published the WEEKLY report for 2026-11-22 yet: WEEKLY reports appear on the Monday after the week, by about 8 a.m. Pacific, so this one should appear on 2026-11-23. The latest WEEKLY report that should be published is 2026-11-15: asc analytics sales --vendor 12345678 --type SALES --subtype SUMMARY --frequency WEEKLY --date 2026-11-15",
+		},
+		{
+			name:      "year that has not ended",
+			status:    http.StatusNotFound,
+			detail:    noSales,
+			frequency: "YEARLY",
+			date:      "2026",
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple has not published the YEARLY report for 2026 yet: YEARLY reports appear six days after the year ends, by about 8 a.m. Pacific, so this one should appear on 2027-01-06. The latest YEARLY report that should be published is 2025: asc analytics sales --vendor 12345678 --type SALES --subtype SUMMARY --frequency YEARLY --date 2025",
+		},
+		{
+			name:      "published day that Apple is late with",
+			status:    http.StatusNotFound,
+			detail:    notPublished,
+			frequency: "DAILY",
+			date:      "2026-11-21",
+			wantCode:  cmd.ExitNotFound,
+			wantHint:  "Apple has not published the DAILY report for 2026-11-21 yet, although it is usually out by now; re-running will not help until it is. The period before is 2026-11-20: asc analytics sales --vendor 12345678 --type SALES --subtype SUMMARY --frequency DAILY --date 2026-11-20, or add --allow-missing to get available=false instead of an error.",
+		},
+		{
+			name:      "unrelated not found",
+			status:    http.StatusNotFound,
+			detail:    "The requested vendor account was not found.",
+			frequency: "DAILY",
+			date:      "2026-11-01",
+			wantCode:  cmd.ExitNotFound,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client, _ := newSalesReportErrorTestClient(t, test.status, test.detail)
+			outputPath := filepath.Join(t.TempDir(), "report.tsv.gz")
+			args := []string{
+				"analytics", "sales",
+				"--vendor", "12345678",
+				"--type", "SALES",
+				"--subtype", "SUMMARY",
+				"--frequency", test.frequency,
+				"--date", test.date,
+				"--output", outputPath,
+				"--output-format", "json",
+			}
+			args = append(args, test.extraArgs...)
+
+			d, stdoutBuf, stderrBuf := newTestDeps(t, client)
+			d.Now = func() time.Time { return now }
+			code := cmd.RunWithDeps(args, "1.2.3", d)
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
+			if code != test.wantCode {
+				t.Fatalf("exit code = %d, want %d; stderr=%q", code, test.wantCode, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("stdout = %q, want empty", stdout)
+			}
+			if !strings.Contains(stderr, test.detail) {
+				t.Fatalf("stderr = %q, want Apple's detail %q", stderr, test.detail)
+			}
+			if test.wantHint == "" && strings.Contains(stderr, "Hint:") {
+				t.Fatalf("stderr = %q, want no hint", stderr)
+			}
+			if want := "Hint: " + test.wantHint + "\n"; test.wantHint != "" && (!strings.HasSuffix(stderr, want) || strings.Count(stderr, "Hint:") != 1) {
+				t.Fatalf("stderr = %q, want one hint line %q", stderr, want)
+			}
+			if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("output file stat error = %v, want not-exist", err)
+			}
+		})
+	}
 }
 
-func setSalesReportNotFoundTestClient(t *testing.T, detail string) *int {
+func newMissingSalesReportTestClient(t *testing.T) (func() (*asc.Client, error), *int) {
+	return newSalesReportNotFoundTestClient(t, "There were no sales for the date specified.")
+}
+
+func newSalesReportNotFoundTestClient(t *testing.T, detail string) (func() (*asc.Client, error), *int) {
 	t.Helper()
-	setupAuth(t)
+	return newSalesReportErrorTestClient(t, http.StatusNotFound, detail)
+}
+
+func newSalesReportErrorTestClient(t *testing.T, status int, detail string) (func() (*asc.Client, error), *int) {
+	t.Helper()
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
 	requestCount := 0
@@ -158,31 +268,9 @@ func setSalesReportNotFoundTestClient(t *testing.T, detail string) *int {
 			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = io.WriteString(w, `{"errors":[{"status":"404","code":"NOT_FOUND","title":"Not Found","detail":"`+detail+`"}]}`)
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"errors":[{"status":"%d","code":"%s","title":"%s","detail":"%s"}]}`, status, strings.ToUpper(strings.ReplaceAll(http.StatusText(status), " ", "_")), http.StatusText(status), detail)
 	}))
 	t.Cleanup(server.Close)
-	serverURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("parse test server URL: %v", err)
-	}
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		cloned := req.Clone(req.Context())
-		cloned.URL.Scheme = serverURL.Scheme
-		cloned.URL.Host = serverURL.Host
-		return server.Client().Transport.RoundTrip(cloned)
-	})
-	client, err := asc.NewClientWithHTTPClient(
-		os.Getenv("ASC_KEY_ID"),
-		os.Getenv("ASC_ISSUER_ID"),
-		os.Getenv("ASC_PRIVATE_KEY_PATH"),
-		&http.Client{Transport: transport},
-	)
-	if err != nil {
-		t.Fatalf("create analytics sales test client: %v", err)
-	}
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-		return client, nil
-	}))
-	return &requestCount
+	return stubServerClient(t, server), &requestCount
 }

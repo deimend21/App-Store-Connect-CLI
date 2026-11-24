@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/peterbourgon/ff/v3/ffcli"
@@ -13,14 +12,14 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-func SubmitCancelCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("submit cancel", flag.ExitOnError)
+func newSubmitCancelCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("submit cancel", flag.ExitOnError)
 
 	submissionID := shared.BindResourceIDFlag(fs, "id", "reviewSubmissions", "Submission ID")
 	versionID := shared.BindResourceIDFlag(fs, "version-id", "appStoreVersions", "App Store version ID")
 	appID := fs.String("app", "", "App Store Connect app ID (or ASC_APP_ID); used with --version-id for modern API lookup")
 	confirm := fs.Bool("confirm", false, "Confirm cancellation (required)")
-	output := shared.BindOutputFlags(fs)
+	output := d.BindOutputFlags(fs)
 
 	return &ffcli.Command{
 		Name:       "cancel",
@@ -30,34 +29,33 @@ func SubmitCancelCommand() *ffcli.Command {
 
 Cancels an active review submission. Use --id for a known submission ID,
 or --version-id to find and cancel the submission for a specific version.
-When using --version-id, provide --app for reliable lookup via the modern
-reviewSubmissions API; without --app, falls back to the legacy endpoint.
+When supplied with --version-id, --app must match the version owner.
+The command tries the modern reviewSubmissions API before the legacy endpoint.
 
 Examples:
   asc submit cancel --id "SUBMISSION_ID" --confirm
   asc submit cancel --version-id "VERSION_ID" --confirm
   asc submit cancel --version-id "VERSION_ID" --app "APP_ID" --confirm`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			if !*confirm {
-				fmt.Fprintln(os.Stderr, "Error: --confirm is required to cancel a submission")
-				return shared.MissingRequiredUsageError("--confirm")
-			}
 			if strings.TrimSpace(*submissionID) == "" && strings.TrimSpace(*versionID) == "" {
-				fmt.Fprintln(os.Stderr, "Error: --id or --version-id is required")
+				fmt.Fprintln(d.IO.ErrOut, "Error: --id or --version-id is required")
 				return shared.MissingRequiredUsageError("")
 			}
+			if err := d.RequireConfirm(*confirm); err != nil {
+				return err
+			}
 			if strings.TrimSpace(*submissionID) != "" && strings.TrimSpace(*versionID) != "" {
-				return shared.UsageError("--id and --version-id are mutually exclusive")
+				return d.UsageError("--id and --version-id are mutually exclusive")
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("submit cancel: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer func() {
 				if cancel != nil {
 					cancel()
@@ -68,7 +66,7 @@ Examples:
 				if cancel != nil {
 					cancel()
 				}
-				requestCtx, cancel = shared.ContextWithTimeout(ctx)
+				requestCtx, cancel = d.Timeout(ctx)
 			}
 
 			resolvedSubmissionID := strings.TrimSpace(*submissionID)
@@ -78,7 +76,7 @@ Examples:
 					if asc.IsNotFound(err) {
 						return fmt.Errorf("submit cancel: no review submission found for ID %q", resolvedSubmissionID)
 					}
-					return fmt.Errorf("submit cancel: %w", shared.ExplainReviewSubmissionNotCancellable(ctx, client, resolvedSubmissionID, err))
+					return fmt.Errorf("submit cancel: %w", d.ExplainReviewSubmissionNotCancellable(ctx, client, resolvedSubmissionID, err))
 				}
 			} else {
 				resolvedVersionID := strings.TrimSpace(*versionID)
@@ -87,35 +85,31 @@ Examples:
 				// Prefer the app relationship on the version itself so a stale
 				// ASC_APP_ID/config value does not misdirect the modern lookup.
 				resolvedAppID := ""
-				versionResp, vErr := client.GetAppStoreVersion(requestCtx, resolvedVersionID, asc.WithAppStoreVersionInclude([]string{"app"}))
-				if vErr == nil {
-					if aid, aidErr := resolveAppIDFromVersionResponse(versionResp); aidErr == nil {
-						if explicitAppID != "" && explicitAppID != aid {
-							return fmt.Errorf("submit cancel: version %q belongs to app %q, not %q", resolvedVersionID, aid, explicitAppID)
-						}
-						resolvedAppID = aid
-					}
+				versionResp, ownerErr := client.GetAppStoreVersion(requestCtx, resolvedVersionID, asc.WithAppStoreVersionInclude([]string{"app"}))
+				if ownerErr == nil {
+					resolvedAppID, ownerErr = resolveAppIDFromVersionResponse(versionResp)
+				}
+				if explicitAppID != "" && ownerErr == nil && explicitAppID != resolvedAppID {
+					return fmt.Errorf("submit cancel: version %q belongs to app %q, not %q", resolvedVersionID, resolvedAppID, explicitAppID)
 				}
 				if resolvedAppID == "" {
-					if explicitAppID != "" {
-						resolvedAppID = explicitAppID
-					} else {
-						resolvedAppID = shared.ResolveAppID(*appID)
-					}
+					resolvedAppID = d.ResolveAppID(*appID)
 				}
 
 				if resolvedAppID != "" {
 					submission, findErr := findReviewSubmissionForVersion(requestCtx, client, resolvedAppID, resolvedVersionID)
 					if findErr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: modern review submission lookup failed: %v (falling back to legacy)\n", findErr)
+						fmt.Fprintf(d.IO.ErrOut, "Warning: modern review submission lookup failed: %v (falling back to legacy)\n", findErr)
 					} else if submission != nil {
+						// A version match in the app-scoped listing also proves ownership.
+						ownerErr = nil
 						if submission.Attributes.SubmissionState == asc.ReviewSubmissionStateCanceling {
 							resolvedSubmissionID = submission.ID
 							result := &asc.AppStoreVersionSubmissionCancelResult{
 								ID:        resolvedSubmissionID,
 								Cancelled: true,
 							}
-							return shared.PrintOutput(result, *output.Output, *output.Pretty)
+							return d.PrintOutput(result, *output.Output, *output.Pretty)
 						}
 						if !isPotentiallyCancellableReviewSubmissionState(submission.Attributes.SubmissionState) {
 							submission = nil
@@ -124,7 +118,7 @@ Examples:
 					if submission != nil {
 						_, cancelErr := client.CancelReviewSubmission(requestCtx, submission.ID)
 						if cancelErr != nil {
-							if isExpectedNonCancellableReviewSubmissionError(cancelErr) {
+							if isResourceStateInvalid(cancelErr) {
 								refreshed, refreshErr := refreshReviewSubmission(requestCtx, client, submission.ID)
 								if refreshErr == nil && refreshed != nil {
 									refreshedState := refreshed.Attributes.SubmissionState
@@ -134,7 +128,7 @@ Examples:
 											ID:        resolvedSubmissionID,
 											Cancelled: true,
 										}
-										return shared.PrintOutput(result, *output.Output, *output.Pretty)
+										return d.PrintOutput(result, *output.Output, *output.Pretty)
 									}
 									if strings.TrimSpace(string(refreshedState)) != "" && shared.IsReviewSubmissionNotCancellableError(cancelErr) {
 										return fmt.Errorf("submit cancel: %w", shared.NewReviewSubmissionNotCancellableError(submission.ID, refreshedState, cancelErr))
@@ -151,9 +145,13 @@ Examples:
 								ID:        resolvedSubmissionID,
 								Cancelled: true,
 							}
-							return shared.PrintOutput(result, *output.Output, *output.Pretty)
+							return d.PrintOutput(result, *output.Output, *output.Pretty)
 						}
 					}
+				}
+
+				if explicitAppID != "" && ownerErr != nil {
+					return fmt.Errorf("submit cancel: could not verify app %q owns version %q: %w", explicitAppID, resolvedVersionID, ownerErr)
 				}
 
 				// Fall back to legacy version submission lookup.
@@ -179,10 +177,10 @@ Examples:
 						ID:        resolvedSubmissionID,
 						Cancelled: true,
 					}
-					return shared.PrintOutput(result, *output.Output, *output.Pretty)
+					return d.PrintOutput(result, *output.Output, *output.Pretty)
 				}
 				if !asc.IsNotFound(err) {
-					return fmt.Errorf("submit cancel: %w", shared.ExplainReviewSubmissionNotCancellable(ctx, client, resolvedSubmissionID, err))
+					return fmt.Errorf("submit cancel: %w", d.ExplainReviewSubmissionNotCancellable(ctx, client, resolvedSubmissionID, err))
 				}
 
 				if err := client.DeleteAppStoreVersionSubmission(requestCtx, resolvedSubmissionID); err != nil {
@@ -198,7 +196,7 @@ Examples:
 				Cancelled: true,
 			}
 
-			return shared.PrintOutput(result, *output.Output, *output.Pretty)
+			return d.PrintOutput(result, *output.Output, *output.Pretty)
 		},
 	}
 }

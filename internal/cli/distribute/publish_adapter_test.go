@@ -2,7 +2,6 @@ package distribute
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -15,120 +14,6 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/distribution"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
-
-func TestExecutePrivatePublishUsesSharedPrivatePathAndReturnsRedactedResult(t *testing.T) {
-	originalLoad, originalStore, originalPublish, originalReverify := loadPreparedBundle, newObjectStore, runPublish, reverifyPublication
-	originalAliasProbe := probeConfiguredArtifactAliasForPreflight
-	t.Cleanup(func() {
-		loadPreparedBundle, newObjectStore, runPublish = originalLoad, originalStore, originalPublish
-		reverifyPublication = originalReverify
-		probeConfiguredArtifactAliasForPreflight = originalAliasProbe
-	})
-	probeCalls := 0
-	probeConfiguredArtifactAliasForPreflight = func(paths artifactPaths) error {
-		probeCalls++
-		return originalAliasProbe(paths)
-	}
-
-	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
-	storeCalls := 0
-	newObjectStore = func(context.Context, distribution.S3StoreConfig) (distribution.ObjectStore, time.Time, error) {
-		storeCalls++
-		return noOpStore{}, time.Time{}, nil
-	}
-	var received distribution.PublishOptions
-	publishCalls := 0
-	runPublish = func(_ context.Context, _ io.ReadSeeker, _ distribution.PreparedDescriptor, options distribution.PublishOptions) (distribution.PublishReceipt, distribution.SensitiveLinks, error) {
-		publishCalls++
-		received = options
-		return privatePublishTestReceipt(), distribution.SensitiveLinks{
-			SchemaVersion: "1",
-			InstallURL:    "https://downloads.example.com/install?X-Amz-Signature=exact-secret-canary",
-		}, nil
-	}
-	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
-		return nil
-	}
-
-	stateDir := t.TempDir()
-	request := privatePublishRequest{
-		BundleDir:        bundleDir,
-		Endpoint:         "https://objects.example.com",
-		Region:           "auto",
-		Bucket:           "bucket",
-		Prefix:           "app",
-		AddressingStyle:  "path",
-		URLTTL:           24 * time.Hour,
-		DownloadGrace:    time.Hour,
-		VerifyTimeout:    30 * time.Second,
-		ReceiptPath:      filepath.Join(stateDir, "receipt.json"),
-		LinkPath:         filepath.Join(stateDir, "link.json"),
-		DiagnosticWriter: io.Discard,
-	}
-	result, err := executePrivatePublish(context.Background(), request)
-	if err != nil {
-		t.Fatalf("executePrivatePublish() error = %v", err)
-	}
-	if result.Recovered {
-		t.Fatal("new publication reported recovered")
-	}
-	if received.Access != distribution.AccessPrivate || received.PublicBaseURL != "" {
-		t.Fatalf("publish options access=%q publicBaseURL=%q", received.Access, received.PublicBaseURL)
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(encoded), "exact-secret-canary") {
-		t.Fatalf("structured result leaked bearer URL: %s", encoded)
-	}
-	link, err := os.ReadFile(filepath.Join(stateDir, "link.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(link), "exact-secret-canary") {
-		t.Fatalf("sensitive link artifact = %s", link)
-	}
-	recovered, err := executePrivatePublish(context.Background(), request)
-	if err != nil {
-		t.Fatalf("executePrivatePublish() recovery error = %v", err)
-	}
-	if !recovered.Recovered || storeCalls != 1 || publishCalls != 1 || probeCalls != 1 {
-		t.Fatalf("recovered=%t storeCalls=%d publishCalls=%d probeCalls=%d", recovered.Recovered, storeCalls, publishCalls, probeCalls)
-	}
-}
-
-func TestPrivatePublishRequestCannotExpressPublicAccess(t *testing.T) {
-	typeOfRequest := reflect.TypeOf(privatePublishRequest{})
-	for _, forbidden := range []string{"Access", "PublicBaseURL"} {
-		if _, found := typeOfRequest.FieldByName(forbidden); found {
-			t.Fatalf("privatePublishRequest exposes %s", forbidden)
-		}
-	}
-}
-
-func TestExecutePrivatePublishRejectsLifetimeOverflow(t *testing.T) {
-	request := privatePublishRequest{
-		BundleDir:        "/bundle",
-		Endpoint:         "https://objects.example.com",
-		Region:           "auto",
-		Bucket:           "bucket",
-		Prefix:           "app",
-		AddressingStyle:  "path",
-		URLTTL:           time.Duration(1 << 62),
-		DownloadGrace:    time.Duration(1 << 62),
-		VerifyTimeout:    time.Second,
-		ReceiptPath:      "/state/receipt.json",
-		LinkPath:         "/state/link.json",
-		DiagnosticWriter: io.Discard,
-	}
-
-	_, err := executePrivatePublish(context.Background(), request)
-	if err == nil || !strings.Contains(err.Error(), "must not exceed 7d") {
-		t.Fatalf("overflowing private publication lifetime error = %v", err)
-	}
-}
 
 func TestValidateStoredPrivateStateRejectsLifetimeOverflow(t *testing.T) {
 	receipt := privatePublishTestReceipt()
@@ -234,39 +119,6 @@ func TestOpenExistingArtifactPathsSupportsDistinctTopLevelParents(t *testing.T) 
 	}
 }
 
-func TestExecutePublishPreservesExplicitPublicAccess(t *testing.T) {
-	originalLoad, originalStore, originalPublish := loadPreparedBundle, newObjectStore, runPublish
-	t.Cleanup(func() {
-		loadPreparedBundle, newObjectStore, runPublish = originalLoad, originalStore, originalPublish
-	})
-	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
-	newObjectStore = func(context.Context, distribution.S3StoreConfig) (distribution.ObjectStore, time.Time, error) {
-		return noOpStore{}, time.Time{}, nil
-	}
-	var received distribution.PublishOptions
-	runPublish = func(_ context.Context, _ io.ReadSeeker, _ distribution.PreparedDescriptor, options distribution.PublishOptions) (distribution.PublishReceipt, distribution.SensitiveLinks, error) {
-		received = options
-		receipt := privatePublishTestReceipt()
-		receipt.Access = distribution.AccessPublic
-		receipt.InstallURL = "https://downloads.example.com/app"
-		return receipt, distribution.SensitiveLinks{SchemaVersion: "1", InstallURL: receipt.InstallURL}, nil
-	}
-	stateDir := t.TempDir()
-	_, err := executePublish(context.Background(), publishRequest{
-		BundleDir: bundleDir, Endpoint: "https://objects.example.com", Region: "auto", Bucket: "bucket", Prefix: "app",
-		AddressingStyle: "path", Access: string(distribution.AccessPublic), PublicBaseURL: "https://downloads.example.com",
-		URLTTL: 24 * time.Hour, DownloadGrace: time.Hour, VerifyTimeout: time.Second,
-		ReceiptPath: filepath.Join(stateDir, "receipt.json"), LinkPath: filepath.Join(stateDir, "link.json"), DiagnosticWriter: io.Discard,
-	})
-	if err != nil {
-		t.Fatalf("executePublish() error = %v", err)
-	}
-	if received.Access != distribution.AccessPublic || received.PublicBaseURL != "https://downloads.example.com" {
-		t.Fatalf("publish options access=%q publicBaseURL=%q", received.Access, received.PublicBaseURL)
-	}
-}
-
 func TestReverifyPrivatePublishIsReadOnly(t *testing.T) {
 	originalLoad, originalStore, originalPublish, originalReverify := loadPreparedBundle, newObjectStore, runPublish, reverifyPublication
 	t.Cleanup(func() {
@@ -274,7 +126,9 @@ func TestReverifyPrivatePublishIsReadOnly(t *testing.T) {
 	})
 
 	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
+	loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+		return bundle(), nil
+	}
 	newObjectStore = func(context.Context, distribution.S3StoreConfig) (distribution.ObjectStore, time.Time, error) {
 		t.Fatal("read-only verification constructed an object store")
 		return nil, time.Time{}, nil
@@ -284,7 +138,7 @@ func TestReverifyPrivatePublishIsReadOnly(t *testing.T) {
 		return distribution.PublishReceipt{}, distribution.SensitiveLinks{}, nil
 	}
 	reverifyCalls := 0
-	reverifyPublication = func(_ context.Context, _ distribution.Verifier, _ distribution.PublishReceipt, _ distribution.SensitiveLinks, _ time.Time) error {
+	reverifyPublication = func(_ context.Context, _ distribution.Verifier, _ distribution.PublishReceipt, _ distribution.SensitiveLinks, _ func() time.Time) error {
 		reverifyCalls++
 		return nil
 	}
@@ -327,7 +181,7 @@ func TestReverifyPrivatePublishIsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	result, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir:     bundleDir,
 		ReceiptPath:   receiptPath,
 		LinkPath:      linkPath,
@@ -396,8 +250,10 @@ func TestReverifyPrivatePublishReadsCaseDistinctArtifactsFromReadOnlyDirectory(t
 	originalLoad, originalReverify := loadPreparedBundle, reverifyPublication
 	t.Cleanup(func() { loadPreparedBundle, reverifyPublication = originalLoad, originalReverify })
 	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
-	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+	loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+		return bundle(), nil
+	}
+	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 		return nil
 	}
 
@@ -421,7 +277,7 @@ func TestReverifyPrivatePublishReadsCaseDistinctArtifactsFromReadOnlyDirectory(t
 	}
 	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o700) })
 
-	result, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	result, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir: bundleDir, ReceiptPath: receiptPath, LinkPath: linkPath, VerifyTimeout: time.Second,
 	})
 	if err != nil {
@@ -471,8 +327,10 @@ func TestReverifyPrivatePublishTrimsArtifactPathsBeforeContainmentCheck(t *testi
 	originalLoad, originalReverify := loadPreparedBundle, reverifyPublication
 	t.Cleanup(func() { loadPreparedBundle, reverifyPublication = originalLoad, originalReverify })
 	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
-	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+	loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+		return bundle(), nil
+	}
+	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 		return nil
 	}
 
@@ -496,7 +354,7 @@ func TestReverifyPrivatePublishTrimsArtifactPathsBeforeContainmentCheck(t *testi
 		InstallURL:    "https://objects.example.com/bucket/app/page?X-Amz-Signature=containment-canary",
 	})
 
-	_, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	_, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir: bundleDir, ReceiptPath: " " + receiptPath + " ", LinkPath: " " + linkPath + " ", VerifyTimeout: time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "outside the immutable prepared bundle") {
@@ -507,7 +365,7 @@ func TestReverifyPrivatePublishTrimsArtifactPathsBeforeContainmentCheck(t *testi
 func TestReverifyPrivatePublishDoesNotCreateOrRepairArtifacts(t *testing.T) {
 	bundleDir := t.TempDir()
 	missingDir := filepath.Join(t.TempDir(), "missing")
-	_, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	_, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir:     bundleDir,
 		ReceiptPath:   filepath.Join(missingDir, "receipt.json"),
 		LinkPath:      filepath.Join(missingDir, "link.json"),
@@ -533,7 +391,7 @@ func TestReverifyPrivatePublishDoesNotCreateOrRepairArtifacts(t *testing.T) {
 	if writeErr := os.WriteFile(linkPath, stateData, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	_, err = reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	_, err = reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir: bundleDir, ReceiptPath: receiptPath, LinkPath: linkPath, VerifyTimeout: time.Second,
 	})
 	if err == nil {
@@ -548,9 +406,11 @@ func TestReverifyPrivatePublishRejectsPublicStateWithoutNetwork(t *testing.T) {
 	originalLoad, originalReverify := loadPreparedBundle, reverifyPublication
 	t.Cleanup(func() { loadPreparedBundle, reverifyPublication = originalLoad, originalReverify })
 	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
+	loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+		return bundle(), nil
+	}
 	networkCalled := false
-	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 		networkCalled = true
 		return nil
 	}
@@ -567,7 +427,7 @@ func TestReverifyPrivatePublishRejectsPublicStateWithoutNetwork(t *testing.T) {
 		InstallURL:    "https://objects.example.com/bucket/app/page?X-Amz-Signature=expired-secret-canary",
 	})
 
-	_, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	_, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir: bundleDir, ReceiptPath: receiptPath, LinkPath: linkPath, VerifyTimeout: time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "not private") {
@@ -584,7 +444,9 @@ func TestReverifyPrivatePublishDoesNotRefreshExpiredLinks(t *testing.T) {
 		loadPreparedBundle, newObjectStore, runPublish, reverifyPublication = originalLoad, originalStore, originalPublish, originalReverify
 	})
 	bundleDir, bundle := privatePublishTestBundle(t)
-	loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
+	loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+		return bundle(), nil
+	}
 	newObjectStore = func(context.Context, distribution.S3StoreConfig) (distribution.ObjectStore, time.Time, error) {
 		t.Fatal("expired-link verification constructed an object store")
 		return nil, time.Time{}, nil
@@ -593,7 +455,7 @@ func TestReverifyPrivatePublishDoesNotRefreshExpiredLinks(t *testing.T) {
 		t.Fatal("expired-link verification refreshed publication")
 		return distribution.PublishReceipt{}, distribution.SensitiveLinks{}, nil
 	}
-	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+	reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 		return errors.New("saved install link is expired")
 	}
 	stateDir := t.TempDir()
@@ -615,7 +477,7 @@ func TestReverifyPrivatePublishDoesNotRefreshExpiredLinks(t *testing.T) {
 	beforeReceipt, _ := os.ReadFile(receiptPath)
 	beforeLink, _ := os.ReadFile(linkPath)
 
-	_, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+	_, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 		BundleDir: bundleDir, ReceiptPath: receiptPath, LinkPath: linkPath, VerifyTimeout: time.Second,
 	})
 	if err == nil || !strings.Contains(err.Error(), "expired") {
@@ -628,7 +490,7 @@ func TestReverifyPrivatePublishDoesNotRefreshExpiredLinks(t *testing.T) {
 	}
 }
 
-func TestExecutePrivatePublishRecoveryRejectsHardLinkedArtifacts(t *testing.T) {
+func TestPublishCommandRecoveryRejectsHardLinkedArtifacts(t *testing.T) {
 	for _, artifact := range []string{"receipt", "link"} {
 		t.Run(artifact, func(t *testing.T) {
 			originalLoad, originalStore, originalPublish, originalReverify := loadPreparedBundle, newObjectStore, runPublish, reverifyPublication
@@ -636,7 +498,9 @@ func TestExecutePrivatePublishRecoveryRejectsHardLinkedArtifacts(t *testing.T) {
 				loadPreparedBundle, newObjectStore, runPublish, reverifyPublication = originalLoad, originalStore, originalPublish, originalReverify
 			})
 			bundleDir, bundle := privatePublishTestBundle(t)
-			loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
+			loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+				return bundle(), nil
+			}
 			storeCalls := 0
 			newObjectStore = func(context.Context, distribution.S3StoreConfig) (distribution.ObjectStore, time.Time, error) {
 				storeCalls++
@@ -648,26 +512,27 @@ func TestExecutePrivatePublishRecoveryRejectsHardLinkedArtifacts(t *testing.T) {
 					InstallURL:    "https://objects.example.com/bucket/app/page?X-Amz-Signature=hard-link-secret-canary",
 				}, nil
 			}
-			reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+			reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 				return nil
 			}
 			stateDir := t.TempDir()
-			request := privatePublishRequest{
-				BundleDir: bundleDir, Endpoint: "https://objects.example.com", Region: "auto", Bucket: "bucket", Prefix: "app",
-				AddressingStyle: "path", URLTTL: 24 * time.Hour, DownloadGrace: time.Hour, VerifyTimeout: time.Second,
-				ReceiptPath: filepath.Join(stateDir, "receipt.json"), LinkPath: filepath.Join(stateDir, "link.json"), DiagnosticWriter: io.Discard,
+			receiptPath := filepath.Join(stateDir, "receipt.json")
+			linkPath := filepath.Join(stateDir, "link.json")
+			args := []string{
+				"--bundle-dir", bundleDir, "--endpoint", "https://objects.example.com", "--region", "auto", "--bucket", "bucket", "--prefix", "app",
+				"--verify-timeout", "1s", "--receipt", receiptPath, "--link-path", linkPath, "--output", "json",
 			}
-			if _, err := executePrivatePublish(context.Background(), request); err != nil {
+			if err := newPublishCommand(newDistributeTestDeps()).ParseAndRun(context.Background(), args); err != nil {
 				t.Fatalf("initial publish: %v", err)
 			}
-			target := request.ReceiptPath
+			target := receiptPath
 			if artifact == "link" {
-				target = request.LinkPath
+				target = linkPath
 			}
 			if err := os.Link(target, filepath.Join(t.TempDir(), "exposed-copy")); err != nil {
 				t.Skipf("hard links unavailable: %v", err)
 			}
-			_, err := executePrivatePublish(context.Background(), request)
+			err := newPublishCommand(newDistributeTestDeps()).ParseAndRun(context.Background(), args)
 			if err == nil || !strings.Contains(err.Error(), "multiple hard links") {
 				t.Fatalf("recovery error = %v, want hard-link rejection", err)
 			}
@@ -684,9 +549,11 @@ func TestReverifyPrivatePublishRejectsHardLinkedArtifacts(t *testing.T) {
 			originalLoad, originalReverify := loadPreparedBundle, reverifyPublication
 			t.Cleanup(func() { loadPreparedBundle, reverifyPublication = originalLoad, originalReverify })
 			bundleDir, bundle := privatePublishTestBundle(t)
-			loadPreparedBundle = func(context.Context, rootfs.Root) (*distribution.PreparedBundle, error) { return bundle(), nil }
+			loadPreparedBundle = func(context.Context, rootfs.Root, time.Time) (*distribution.PreparedBundle, error) {
+				return bundle(), nil
+			}
 			networkCalled := false
-			reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, time.Time) error {
+			reverifyPublication = func(context.Context, distribution.Verifier, distribution.PublishReceipt, distribution.SensitiveLinks, func() time.Time) error {
 				networkCalled = true
 				return nil
 			}
@@ -713,7 +580,7 @@ func TestReverifyPrivatePublishRejectsHardLinkedArtifacts(t *testing.T) {
 			if err := os.Link(target, filepath.Join(t.TempDir(), "exposed-copy")); err != nil {
 				t.Skipf("hard links unavailable: %v", err)
 			}
-			_, err := reverifyPrivatePublish(context.Background(), privatePublishVerificationRequest{
+			_, err := reverifyPrivatePublish(context.Background(), newDistributeTestDeps(), privatePublishVerificationRequest{
 				BundleDir: bundleDir, ReceiptPath: receiptPath, LinkPath: linkPath, VerifyTimeout: time.Second,
 			})
 			if err == nil || !strings.Contains(err.Error(), "multiple hard links") {

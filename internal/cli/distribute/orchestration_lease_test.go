@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestDistributionRunPathLeaseRejectsRunDirectoryReplacement(t *testing.T) {
@@ -14,12 +16,12 @@ func TestDistributionRunPathLeaseRejectsRunDirectoryReplacement(t *testing.T) {
 	if err := createDistributionRunScaffold(stateDir, runID); err != nil {
 		t.Fatal(err)
 	}
-	verify, closeLease, err := acquireDistributionRunPathLease(stateDir, runID)
+	lease, err := openDistributionRunPathLease(stateDir, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := closeLease(); err != nil {
+		if err := lease.close(); err != nil {
 			t.Errorf("close lease: %v", err)
 		}
 	})
@@ -31,7 +33,7 @@ func TestDistributionRunPathLeaseRejectsRunDirectoryReplacement(t *testing.T) {
 	if err := os.Mkdir(original, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := verify(); err == nil {
+	if err := lease.verify(); err == nil {
 		t.Fatal("run-directory replacement was accepted")
 	}
 }
@@ -43,12 +45,12 @@ func TestDistributionRunPathLeaseRejectsStateDirectoryReplacement(t *testing.T) 
 	if err := createDistributionRunScaffold(stateDir, runID); err != nil {
 		t.Fatal(err)
 	}
-	verify, closeLease, err := acquireDistributionRunPathLease(stateDir, runID)
+	lease, err := openDistributionRunPathLease(stateDir, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := closeLease(); err != nil {
+		if err := lease.close(); err != nil {
 			t.Errorf("close lease: %v", err)
 		}
 	})
@@ -59,7 +61,7 @@ func TestDistributionRunPathLeaseRejectsStateDirectoryReplacement(t *testing.T) 
 	if err := os.Mkdir(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := verify(); err == nil {
+	if err := lease.verify(); err == nil {
 		t.Fatal("state-directory replacement was accepted")
 	}
 }
@@ -72,7 +74,7 @@ func TestDistributionRunPathLeaseRejectsEveryScaffoldSubtreeReplacement(t *testi
 			if err := createDistributionRunScaffold(stateDir, runID); err != nil {
 				t.Fatal(err)
 			}
-			verify, closeLease, err := acquireDistributionRunLease(context.Background(), stateDir, runID)
+			verify, closeLease, err := acquireDistributionRunLease(context.Background(), newDistributeTestDeps(), stateDir, runID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -112,7 +114,7 @@ func TestAcquireDistributionRunLeaseRejectsReplacementDuringLockAcquisition(t *t
 		}
 	}
 	t.Cleanup(func() { distributionRunLockAfterOpenForTest = nil })
-	_, _, err := acquireDistributionRunLease(context.Background(), stateDir, runID)
+	_, _, err := acquireDistributionRunLease(context.Background(), newDistributeTestDeps(), stateDir, runID)
 	if err == nil {
 		t.Fatal("combined lock and lease accepted a replacement run path")
 	}
@@ -124,7 +126,7 @@ func TestDistributionRunLeaseRejectsHeldLockPathReplacement(t *testing.T) {
 	if err := createDistributionRunScaffold(stateDir, runID); err != nil {
 		t.Fatal(err)
 	}
-	verify, closeLease, err := acquireDistributionRunLease(context.Background(), stateDir, runID)
+	verify, closeLease, err := acquireDistributionRunLease(context.Background(), newDistributeTestDeps(), stateDir, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +187,7 @@ func testDistributionResumePathReplacement(t *testing.T, target string) {
 		return nil
 	}
 	deps.readPlan = func(string) (persistedDistributionPlan, error) { return plan, nil }
-	deps.publish = func(_ context.Context, request privatePublishIntentRequest) (publishExecutionResult, error) {
+	deps.publish = func(_ context.Context, _ *shared.Deps, request privatePublishIntentRequest) (publishExecutionResult, error) {
 		publishCalls++
 		if firstAttempt {
 			firstAttempt = false
@@ -216,7 +218,7 @@ func testDistributionResumePathReplacement(t *testing.T, target string) {
 	}
 	installDistributionOrchestrationDependencies(t, deps)
 
-	result, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: stateDir})
+	result, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: stateDir})
 	if err == nil || result != nil || !strings.Contains(err.Error(), "run_path_changed") {
 		t.Fatalf("replacement result=%#v error=%v, want terminal path-change fail-stop", result, err)
 	}
@@ -245,7 +247,7 @@ func testDistributionResumePathReplacement(t *testing.T, target string) {
 	if err := os.Rename(movedPath, replacedPath); err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := executeDistributionResume(context.Background(), distributionRunRequest{RunID: run.RunID, StateDir: stateDir})
+	resumed, err := executeDistributionResume(context.Background(), distributionTestDepsAt(distributionTestNow), distributionRunRequest{RunID: run.RunID, StateDir: stateDir})
 	if err != nil || resumed == nil || resumed.Status != "complete" {
 		t.Fatalf("resume result=%#v error=%v", resumed, err)
 	}
@@ -257,3 +259,9 @@ func testDistributionResumePathReplacement(t *testing.T, target string) {
 		t.Fatalf("recovered intent changed: %q, %v", intent, err)
 	}
 }
+
+type noopDistributionVerifyLease struct{}
+
+func (noopDistributionVerifyLease) PinSubtrees(...string) error { return nil }
+func (noopDistributionVerifyLease) Verify() error               { return nil }
+func (noopDistributionVerifyLease) Close() error                { return nil }

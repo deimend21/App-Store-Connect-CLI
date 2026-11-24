@@ -25,8 +25,11 @@ asc api <METHOD> <PATH> [flags]
   `https://api.appstoreconnect.apple.com/...` URL. Any other host is a usage
   error. A query string in `PATH` is merged with `--query`.
 - `--query key=value` is repeatable and adds one query parameter per use. Keys
-  can repeat. Query parameters are only accepted for `GET`; the OpenAPI
-  definition declares none for mutating methods and the client rejects them.
+  can repeat. The flag is accepted for `GET` only. Some mutating operations
+  document query parameters (for example `include` on
+  `POST /v1/appAssetLibraryPlacementOrderingRequests`); those go in `PATH`.
+  Query parameters from either source are checked against the matched
+  operation for every method (see Validation order).
 - `--body JSON` sends an inline JSON object. `--body @path` reads the object
   from a file (`@-` reads standard input). `--body-file PATH` is the explicit
   file form and is mutually exclusive with `--body`. A body is accepted for
@@ -35,7 +38,10 @@ asc api <METHOD> <PATH> [flags]
 - `--paginate` follows `links.next` for `GET` collection responses and prints
   one aggregated envelope.
 - `--confirm` is required for every non-`GET` request. There are no prompts.
-- `--allow-unknown-path` skips the embedded schema index check.
+- `--allow-unknown-path` skips the embedded schema index check, and for an
+  indexed operation the query and body checks, for any method. An unindexed
+  non-`GET` operation documents no query parameters, so a query string in its
+  `PATH` stays a usage error.
 - `--output json` (the only format) and `--pretty` control rendering, bound
   through `shared.BindOutputFlagsWithAllowed` exactly as `asc ads`,
   `asc workflow`, and `asc web xcode-cloud workflow-options` bind it. The
@@ -89,8 +95,16 @@ trailing `--paginate GET` is never rewritten into `--paginate=GET`.
    method first, then longest shared leading segment run, then the requested
    method, then the smallest edit distance between the first differing
    segments, then the smallest length difference.
-6. Body parsing (`--body`, `--body-file`).
-7. Client creation. Nothing above touches credentials or the network.
+6. Query parameters, unless `--allow-unknown-path` is set. Every name must be
+   documented for the matched operation (`cursor` is also accepted on a `GET`),
+   and so must each comma-separated value of a parameter that documents its
+   values (`include`, `fields[...]`, `sort`, enum filters). This applies to
+   every method.
+7. Body parsing (`--body`, `--body-file`). Unless `--allow-unknown-path` is
+   set, a body for an indexed operation must have a top-level `data` member,
+   and its attribute and relationship names must be in the operation's request
+   schema (a linkage request's `data` holds only resource identifiers).
+8. Client creation. Nothing above touches credentials or the network.
 
 ## Output
 
@@ -120,8 +134,11 @@ positional argument, so it is `asc api` regardless of method and path. Failure
 parameters are limited to the shared allowlist: the missing-`--confirm` error
 carries `--confirm`, and the unknown-operation error carries an `invalid_input`
 diagnostic with no parameter so the `--allow-unknown-path` hint in its message
-is never scanned as the failing flag. The method, path, query, and body never
-reach telemetry.
+is never scanned as the failing flag. Since schema v6 the event also carries
+the method, the path matched against the embedded schema's templates (every
+path parameter written `{id}`, or `other`), and the schema names of the query
+parameters (`cursor` and `other` for the rest). Query values, identifiers,
+headers, and bodies never reach telemetry.
 
 ## Compatibility
 

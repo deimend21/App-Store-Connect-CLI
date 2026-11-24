@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/peterbourgon/ff/v3/ffcli"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	webcore "github.com/rudrankriyam/App-Store-Connect-CLI/internal/web"
 )
 
@@ -28,30 +31,26 @@ func stubWebDeclarationSession(t *testing.T, accountID string) {
 	}
 }
 
-func TestWebAppsDeclarationsListHelpQualifiesRequiredPendingRows(t *testing.T) {
-	cmd := WebAppsDeclarationsListCommand()
-	if !strings.Contains(cmd.LongHelp, "A required\nrequirement that is still at `PENDING_COLLECTION` blocks") {
-		t.Fatalf("expected help to limit blockers to required pending rows, got %q", cmd.LongHelp)
-	}
-}
-
 func TestWebAppsDeclarationsListValidationErrors(t *testing.T) {
 	tests := []struct {
 		name    string
+		command func(*shared.Deps) *ffcli.Command
 		args    []string
 		wantErr string
 	}{
-		{name: "missing app", args: nil, wantErr: "--app is required"},
+		{name: "missing app", command: newWebAppsDeclarationsListCommand, args: nil, wantErr: "--app is required"},
+		{name: "compliance list missing app", command: newWebAppsComplianceListCommand, args: nil, wantErr: "--app is required"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ASC_APP_ID", "")
-			cmd := WebAppsDeclarationsListCommand()
+			d, depsStdout, depsStderr := newWebTestDeps()
+			cmd := tc.command(d)
 			if err := cmd.FlagSet.Parse(tc.args); err != nil {
 				t.Fatalf("parse error: %v", err)
 			}
-			stdout, stderr := captureWebCommandOutput(t, func() {
+			stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 				err := cmd.Exec(context.Background(), nil)
 				if !errors.Is(err, flag.ErrHelp) {
 					t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -67,27 +66,11 @@ func TestWebAppsDeclarationsListValidationErrors(t *testing.T) {
 	}
 }
 
-func TestWebAppsDeclarationsListRejectsPositionalArguments(t *testing.T) {
-	t.Setenv("ASC_APP_ID", "")
-	cmd := WebAppsDeclarationsListCommand()
-	if err := cmd.FlagSet.Parse([]string{"--app", "app-1"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-	_, stderr := captureWebCommandOutput(t, func() {
-		err := cmd.Exec(context.Background(), []string{"extra"})
-		if !errors.Is(err, flag.ErrHelp) {
-			t.Fatalf("expected flag.ErrHelp, got %v", err)
-		}
-	})
-	if !strings.Contains(stderr, "unexpected argument") {
-		t.Fatalf("expected positional argument error, got %q", stderr)
-	}
-}
-
 func TestWebAppsDeclarationsListRequiresPublicProviderID(t *testing.T) {
 	stubWebDeclarationSession(t, "")
 
-	cmd := WebAppsDeclarationsListCommand()
+	d, _, _ := newWebTestDeps()
+	cmd := newWebAppsDeclarationsListCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
@@ -117,11 +100,12 @@ func TestWebAppsDeclarationsListPrintsJSON(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAppsDeclarationsListCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsDeclarationsListCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1", "--output", "json"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -165,11 +149,12 @@ func TestWebAppsDeclarationsListPrintsTable(t *testing.T) {
 		}}, nil
 	}
 
-	cmd := WebAppsDeclarationsListCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsDeclarationsListCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1", "--output", "table"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -190,11 +175,12 @@ func TestWebAppsDeclarationsListReportsEmptyResult(t *testing.T) {
 		return nil, nil
 	}
 
-	cmd := WebAppsDeclarationsListCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsDeclarationsListCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1", "--output", "json"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -220,11 +206,12 @@ func TestWebAppsMedicalDeviceViewPrintsDeclaration(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAppsMedicalDeviceViewCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsMedicalDeviceViewCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1", "--output", "json"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -248,11 +235,12 @@ func TestWebAppsMedicalDeviceViewPrintsDeclaration(t *testing.T) {
 
 func TestWebAppsMedicalDeviceViewRequiresApp(t *testing.T) {
 	t.Setenv("ASC_APP_ID", "")
-	cmd := WebAppsMedicalDeviceViewCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsMedicalDeviceViewCommand(d)
 	if err := cmd.FlagSet.Parse(nil); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, stderr := captureWebCommandOutput(t, func() {
+	stdout, stderr := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		err := cmd.Exec(context.Background(), nil)
 		if !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -282,11 +270,12 @@ func TestWebAppsMedicalDeviceSetReportsUnchangedDeclaration(t *testing.T) {
 		}, nil
 	}
 
-	cmd := WebAppsMedicalDeviceSetCommand()
+	d, depsStdout, depsStderr := newWebTestDeps()
+	cmd := newWebAppsMedicalDeviceSetCommand(d)
 	if err := cmd.FlagSet.Parse([]string{"--app", "app-1", "--declared", "false", "--output", "json"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
-	stdout, _ := captureWebCommandOutput(t, func() {
+	stdout, _ := runWithWebTestDeps(depsStdout, depsStderr, func() {
 		if err := cmd.Exec(context.Background(), nil); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

@@ -19,17 +19,17 @@ import (
 )
 
 func TestAssetsScreenshotsSizesCommandDefaultFocused(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+	cmd := NewAssetsScreenshotsSizesCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.FlagSet.Parse([]string{}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
-			t.Fatalf("exec error: %v", err)
-		}
-	})
+	if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -94,16 +94,15 @@ func TestAssetsScreenshotsDownloadCommandRequiredFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := AssetsScreenshotsDownloadCommand()
+			d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+			cmd := NewAssetsScreenshotsDownloadCommand(d)
 			cmd.FlagSet.SetOutput(io.Discard)
 			if err := cmd.FlagSet.Parse(tt.args); err != nil {
 				t.Fatalf("parse error: %v", err)
 			}
 
-			var runErr error
-			stdout, stderr := captureOutput(t, func() {
-				runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-			})
+			runErr := cmd.Exec(context.Background(), cmd.FlagSet.Args())
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 			if stdout != "" {
 				t.Fatalf("stdout = %q, want empty", stdout)
@@ -159,12 +158,11 @@ func TestAssetsScreenshotsDownloadCommandIncludesPaginatedSetsAndScreenshots(t *
 			http.Error(w, "unexpected request", http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-		return client, nil
-	}))
-
 	outputDir := filepath.Join(t.TempDir(), "screenshots")
-	cmd := AssetsScreenshotsDownloadCommand()
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(func() (*asc.Client, error) {
+		return client, nil
+	})
+	cmd := NewAssetsScreenshotsDownloadCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.FlagSet.Parse([]string{
 		"--version-localization", "loc-1",
@@ -173,10 +171,8 @@ func TestAssetsScreenshotsDownloadCommandIncludesPaginatedSetsAndScreenshots(t *
 		t.Fatalf("parse error: %v", err)
 	}
 
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
+	runErr := cmd.Exec(context.Background(), cmd.FlagSet.Args())
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 	if runErr != nil {
 		t.Fatalf("download command error: %v (stdout=%q, stderr=%q)", runErr, stdout, stderr)
 	}
@@ -235,104 +231,55 @@ func TestResolveScreenshotDownloadURLPreservesMetadataFetchError(t *testing.T) {
 }
 
 func TestAssetsScreenshotsSizesCommandFilter(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{"--display-type", "APP_IPHONE_65"}); err != nil {
-		t.Fatalf("parse error: %v", err)
+	tests := []struct {
+		displayType string
+		want        string
+	}{
+		{displayType: "APP_IPHONE_65", want: "APP_IPHONE_65"},
+		{displayType: "IPHONE_69", want: "APP_IPHONE_69"},
+		{displayType: "IMESSAGE_APP_IPHONE_69", want: "IMESSAGE_APP_IPHONE_69"},
 	}
+	for _, test := range tests {
+		t.Run(test.displayType, func(t *testing.T) {
+			d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+			cmd := NewAssetsScreenshotsSizesCommand(d)
+			cmd.FlagSet.SetOutput(io.Discard)
+			if err := cmd.FlagSet.Parse([]string{"--display-type", test.displayType}); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
-			t.Fatalf("exec error: %v", err)
-		}
-	})
+			if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
+				t.Fatalf("exec error: %v", err)
+			}
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
+			if stderr != "" {
+				t.Fatalf("expected empty stderr, got %q", stderr)
+			}
 
-	var result asc.ScreenshotSizesResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode output: %v", err)
-	}
-	if len(result.Sizes) != 1 {
-		t.Fatalf("expected 1 size entry, got %d", len(result.Sizes))
-	}
-	if result.Sizes[0].DisplayType != "APP_IPHONE_65" {
-		t.Fatalf("expected APP_IPHONE_65, got %q", result.Sizes[0].DisplayType)
-	}
-}
-
-func TestAssetsScreenshotsSizesCommandSupportsIPhone69Alias(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{"--display-type", "IPHONE_69"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
-			t.Fatalf("exec error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
-	var result asc.ScreenshotSizesResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode output: %v", err)
-	}
-	if len(result.Sizes) != 1 {
-		t.Fatalf("expected 1 size entry, got %d", len(result.Sizes))
-	}
-	if result.Sizes[0].DisplayType != "APP_IPHONE_69" {
-		t.Fatalf("expected APP_IPHONE_69, got %q", result.Sizes[0].DisplayType)
-	}
-}
-
-func TestAssetsScreenshotsSizesCommandSupportsIMessageIPhone69Alias(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{"--display-type", "IMESSAGE_APP_IPHONE_69"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
-			t.Fatalf("exec error: %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected empty stderr, got %q", stderr)
-	}
-
-	var result asc.ScreenshotSizesResult
-	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-		t.Fatalf("decode output: %v", err)
-	}
-	if len(result.Sizes) != 1 {
-		t.Fatalf("expected 1 size entry, got %d", len(result.Sizes))
-	}
-	if result.Sizes[0].DisplayType != "IMESSAGE_APP_IPHONE_69" {
-		t.Fatalf("expected IMESSAGE_APP_IPHONE_69, got %q", result.Sizes[0].DisplayType)
+			var result asc.ScreenshotSizesResult
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatalf("decode output: %v", err)
+			}
+			if len(result.Sizes) != 1 || result.Sizes[0].DisplayType != test.want {
+				t.Fatalf("sizes = %+v, want one %s entry", result.Sizes, test.want)
+			}
+		})
 	}
 }
 
 func TestAssetsScreenshotsSizesCommandAllIncludesNonFocusedTypes(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+	cmd := NewAssetsScreenshotsSizesCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.FlagSet.Parse([]string{"--all"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
-			t.Fatalf("exec error: %v", err)
-		}
-	})
+	if err := cmd.Exec(context.Background(), cmd.FlagSet.Args()); err != nil {
+		t.Fatalf("exec error: %v", err)
+	}
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -359,16 +306,15 @@ func TestAssetsScreenshotsSizesCommandAllIncludesNonFocusedTypes(t *testing.T) {
 }
 
 func TestAssetsScreenshotsSizesCommandRejectsAllWithDisplayType(t *testing.T) {
-	cmd := AssetsScreenshotsSizesCommand()
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+	cmd := NewAssetsScreenshotsSizesCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.FlagSet.Parse([]string{"--all", "--display-type", "APP_IPHONE_65"}); err != nil {
 		t.Fatalf("parse error: %v", err)
 	}
 
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
+	runErr := cmd.Exec(context.Background(), cmd.FlagSet.Args())
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 	if stdout != "" {
 		t.Fatalf("expected empty stdout, got %q", stdout)
@@ -381,105 +327,54 @@ func TestAssetsScreenshotsSizesCommandRejectsAllWithDisplayType(t *testing.T) {
 	}
 }
 
-func TestAssetsScreenshotsUploadCommandRejectsSkipExistingWithReplace(t *testing.T) {
-	cmd := AssetsScreenshotsUploadCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{
-		"--version-localization", "LOC_ID",
-		"--path", "./screenshots",
-		"--device-type", "IPHONE_65",
-		"--skip-existing",
-		"--replace",
-	}); err != nil {
-		t.Fatalf("parse error: %v", err)
+func TestAssetsScreenshotsUploadCommandValidatesFlagsBeforeUpload(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "skip existing with replace",
+			args: []string{"--version-localization", "LOC_ID", "--path", "./screenshots", "--device-type", "IPHONE_65", "--skip-existing", "--replace"},
+			want: "--skip-existing and --replace are mutually exclusive",
+		},
+		{
+			name: "missing upload mode",
+			want: "choose an upload mode: --version-localization VERSION_LOCALIZATION_ID; (--app APP_ID or ASC_APP_ID) with --version VERSION or --version-id VERSION_ID; or --resume ARTIFACT_PATH",
+		},
+		{
+			name: "invalid concurrency",
+			args: []string{"--concurrency", "11"},
+			want: "screenshots upload: --concurrency must be between 1 and 10",
+		},
+		{
+			name: "max screenshots with resume",
+			args: []string{"--resume", ".asc/reports/screenshots-upload/failures.json", "--max-screenshots", "10"},
+			want: "--resume cannot be combined with --skip-existing, --replace, --confirm, --dry-run, or --max-screenshots",
+		},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+			cmd := NewAssetsScreenshotsUploadCommand(d)
+			cmd.FlagSet.SetOutput(io.Discard)
+			if err := cmd.FlagSet.Parse(test.args); err != nil {
+				t.Fatalf("parse error: %v", err)
+			}
 
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
+			runErr := cmd.Exec(context.Background(), cmd.FlagSet.Args())
+			stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "--skip-existing and --replace are mutually exclusive") {
-		t.Fatalf("expected mutually exclusive error in stderr, got %q", stderr)
-	}
-}
-
-func TestAssetsScreenshotsUploadCommandRequiresUploadMode(t *testing.T) {
-	cmd := AssetsScreenshotsUploadCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse(nil); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	const want = "Error: choose an upload mode: --version-localization VERSION_LOCALIZATION_ID; (--app APP_ID or ASC_APP_ID) with --version VERSION or --version-id VERSION_ID; or --resume ARTIFACT_PATH\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-}
-
-func TestAssetsScreenshotsUploadCommandRejectsInvalidConcurrency(t *testing.T) {
-	cmd := AssetsScreenshotsUploadCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{"--concurrency", "9"}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if runErr == nil || !strings.Contains(runErr.Error(), "--concurrency must be between 1 and 8") {
-		t.Fatalf("expected invalid concurrency error, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "--concurrency must be between 1 and 8") {
-		t.Fatalf("expected invalid concurrency diagnostic, got %q", stderr)
-	}
-}
-
-func TestAssetsScreenshotsUploadCommandRejectsMaxScreenshotsWithResume(t *testing.T) {
-	cmd := AssetsScreenshotsUploadCommand()
-	cmd.FlagSet.SetOutput(io.Discard)
-	if err := cmd.FlagSet.Parse([]string{
-		"--resume", ".asc/reports/screenshots-upload/failures.json",
-		"--max-screenshots", "10",
-	}); err != nil {
-		t.Fatalf("parse error: %v", err)
-	}
-
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		runErr = cmd.Exec(context.Background(), cmd.FlagSet.Args())
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "--resume cannot be combined with --skip-existing, --replace, --confirm, --dry-run, or --max-screenshots") {
-		t.Fatalf("expected max-screenshots resume error in stderr, got %q", stderr)
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !errors.Is(runErr, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", runErr)
+			}
+			if want := "Error: " + test.want + "\n"; stderr != want {
+				t.Fatalf("stderr = %q, want %q", stderr, want)
+			}
+		})
 	}
 }
 
@@ -490,16 +385,14 @@ func TestExecuteScreenshotUploadCommandRejectsMoreThanTenScreenshotsBeforeAuth(t
 	}
 
 	clientCalled := false
-	_, err := executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
+	_, err := executeScreenshotUploadCommand(context.Background(), newAssetsClientTestDeps(func() (*asc.Client, error) {
+		clientCalled = true
+		return &asc.Client{}, nil
+	}), screenshotUploadCommandOptions{
 		VersionLocalizationID: "LOC_ID",
 		Path:                  dir,
 		DeviceType:            "IPHONE_65",
-	}, screenshotUploadDependencies{
-		GetClient: func() (*asc.Client, error) {
-			clientCalled = true
-			return &asc.Client{}, nil
-		},
-	})
+	}, screenshotUploadDependencies{})
 
 	if err == nil {
 		t.Fatal("expected screenshot-count error")
@@ -510,8 +403,8 @@ func TestExecuteScreenshotUploadCommandRejectsMoreThanTenScreenshotsBeforeAuth(t
 	if !strings.Contains(err.Error(), "allow at most 10 images") {
 		t.Fatalf("expected max screenshot guidance, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "--max-screenshots 10") {
-		t.Fatalf("expected --max-screenshots guidance, got %v", err)
+	if !strings.Contains(err.Error(), "Reduce the selected screenshots to 10 or fewer") || strings.Contains(err.Error(), "--max-screenshots") {
+		t.Fatalf("expected screenshot selection guidance, got %v", err)
 	}
 	if clientCalled {
 		t.Fatal("expected local screenshot-count validation before auth/client creation")
@@ -521,19 +414,17 @@ func TestExecuteScreenshotUploadCommandRejectsMoreThanTenScreenshotsBeforeAuth(t
 func TestExecuteScreenshotUploadCommandRejectsMaxScreenshotsAboveAppleLimit(t *testing.T) {
 	clientCalled := false
 	var err error
-	_, stderr := captureOutput(t, func() {
-		_, err = executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
-			VersionLocalizationID: "LOC_ID",
-			Path:                  "unused",
-			DeviceType:            "IPHONE_65",
-			MaxScreenshots:        11,
-		}, screenshotUploadDependencies{
-			GetClient: func() (*asc.Client, error) {
-				clientCalled = true
-				return &asc.Client{}, nil
-			},
-		})
+	d, _, stderrBuf := newAssetsTestDeps(func() (*asc.Client, error) {
+		clientCalled = true
+		return &asc.Client{}, nil
 	})
+	_, err = executeScreenshotUploadCommand(context.Background(), d, screenshotUploadCommandOptions{
+		VersionLocalizationID: "LOC_ID",
+		Path:                  "unused",
+		DeviceType:            "IPHONE_65",
+		MaxScreenshots:        11,
+	}, screenshotUploadDependencies{})
+	stderr := stderrBuf.String()
 
 	if !errors.Is(err, flag.ErrHelp) {
 		t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -589,11 +480,39 @@ func TestLimitScreenshotUploadFilesForFullSetRejectsExplicitLimitWithUsableRemed
 	if err == nil {
 		t.Fatal("expected full screenshot set error")
 	}
-	if strings.Contains(err.Error(), "choose a higher limit") || strings.Contains(err.Error(), "--max-screenshots 0") {
+	if strings.Contains(err.Error(), "choose a higher limit") || strings.Contains(err.Error(), "--max-screenshots") {
 		t.Fatalf("expected usable full-set remediation, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "--max-screenshots cannot create capacity") {
+	if !strings.Contains(err.Error(), "no upload slots remain") {
 		t.Fatalf("expected explicit capacity guidance, got %v", err)
+	}
+}
+
+func TestUploadScreenshotsDryRunCapacityGuidance(t *testing.T) {
+	for _, existingCount := range []int{9, 10} {
+		t.Run(fmt.Sprintf("%d existing", existingCount), func(t *testing.T) {
+			filePath := writeAssetsTestPNG(t, t.TempDir(), "new.png")
+			client := newAssetsUploadTestHandlerClient(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersionLocalizations/LOC_123/appScreenshotSets":
+					writeAssetsTestJSON(w, http.StatusOK, `{"data":[{"type":"appScreenshotSets","id":"set-1","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`)
+				case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-1/appScreenshots":
+					existing := make([]asc.Resource[asc.AppScreenshotAttributes], existingCount)
+					if err := json.NewEncoder(w).Encode(asc.AppScreenshotsResponse{Data: existing}); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+				}
+			}))
+			_, err := uploadScreenshots(context.Background(), newAssetsUploadTestDeps(), client, "LOC_123", "APP_IPHONE_65", []string{filePath, filePath}, false, false, true)
+			if err == nil {
+				t.Fatal("expected screenshot capacity error")
+			}
+			if !strings.Contains(err.Error(), "with --replace") || strings.Contains(err.Error(), "with --replace --confirm") || strings.Contains(err.Error(), "--max-screenshots") {
+				t.Fatalf("expected usable plan capacity guidance, got %v", err)
+			}
+		})
 	}
 }
 
@@ -604,15 +523,14 @@ func TestExecuteScreenshotUploadCommandMaxScreenshotsCapsSortedFiles(t *testing.
 	}
 
 	var gotFiles []string
-	result, err := executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
+	result, err := executeScreenshotUploadCommand(context.Background(), newAssetsClientTestDeps(func() (*asc.Client, error) {
+		return &asc.Client{}, nil
+	}), screenshotUploadCommandOptions{
 		VersionLocalizationID: "LOC_ID",
 		Path:                  dir,
 		DeviceType:            "IPHONE_65",
 		MaxScreenshots:        10,
 	}, screenshotUploadDependencies{
-		GetClient: func() (*asc.Client, error) {
-			return &asc.Client{}, nil
-		},
 		ExecuteUpload: func(_ context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult], _ string) (asc.AppScreenshotUploadResult, error) {
 			gotFiles = append([]string(nil), cfg.Files...)
 			return asc.AppScreenshotUploadResult{
@@ -645,14 +563,13 @@ func TestExecuteScreenshotUploadCommandCanonicalizesDisplayTypeBeforeASCRequests
 	writeAssetsTestPNGWithSize(t, dir, "01-home.png", 1260, 2736)
 
 	var gotDisplayType string
-	_, err := executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
+	_, err := executeScreenshotUploadCommand(context.Background(), newAssetsClientTestDeps(func() (*asc.Client, error) {
+		return &asc.Client{}, nil
+	}), screenshotUploadCommandOptions{
 		VersionLocalizationID: "LOC_ID",
 		Path:                  dir,
 		DeviceType:            "IPHONE_69",
 	}, screenshotUploadDependencies{
-		GetClient: func() (*asc.Client, error) {
-			return &asc.Client{}, nil
-		},
 		ExecuteUpload: func(_ context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult], _ string) (asc.AppScreenshotUploadResult, error) {
 			gotDisplayType = cfg.DisplayType
 			return asc.AppScreenshotUploadResult{}, nil
@@ -674,15 +591,14 @@ func TestExecuteScreenshotUploadCommandMaxScreenshotsCapsBeforeDimensionValidati
 	writeAssetsTestPNGWithSize(t, dir, "11-wrong-size.png", 100, 100)
 
 	var gotFiles []string
-	_, err := executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
+	_, err := executeScreenshotUploadCommand(context.Background(), newAssetsClientTestDeps(func() (*asc.Client, error) {
+		return &asc.Client{}, nil
+	}), screenshotUploadCommandOptions{
 		VersionLocalizationID: "LOC_ID",
 		Path:                  dir,
 		DeviceType:            "IPHONE_65",
 		MaxScreenshots:        10,
 	}, screenshotUploadDependencies{
-		GetClient: func() (*asc.Client, error) {
-			return &asc.Client{}, nil
-		},
 		ExecuteUpload: func(_ context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult], _ string) (asc.AppScreenshotUploadResult, error) {
 			gotFiles = append([]string(nil), cfg.Files...)
 			return asc.AppScreenshotUploadResult{}, nil
@@ -711,15 +627,14 @@ func TestExecuteScreenshotUploadCommandMaxScreenshotsCapsBeforeImageValidation(t
 	}
 
 	var gotFiles []string
-	_, err := executeScreenshotUploadCommand(context.Background(), screenshotUploadCommandOptions{
+	_, err := executeScreenshotUploadCommand(context.Background(), newAssetsClientTestDeps(func() (*asc.Client, error) {
+		return &asc.Client{}, nil
+	}), screenshotUploadCommandOptions{
 		VersionLocalizationID: "LOC_ID",
 		Path:                  dir,
 		DeviceType:            "IPHONE_65",
 		MaxScreenshots:        10,
 	}, screenshotUploadDependencies{
-		GetClient: func() (*asc.Client, error) {
-			return &asc.Client{}, nil
-		},
 		ExecuteUpload: func(_ context.Context, cfg screenshotUploadConfig[asc.AppScreenshotUploadResult], _ string) (asc.AppScreenshotUploadResult, error) {
 			gotFiles = append([]string(nil), cfg.Files...)
 			return asc.AppScreenshotUploadResult{}, nil

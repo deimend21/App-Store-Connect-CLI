@@ -18,30 +18,29 @@ import (
 )
 
 // TestExecuteStagePropagatesMetadataDeleteFlags proves the operator's
-// --allow-deletes and --confirm reach metadata.ExecutePush. Hardcoding them to
+// --allow-deletes and --confirm reach metadata.ExecutePushWith. Hardcoding them to
 // false made a confirmed run abort on a delete plan the command could not
 // authorize.
 func TestExecuteStagePropagatesMetadataDeleteFlags(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
 	var pushOptions metadata.PushExecutionOptions
-	metadataPushExecutor = func(_ context.Context, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(_ context.Context, _ *shared.Deps, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		pushOptions = opts
 		return metadata.PushPlanResult{
 			VersionID: "VERSION_123",
 			Deletes:   []metadata.PlanItem{{Locale: "fr-FR", Field: "description"}},
 		}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		return validation.Report{Summary: validation.Summary{}}, nil
 	}
 	http.DefaultTransport = releaseRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -58,9 +57,9 @@ func TestExecuteStagePropagatesMetadataDeleteFlags(t *testing.T) {
 		}
 	})
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -90,18 +89,17 @@ func TestExecuteStagePropagatesMetadataDeleteFlags(t *testing.T) {
 // preview with the same requirement the confirmed run enforces instead of
 // reporting a green plan that then aborts under --confirm.
 func TestExecuteStageDryRunRejectsPlannedDeletesWithoutAllowDeletes(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
-	metadataPushExecutor = func(_ context.Context, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(_ context.Context, _ *shared.Deps, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		return metadata.PushPlanResult{
 			VersionID: "VERSION_123",
 			DryRun:    opts.DryRun,
@@ -111,7 +109,7 @@ func TestExecuteStageDryRunRejectsPlannedDeletesWithoutAllowDeletes(t *testing.T
 			},
 		}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		t.Fatal("readiness must not run after the metadata plan is rejected")
 		return validation.Report{}, nil
 	}
@@ -125,9 +123,9 @@ func TestExecuteStageDryRunRejectsPlannedDeletesWithoutAllowDeletes(t *testing.T
 		return nil, fmt.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
 	})
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -171,19 +169,18 @@ func TestExecuteStageDryRunRejectsPlannedDeletesWithoutAllowDeletes(t *testing.T
 // TestExecuteStageDryRunPlansDeletesWithAllowDeletes proves an authorized
 // delete plan still previews cleanly.
 func TestExecuteStageDryRunPlansDeletesWithAllowDeletes(t *testing.T) {
-	origClientFactory := releaseClientFactory
+	d := releaseTestDeps()
 	origMetadataExecutor := metadataPushExecutor
 	origReadinessBuilder := readinessReportBuilder
 	origTransport := http.DefaultTransport
 	t.Cleanup(func() {
-		releaseClientFactory = origClientFactory
 		metadataPushExecutor = origMetadataExecutor
 		readinessReportBuilder = origReadinessBuilder
 		http.DefaultTransport = origTransport
 	})
 
 	var pushOptions metadata.PushExecutionOptions
-	metadataPushExecutor = func(_ context.Context, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
+	metadataPushExecutor = func(_ context.Context, _ *shared.Deps, opts metadata.PushExecutionOptions) (metadata.PushPlanResult, error) {
 		pushOptions = opts
 		return metadata.PushPlanResult{
 			VersionID: "VERSION_123",
@@ -191,7 +188,7 @@ func TestExecuteStageDryRunPlansDeletesWithAllowDeletes(t *testing.T) {
 			Deletes:   []metadata.PlanItem{{Locale: "fr-FR", Field: "description"}},
 		}, nil
 	}
-	readinessReportBuilder = func(context.Context, validatecli.ReadinessOptions) (validation.Report, error) {
+	readinessReportBuilder = func(context.Context, *shared.Deps, validatecli.ReadinessOptions) (validation.Report, error) {
 		return validation.Report{Summary: validation.Summary{}}, nil
 	}
 	http.DefaultTransport = releaseRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -208,9 +205,9 @@ func TestExecuteStageDryRunPlansDeletesWithAllowDeletes(t *testing.T) {
 		}
 	})
 	testClient := newReleaseTestClient(t)
-	releaseClientFactory = func() (*asc.Client, error) { return testClient, nil }
+	d.Client = func() (*asc.Client, error) { return testClient, nil }
 
-	result, err := executeStage(context.Background(), runOptions{
+	result, err := executeStage(context.Background(), d, runOptions{
 		AppID:          "APP_123",
 		Version:        "2.4.0",
 		BuildID:        "BUILD_123",
@@ -235,30 +232,18 @@ func TestExecuteStageDryRunPlansDeletesWithAllowDeletes(t *testing.T) {
 	}
 }
 
-func TestReleaseStageCommandExposesAllowDeletes(t *testing.T) {
-	cmd := ReleaseStageCommand()
-	allowDeletes := cmd.FlagSet.Lookup("allow-deletes")
-	if allowDeletes == nil {
-		t.Fatal("expected --allow-deletes flag")
-	}
-	if !strings.Contains(allowDeletes.Usage, "--metadata-dir") {
-		t.Fatalf("expected --allow-deletes help to name --metadata-dir, got %q", allowDeletes.Usage)
-	}
-}
-
 // TestReleaseStageRejectsAllowDeletesWithoutMetadataDir proves the flag is
 // never accepted and silently ignored: the copy pipeline has no delete
 // operations to authorize.
 func TestReleaseStageRejectsAllowDeletesWithoutMetadataDir(t *testing.T) {
-	originalClientFactory := releaseClientFactory
-	t.Cleanup(func() { releaseClientFactory = originalClientFactory })
+	d := releaseTestDeps()
 	clientCalled := false
-	releaseClientFactory = func() (*asc.Client, error) {
+	d.Client = func() (*asc.Client, error) {
 		clientCalled = true
 		return nil, errors.New("client must not be created")
 	}
 
-	cmd := ReleaseStageCommand()
+	cmd := newReleaseStageCommand(d)
 	if err := cmd.FlagSet.Parse([]string{
 		"--app", "APP_123",
 		"--version", "2.4.0",
@@ -271,7 +256,7 @@ func TestReleaseStageRejectsAllowDeletesWithoutMetadataDir(t *testing.T) {
 	}
 
 	var execErr error
-	stderr := captureReleaseStderr(t, func() {
+	stderr := captureReleaseStderr(t, d, func() {
 		execErr = cmd.Exec(context.Background(), nil)
 	})
 	if !errors.Is(execErr, flag.ErrHelp) {

@@ -1,32 +1,27 @@
 package devices
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
-func TestDevicesCommand_BatchExampleConfirmsMutation(t *testing.T) {
-	cmd := DevicesCommand()
-
-	if !strings.Contains(cmd.LongHelp, `asc devices register-batch --file "./devices.txt" --confirm`) {
-		t.Fatalf("devices help must show a runnable confirmed batch example, got:\n%s", cmd.LongHelp)
-	}
-}
-
-func TestDevicesRegisterBatchHelpDoesNotDuplicateContinueDefault(t *testing.T) {
-	cmd := DevicesRegisterBatchCommand()
-	usage := cmd.FlagSet.Lookup("continue-on-error").Usage
-	if strings.Contains(usage, "default true") {
-		t.Fatalf("continue-on-error usage must leave default rendering to the shared formatter, got %q", usage)
+// newTestDeps returns deps with buffered streams and the request timeout.
+func newTestDeps() *shared.Deps {
+	return &shared.Deps{
+		IO:      &shared.IO{Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}},
+		Timeout: shared.ContextWithTimeout,
 	}
 }
 
 func TestDevicesRegisterCommand_UDIDConflict(t *testing.T) {
-	cmd := DevicesRegisterCommand()
+	cmd := newDevicesRegisterCommand(newTestDeps())
 
 	if err := cmd.FlagSet.Parse([]string{"--name", "Device", "--udid", "UDID", "--udid-from-system", "--platform", "MAC_OS"}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)

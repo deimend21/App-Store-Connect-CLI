@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 	authsvc "github.com/rudrankriyam/App-Store-Connect-CLI/internal/auth"
@@ -33,7 +34,8 @@ func (fn authRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 func TestCommandWrapperReturnsAuthCommand(t *testing.T) {
-	cmd := AuthCommand()
+	d := newAuthTestDeps()
+	cmd := NewAuthCommand(d)
 	if cmd == nil {
 		t.Fatal("AuthCommand() returned nil")
 		return
@@ -44,7 +46,8 @@ func TestCommandWrapperReturnsAuthCommand(t *testing.T) {
 }
 
 func TestAuthHelpHighlightsStatusDiscoverability(t *testing.T) {
-	cmd := AuthCommand()
+	d := newAuthTestDeps()
+	cmd := NewAuthCommand(d)
 
 	for _, expected := range []string{
 		`Use "asc auth status" to see which credentials/profile are currently active.`,
@@ -56,14 +59,15 @@ func TestAuthHelpHighlightsStatusDiscoverability(t *testing.T) {
 		}
 	}
 
-	statusCmd := AuthStatusCommand()
+	statusCmd := newAuthStatusCommand(d)
 	if !strings.Contains(statusCmd.ShortHelp, "active profile") {
 		t.Fatalf("expected AuthStatusCommand().ShortHelp to mention active profile, got %q", statusCmd.ShortHelp)
 	}
 }
 
 func TestAuthHelpExplainsCredentialResolutionBranches(t *testing.T) {
-	longHelp := AuthCommand().LongHelp
+	d := newAuthTestDeps()
+	longHelp := NewAuthCommand(d).LongHelp
 	for _, expected := range []string{
 		"--profile or ASC_PROFILE selects a stored profile and disables the env-only fast path.",
 		"With no profile and keychain bypass disabled, a complete environment set skips stored lookup.",
@@ -77,8 +81,9 @@ func TestAuthHelpExplainsCredentialResolutionBranches(t *testing.T) {
 }
 
 func TestAuthCommandUnknownSubcommand(t *testing.T) {
-	cmd := AuthCommand()
-	_, stderr := captureAuthOutput(t, func() {
+	d := newAuthTestDeps()
+	cmd := NewAuthCommand(d)
+	_, stderr := captureAuthOutput(t, d, func() {
 		err := cmd.Exec(context.Background(), []string{"unknown"})
 		if !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("Exec() error = %v, want %v", err, flag.ErrHelp)
@@ -90,10 +95,11 @@ func TestAuthCommandUnknownSubcommand(t *testing.T) {
 }
 
 func TestAuthInitCommandLocalLifecycle(t *testing.T) {
+	d := newAuthTestDeps()
 	withTempRepo(t, func(repo string) {
 		cfgPath := filepath.Join(repo, ".asc", "config.json")
 
-		cmd := AuthInitCommand()
+		cmd := newAuthInitCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--local"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -104,7 +110,7 @@ func TestAuthInitCommandLocalLifecycle(t *testing.T) {
 			t.Fatalf("expected config at %s: %v", cfgPath, err)
 		}
 
-		cmdAgain := AuthInitCommand()
+		cmdAgain := newAuthInitCommand(d)
 		if err := cmdAgain.FlagSet.Parse([]string{"--local"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -113,7 +119,7 @@ func TestAuthInitCommandLocalLifecycle(t *testing.T) {
 			t.Fatalf("expected existing-config error, got %v", err)
 		}
 
-		cmdForce := AuthInitCommand()
+		cmdForce := newAuthInitCommand(d)
 		if err := cmdForce.FlagSet.Parse([]string{"--local", "--force"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -124,12 +130,13 @@ func TestAuthInitCommandLocalLifecycle(t *testing.T) {
 }
 
 func TestAuthDoctorCommandFlagValidation(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("unsupported output", func(t *testing.T) {
-		cmd := AuthDoctorCommand()
+		cmd := NewAuthDoctorCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "yaml"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -141,11 +148,11 @@ func TestAuthDoctorCommandFlagValidation(t *testing.T) {
 	})
 
 	t.Run("pretty requires json output", func(t *testing.T) {
-		cmd := AuthDoctorCommand()
+		cmd := NewAuthDoctorCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--pretty"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -157,11 +164,11 @@ func TestAuthDoctorCommandFlagValidation(t *testing.T) {
 	})
 
 	t.Run("fix requires confirm", func(t *testing.T) {
-		cmd := AuthDoctorCommand()
+		cmd := NewAuthDoctorCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--fix"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -174,6 +181,7 @@ func TestAuthDoctorCommandFlagValidation(t *testing.T) {
 }
 
 func TestDoctorHelpers(t *testing.T) {
+	d := newAuthTestDeps()
 	if got := doctorStatusLabel(authsvc.DoctorOK); got != "OK" {
 		t.Fatalf("doctorStatusLabel(DoctorOK) = %q, want OK", got)
 	}
@@ -199,8 +207,8 @@ func TestDoctorHelpers(t *testing.T) {
 		Recommendations: []string{"fix\u2028forged row"},
 		Summary:         authsvc.DoctorSummary{},
 	}
-	stdout, _ := captureAuthOutput(t, func() {
-		printDoctorReport(report)
+	stdout, _ := captureAuthOutput(t, d, func() {
+		printDoctorReport(d, report)
 	})
 	if !strings.Contains(stdout, "Auth Doctor") || !strings.Contains(stdout, "[OK] all[31m good") {
 		t.Fatalf("unexpected doctor output: %q", stdout)
@@ -233,7 +241,7 @@ func TestPermissionWarningAndHooks(t *testing.T) {
 }
 
 func TestValidateLoginNetwork_InvalidKeyPath(t *testing.T) {
-	err := validateLoginNetwork(context.Background(), "KEY", "ISS", "/definitely/missing/AuthKey.p8")
+	err := validateLoginNetwork(context.Background(), "KEY", "ISS", "/definitely/missing/AuthKey.p8", "", "team")
 	if err == nil {
 		t.Fatal("expected validateLoginNetwork() to fail for invalid key path")
 	}
@@ -341,7 +349,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			return "", errors.New("jwt failed")
 		})
 		prevNetwork := loginNetworkValidate
-		loginNetworkValidate = func(context.Context, string, string, string) error {
+		loginNetworkValidate = func(context.Context, string, string, string, string, string) error {
 			t.Fatal("network validation should not run when jwt generation fails")
 			return nil
 		}
@@ -350,7 +358,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			loginNetworkValidate = prevNetwork
 		})
 
-		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, "", "team", true)
 		if err == nil || !strings.Contains(err.Error(), "failed to generate JWT") {
 			t.Fatalf("expected jwt error, got %v", err)
 		}
@@ -362,7 +370,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			return "token", nil
 		})
 		prevNetwork := loginNetworkValidate
-		loginNetworkValidate = func(context.Context, string, string, string) error {
+		loginNetworkValidate = func(context.Context, string, string, string, string, string) error {
 			t.Fatal("network validation should not run when network=false")
 			return nil
 		}
@@ -371,7 +379,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			loginNetworkValidate = prevNetwork
 		})
 
-		if err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, false); err != nil {
+		if err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, "", "team", false); err != nil {
 			t.Fatalf("validateLoginCredentials() error: %v", err)
 		}
 	})
@@ -381,7 +389,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			return "token", nil
 		})
 		prevNetwork := loginNetworkValidate
-		loginNetworkValidate = func(context.Context, string, string, string) error {
+		loginNetworkValidate = func(context.Context, string, string, string, string, string) error {
 			return errors.New("network down")
 		}
 		t.Cleanup(func() {
@@ -389,7 +397,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			loginNetworkValidate = prevNetwork
 		})
 
-		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, "", "team", true)
 		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
 			t.Fatalf("expected network validation error, got %v", err)
 		}
@@ -401,7 +409,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			return "token", nil
 		})
 		prevNetwork := loginNetworkValidate
-		loginNetworkValidate = func(context.Context, string, string, string) error {
+		loginNetworkValidate = func(context.Context, string, string, string, string, string) error {
 			return asc.ErrUnauthorized
 		}
 		t.Cleanup(func() {
@@ -409,7 +417,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			loginNetworkValidate = prevNetwork
 		})
 
-		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, "", "team", true)
 		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
 			t.Fatalf("expected network validation error, got %v", err)
 		}
@@ -421,7 +429,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			return "token", nil
 		})
 		prevNetwork := loginNetworkValidate
-		loginNetworkValidate = func(context.Context, string, string, string) error {
+		loginNetworkValidate = func(context.Context, string, string, string, string, string) error {
 			return asc.ErrForbidden
 		}
 		t.Cleanup(func() {
@@ -429,7 +437,7 @@ func TestValidateLoginCredentials(t *testing.T) {
 			loginNetworkValidate = prevNetwork
 		})
 
-		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, true)
+		err := validateLoginCredentials(context.Background(), "KEY", "ISS", keyPath, "", "team", true)
 		if err == nil || !strings.Contains(err.Error(), "network validation failed") {
 			t.Fatalf("expected network validation error, got %v", err)
 		}
@@ -459,6 +467,7 @@ func TestLoginStorageMessage_BypassModes(t *testing.T) {
 }
 
 func TestAuthLoginCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("local requires bypass", func(t *testing.T) {
 		// Capture exact original state, including empty-but-present values.
 		origValue, origPresent := os.LookupEnv("ASC_BYPASS_KEYCHAIN")
@@ -470,11 +479,11 @@ func TestAuthLoginCommand(t *testing.T) {
 				os.Unsetenv("ASC_BYPASS_KEYCHAIN")
 			}
 		})
-		cmd := AuthLoginCommand()
+		cmd := newAuthLoginCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--local"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -492,7 +501,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			return []authsvc.Credential{{Name: "existing"}}, nil
 		})
 		t.Cleanup(restore)
-		cmd := AuthLoginCommand()
+		cmd := newAuthLoginCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--key-id", "KEY", "--issuer-id", "ISS", "--private-key", "/tmp/AuthKey.p8"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -504,7 +513,7 @@ func TestAuthLoginCommand(t *testing.T) {
 	})
 
 	t.Run("whitespace key id", func(t *testing.T) {
-		cmd := AuthLoginCommand()
+		cmd := newAuthLoginCommand(d)
 		if err := cmd.FlagSet.Parse([]string{
 			"--name", "demo",
 			"--key-id", "   ",
@@ -513,7 +522,7 @@ func TestAuthLoginCommand(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -531,16 +540,17 @@ func TestAuthLoginCommand(t *testing.T) {
 		}
 	})
 
-	t.Run("missing key id hints from key file name", func(t *testing.T) {
-		cmd := AuthLoginCommand()
+	t.Run("blank key id hints from key file name", func(t *testing.T) {
+		cmd := newAuthLoginCommand(d)
 		if err := cmd.FlagSet.Parse([]string{
 			"--name", "demo",
+			"--key-id", "   ",
 			"--issuer-id", "ISS",
 			"--private-key", "/tmp/keys/AuthKey_39MX87M9Y4.p8",
 		}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -574,11 +584,11 @@ func TestAuthLoginCommand(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse(test.args); err != nil {
 				t.Fatalf("Parse() error: %v", err)
 			}
-			_, stderr := captureAuthOutput(t, func() {
+			_, stderr := captureAuthOutput(t, d, func() {
 				err := cmd.Exec(context.Background(), []string{})
 				if !errors.Is(err, flag.ErrHelp) {
 					t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -592,7 +602,7 @@ func TestAuthLoginCommand(t *testing.T) {
 	}
 
 	t.Run("skip validation mutually exclusive with network", func(t *testing.T) {
-		cmd := AuthLoginCommand()
+		cmd := newAuthLoginCommand(d)
 		if err := cmd.FlagSet.Parse([]string{
 			"--name", "demo",
 			"--key-id", "KEY",
@@ -603,7 +613,7 @@ func TestAuthLoginCommand(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -617,7 +627,7 @@ func TestAuthLoginCommand(t *testing.T) {
 
 	t.Run("invalid private key path", func(t *testing.T) {
 		withTempRepo(t, func(string) {
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -645,7 +655,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if err := os.Chmod(keyPath, 0o644); err != nil {
 				t.Fatalf("set key permissions: %v", err)
 			}
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -671,7 +681,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if err := os.Chmod(keyPath, 0o644); err != nil {
 				t.Fatalf("set key permissions: %v", err)
 			}
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -681,7 +691,7 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("Parse() error: %v", err)
 			}
 			var execErr error
-			_, stderr := captureAuthOutput(t, func() {
+			_, stderr := captureAuthOutput(t, d, func() {
 				execErr = cmd.Exec(context.Background(), []string{})
 			})
 			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
@@ -692,8 +702,8 @@ func TestAuthLoginCommand(t *testing.T) {
 			if !safe || !strings.HasPrefix(wantCommand, "chmod 600 ") || !strings.Contains(wantCommand, keyPath) {
 				t.Fatalf("remediation command = %q, safe=%t; want a chmod 600 command naming the key", wantCommand, safe)
 			}
-			if !strings.Contains(stderr, wantCommand) {
-				t.Fatalf("stderr = %q, want remediation %q", stderr, wantCommand)
+			if strings.Count(stderr, wantCommand) != 1 {
+				t.Fatalf("stderr = %q, want remediation %q exactly once", stderr, wantCommand)
 			}
 			if !strings.Contains(stderr, "--fix-permissions") {
 				t.Fatalf("stderr = %q, want --fix-permissions hint", stderr)
@@ -721,7 +731,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if err := os.Chmod(unsafePath, 0o644); err != nil {
 				t.Fatalf("set key permissions: %v", err)
 			}
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -731,7 +741,7 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("Parse() error: %v", err)
 			}
 			var execErr error
-			_, stderr := captureAuthOutput(t, func() {
+			_, stderr := captureAuthOutput(t, d, func() {
 				execErr = cmd.Exec(context.Background(), []string{})
 			})
 			if execErr == nil || !strings.Contains(execErr.Error(), "private key file is too permissive") {
@@ -746,7 +756,7 @@ func TestAuthLoginCommand(t *testing.T) {
 	t.Run("fix failure sanitizes unsafe private key path", func(t *testing.T) {
 		withTempRepo(t, func(string) {
 			unsafePath := filepath.Join(t.TempDir(), "missing\n\x1b[31mkey.p8")
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -776,7 +786,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if err := os.Chmod(keyPath, 0o644); err != nil {
 				t.Fatalf("set key permissions: %v", err)
 			}
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -789,7 +799,7 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("Parse() error: %v", err)
 			}
 			var execErr error
-			stdout, stderr := captureAuthOutput(t, func() {
+			stdout, stderr := captureAuthOutput(t, d, func() {
 				execErr = cmd.Exec(context.Background(), []string{})
 			})
 			if execErr != nil {
@@ -820,7 +830,7 @@ func TestAuthLoginCommand(t *testing.T) {
 		}
 		withTempRepo(t, func(string) {
 			keyPath := writeTempECDSAKeyFile(t)
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -833,7 +843,7 @@ func TestAuthLoginCommand(t *testing.T) {
 				t.Fatalf("Parse() error: %v", err)
 			}
 			var execErr error
-			_, stderr := captureAuthOutput(t, func() {
+			_, stderr := captureAuthOutput(t, d, func() {
 				execErr = cmd.Exec(context.Background(), []string{})
 			})
 			if execErr != nil {
@@ -858,7 +868,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			if err := os.Symlink(keyPath, link); err != nil {
 				t.Fatalf("Symlink() error: %v", err)
 			}
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -888,7 +898,7 @@ func TestAuthLoginCommand(t *testing.T) {
 	t.Run("successful local bypass login", func(t *testing.T) {
 		withTempRepo(t, func(repo string) {
 			keyPath := writeTempECDSAKeyFile(t)
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "demo",
 				"--key-id", "KEY",
@@ -918,7 +928,7 @@ func TestAuthLoginCommand(t *testing.T) {
 	t.Run("success message echoes normalized name", func(t *testing.T) {
 		withTempRepo(t, func(repo string) {
 			keyPath := writeTempECDSAKeyFile(t)
-			cmd := AuthLoginCommand()
+			cmd := newAuthLoginCommand(d)
 			if err := cmd.FlagSet.Parse([]string{
 				"--name", "  spaced  ",
 				"--key-id", "KEY",
@@ -930,7 +940,7 @@ func TestAuthLoginCommand(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Parse() error: %v", err)
 			}
-			stdout, _ := captureAuthOutput(t, func() {
+			stdout, _ := captureAuthOutput(t, d, func() {
 				if err := cmd.Exec(context.Background(), []string{}); err != nil {
 					t.Fatalf("Exec() error: %v", err)
 				}
@@ -965,9 +975,66 @@ func assertAuthDiagnostic(t *testing.T, err error, code shared.DiagnosticCode, p
 	}
 }
 
+func TestAuthLoginKeyFileRefusalNamesTheFix(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX key permissions")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root reads a key file whatever its mode")
+	}
+	tests := []struct {
+		name           string
+		mode           os.FileMode
+		wantDiagnostic shared.DiagnosticCode
+		wantError      string
+		wantFixFlag    bool
+	}{
+		{name: "readable by other users", mode: 0o644, wantDiagnostic: shared.DiagnosticFilePermissionsInsecure, wantError: "private key file is too permissive (mode 0644)", wantFixFlag: true},
+		{name: "unreadable by its owner", mode: 0o200, wantDiagnostic: shared.DiagnosticFilePermissionDenied, wantError: "permission denied"},
+	}
+	d := newAuthTestDeps()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTempRepo(t, func(string) {
+				keyPath := writeTempECDSAKeyFile(t)
+				if err := os.Chmod(keyPath, tt.mode); err != nil {
+					t.Fatalf("set key permissions: %v", err)
+				}
+				cmd := newAuthLoginCommand(d)
+				if err := cmd.FlagSet.Parse([]string{"--name", "demo", "--key-id", "KEY", "--issuer-id", "ISS", "--private-key", keyPath}); err != nil {
+					t.Fatalf("Parse() error: %v", err)
+				}
+				var execErr error
+				_, stderr := captureAuthOutput(t, d, func() {
+					execErr = cmd.Exec(context.Background(), []string{})
+				})
+				if execErr == nil || !strings.Contains(execErr.Error(), tt.wantError) {
+					t.Fatalf("error = %v, want %q", execErr, tt.wantError)
+				}
+				assertAuthDiagnostic(t, execErr, tt.wantDiagnostic, "--private-key")
+				wantFix := "To fix, run:\n  chmod 600 " + keyPath + "\n"
+				if !strings.Contains(stderr, wantFix) {
+					t.Fatalf("stderr = %q, want %q", stderr, wantFix)
+				}
+				if strings.Contains(stderr, "--fix-permissions") != tt.wantFixFlag {
+					t.Fatalf("stderr = %q, want --fix-permissions offered: %t", stderr, tt.wantFixFlag)
+				}
+				info, err := os.Stat(keyPath)
+				if err != nil {
+					t.Fatalf("Stat() error: %v", err)
+				}
+				if info.Mode().Perm() != tt.mode {
+					t.Fatalf("permissions = %#o, want %#o unchanged", info.Mode().Perm(), tt.mode)
+				}
+			})
+		})
+	}
+}
+
 func TestAuthSwitchCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("missing name", func(t *testing.T) {
-		cmd := AuthSwitchCommand()
+		cmd := newAuthSwitchCommand(d)
 		if err := cmd.FlagSet.Parse([]string{}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -982,7 +1049,7 @@ func TestAuthSwitchCommand(t *testing.T) {
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 
-		cmd := AuthSwitchCommand()
+		cmd := newAuthSwitchCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "demo"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1000,7 +1067,7 @@ func TestAuthSwitchCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthSwitchCommand()
+		cmd := newAuthSwitchCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "missing"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1018,7 +1085,7 @@ func TestAuthSwitchCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthSwitchCommand()
+		cmd := newAuthSwitchCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "demo"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1058,7 +1125,7 @@ func TestAuthSwitchCommand(t *testing.T) {
 		})
 		t.Cleanup(restoreSummary)
 
-		cmd := AuthSwitchCommand()
+		cmd := newAuthSwitchCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "other"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1073,14 +1140,12 @@ func TestAuthSwitchCommand(t *testing.T) {
 		if cfg.DefaultKeyName != "other" {
 			t.Fatalf("DefaultKeyName = %q, want other", cfg.DefaultKeyName)
 		}
-		if cfg.KeyID != "KEY1" {
-			t.Fatalf("KeyID = %q, want KEY1", cfg.KeyID)
+		if cfg.KeyID != "" {
+			t.Fatalf("KeyID = %q, want empty top-level field for keychain default", cfg.KeyID)
 		}
-		if cfg.IssuerID != "ISSUER1" {
-			t.Fatalf("IssuerID = %q, want ISSUER1", cfg.IssuerID)
-		}
-		if cfg.PrivateKeyPath != "/tmp/personal.p8" {
-			t.Fatalf("PrivateKeyPath = %q, want /tmp/personal.p8", cfg.PrivateKeyPath)
+		want := config.Credential{Name: "personal", KeyID: "KEY1", IssuerID: "ISSUER1", PrivateKeyPath: "/tmp/personal.p8"}
+		if len(cfg.Keys) != 1 || cfg.Keys[0] != want {
+			t.Fatalf("Keys = %+v, want legacy credential preserved as %+v", cfg.Keys, want)
 		}
 	})
 }
@@ -1117,8 +1182,9 @@ func stubLogoutRemovers(t *testing.T) *authLogoutTestCalls {
 }
 
 func TestAuthLogoutCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("help requires confirmation", func(t *testing.T) {
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		confirmFlag := cmd.FlagSet.Lookup("confirm")
 		if confirmFlag == nil {
 			t.Fatal("expected --confirm flag")
@@ -1146,7 +1212,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 	})
 
 	t.Run("help documents config scope", func(t *testing.T) {
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		includeGlobal := cmd.FlagSet.Lookup("include-global")
 		if includeGlobal == nil {
 			t.Fatal("expected --include-global flag")
@@ -1176,7 +1242,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 			t.Run(strings.Join(args, " "), func(t *testing.T) {
 				calls := stubLogoutRemovers(t)
 
-				cmd := AuthLogoutCommand()
+				cmd := newAuthLogoutCommand(d)
 				if err := cmd.FlagSet.Parse(args); err != nil {
 					t.Fatalf("Parse() error: %v", err)
 				}
@@ -1193,7 +1259,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 	t.Run("removal defaults to the active config scope", func(t *testing.T) {
 		calls := stubLogoutRemovers(t)
 
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1206,11 +1272,11 @@ func TestAuthLogoutCommand(t *testing.T) {
 	})
 
 	t.Run("blank name rejected", func(t *testing.T) {
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "   "}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1222,11 +1288,11 @@ func TestAuthLogoutCommand(t *testing.T) {
 	})
 
 	t.Run("all and name mutually exclusive", func(t *testing.T) {
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--all", "--name", "demo"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1240,7 +1306,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 	t.Run("remove named credential", func(t *testing.T) {
 		calls := stubLogoutRemovers(t)
 
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "demo", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1256,7 +1322,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 	t.Run("remove all credentials", func(t *testing.T) {
 		calls := stubLogoutRemovers(t)
 
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1277,11 +1343,11 @@ func TestAuthLogoutCommand(t *testing.T) {
 			t.Run(strings.Join(args, " "), func(t *testing.T) {
 				calls := stubLogoutRemovers(t)
 
-				cmd := AuthLogoutCommand()
+				cmd := newAuthLogoutCommand(d)
 				if err := cmd.FlagSet.Parse(args); err != nil {
 					t.Fatalf("Parse() error: %v", err)
 				}
-				stdout, stderr := captureAuthOutput(t, func() {
+				stdout, stderr := captureAuthOutput(t, d, func() {
 					err := cmd.Exec(context.Background(), []string{})
 					if !errors.Is(err, flag.ErrHelp) {
 						t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
@@ -1290,7 +1356,7 @@ func TestAuthLogoutCommand(t *testing.T) {
 				if stdout != "" {
 					t.Fatalf("stdout = %q, want empty", stdout)
 				}
-				if !strings.Contains(stderr, "--confirm is required to remove stored credentials") {
+				if !strings.Contains(stderr, "Error: --confirm is required\n") {
 					t.Fatalf("stderr = %q, want --confirm usage error", stderr)
 				}
 				if strings.Contains(stderr, "Warning") || strings.Contains(stderr, "5.0.0") {
@@ -1306,11 +1372,11 @@ func TestAuthLogoutCommand(t *testing.T) {
 	t.Run("explicit confirm false is rejected before removal", func(t *testing.T) {
 		calls := stubLogoutRemovers(t)
 
-		cmd := AuthLogoutCommand()
+		cmd := newAuthLogoutCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm=false"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
@@ -1323,37 +1389,16 @@ func TestAuthLogoutCommand(t *testing.T) {
 			t.Fatalf("credentials were removed with --confirm=false: %+v", calls)
 		}
 	})
-
-	t.Run("unexpected arguments are rejected before removal", func(t *testing.T) {
-		calls := stubLogoutRemovers(t)
-
-		cmd := AuthLogoutCommand()
-		if err := cmd.FlagSet.Parse([]string{"--all", "--confirm"}); err != nil {
-			t.Fatalf("Parse() error: %v", err)
-		}
-		_, stderr := captureAuthOutput(t, func() {
-			err := cmd.Exec(context.Background(), []string{"unexpected"})
-			if !errors.Is(err, flag.ErrHelp) {
-				t.Fatalf("Exec() error = %v, want flag.ErrHelp", err)
-			}
-		})
-		if !strings.Contains(stderr, "unexpected argument(s): unexpected") {
-			t.Fatalf("expected unexpected-argument error, got %q", stderr)
-		}
-
-		if len(calls.names) != 0 || calls.all != 0 {
-			t.Fatalf("expected no removal, got %+v", calls)
-		}
-	})
 }
 
 func TestAuthExportToConfigCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("requires confirm", func(t *testing.T) {
-		cmd := AuthExportToConfigCommand()
+		cmd := newAuthExportToConfigCommand(d)
 		if err := cmd.FlagSet.Parse([]string{}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1365,11 +1410,11 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 	})
 
 	t.Run("invalid output format", func(t *testing.T) {
-		cmd := AuthExportToConfigCommand()
+		cmd := newAuthExportToConfigCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm", "--output", "yaml"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1381,11 +1426,11 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 	})
 
 	t.Run("local and config are mutually exclusive", func(t *testing.T) {
-		cmd := AuthExportToConfigCommand()
+		cmd := newAuthExportToConfigCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm", "--local", "--config", filepath.Join(t.TempDir(), "config.json")}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1410,7 +1455,7 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 			})
 			t.Cleanup(restore)
 
-			cmd := AuthExportToConfigCommand()
+			cmd := newAuthExportToConfigCommand(d)
 			if err := cmd.FlagSet.Parse([]string{"--confirm", "--local"}); err != nil {
 				t.Fatalf("Parse() error: %v", err)
 			}
@@ -1443,7 +1488,7 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 		})
 		t.Cleanup(restore)
 
-		cmd := AuthExportToConfigCommand()
+		cmd := newAuthExportToConfigCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1476,7 +1521,7 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 		})
 		t.Cleanup(restore)
 
-		cmd := AuthExportToConfigCommand()
+		cmd := newAuthExportToConfigCommand(d)
 		if err := cmd.FlagSet.Parse([]string{
 			"--confirm",
 			"--output", "json",
@@ -1486,7 +1531,7 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, stderr := captureAuthOutput(t, func() {
+		stdout, stderr := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1526,16 +1571,17 @@ func TestAuthExportToConfigCommand(t *testing.T) {
 }
 
 func TestAuthStatusCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("no credentials", func(t *testing.T) {
 		cfgPath := filepath.Join(t.TempDir(), "config.json")
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1550,11 +1596,11 @@ func TestAuthStatusCommand(t *testing.T) {
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "yes")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1575,11 +1621,11 @@ func TestAuthStatusCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1603,11 +1649,11 @@ func TestAuthStatusCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, stderr := captureAuthOutput(t, func() {
+		stdout, stderr := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1644,11 +1690,11 @@ func TestAuthStatusCommand(t *testing.T) {
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "yaml"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, stderr := captureAuthOutput(t, func() {
+		stdout, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1675,7 +1721,7 @@ func TestAuthStatusCommand(t *testing.T) {
 		})
 		t.Cleanup(restore)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1701,12 +1747,12 @@ func TestAuthStatusCommand(t *testing.T) {
 		})
 		t.Cleanup(restore)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
 		var runErr error
-		captureAuthOutput(t, func() {
+		captureAuthOutput(t, d, func() {
 			runErr = cmd.Exec(context.Background(), []string{})
 		})
 		if runErr == nil || !strings.Contains(runErr.Error(), "validation failed for 1 credential") {
@@ -1741,12 +1787,12 @@ func TestAuthStatusCommand(t *testing.T) {
 		})
 		t.Cleanup(restoreValidate)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
 		var runErr error
-		captureAuthOutput(t, func() {
+		captureAuthOutput(t, d, func() {
 			runErr = cmd.Exec(context.Background(), []string{})
 		})
 		if runErr == nil || !strings.Contains(runErr.Error(), "validation failed for 2 credential(s)") {
@@ -1770,11 +1816,11 @@ func TestAuthStatusCommand(t *testing.T) {
 		})
 		t.Cleanup(restore)
 
-		cmd := AuthStatusCommand()
+		cmd := newAuthStatusCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "table", "--validate"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1809,13 +1855,14 @@ func TestCredentialStorageLabel(t *testing.T) {
 }
 
 func TestAuthTokenCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("no credentials", func(t *testing.T) {
 		cfgPath := filepath.Join(t.TempDir(), "config.json")
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 		clearResolvedAuthEnv(t)
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1835,7 +1882,7 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "missing", "--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1855,11 +1902,11 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		_, stderr := captureAuthOutput(t, func() {
+		_, stderr := captureAuthOutput(t, d, func() {
 			err := cmd.Exec(context.Background(), []string{})
 			if !errors.Is(err, flag.ErrHelp) {
 				t.Fatalf("expected flag.ErrHelp, got %v", err)
@@ -1881,11 +1928,11 @@ func TestAuthTokenCommand(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm", "--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1923,7 +1970,7 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -1950,11 +1997,11 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -1976,11 +2023,11 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm", "--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2019,11 +2066,11 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "second", "--confirm", "--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2063,7 +2110,7 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("SaveAt() error: %v", err)
 		}
 
-		cmd := AuthTokenCommand()
+		cmd := newAuthTokenCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--confirm"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -2072,32 +2119,17 @@ func TestAuthTokenCommand(t *testing.T) {
 			t.Fatalf("expected missing authentication error, got %v", err)
 		}
 	})
-
-	t.Run("unexpected args rejected", func(t *testing.T) {
-		cmd := AuthTokenCommand()
-		if err := cmd.FlagSet.Parse([]string{}); err != nil {
-			t.Fatalf("Parse() error: %v", err)
-		}
-		_, stderr := captureAuthOutput(t, func() {
-			err := cmd.Exec(context.Background(), []string{"extra"})
-			if !errors.Is(err, flag.ErrHelp) {
-				t.Fatalf("expected flag.ErrHelp, got %v", err)
-			}
-		})
-		if !strings.Contains(stderr, "unexpected argument") {
-			t.Fatalf("expected unexpected argument error, got %q", stderr)
-		}
-	})
 }
 
 func TestAuthIssuerIDCommand(t *testing.T) {
+	d := newAuthTestDeps()
 	t.Run("no credentials", func(t *testing.T) {
 		cfgPath := filepath.Join(t.TempDir(), "config.json")
 		t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 		t.Setenv("ASC_CONFIG_PATH", cfgPath)
 		clearResolvedAuthEnv(t)
 
-		cmd := AuthIssuerIDCommand()
+		cmd := newAuthIssuerIDCommand(d)
 		if err := cmd.FlagSet.Parse([]string{}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
@@ -2117,11 +2149,11 @@ func TestAuthIssuerIDCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthIssuerIDCommand()
+		cmd := newAuthIssuerIDCommand(d)
 		if err := cmd.FlagSet.Parse([]string{}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2141,11 +2173,11 @@ func TestAuthIssuerIDCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthIssuerIDCommand()
+		cmd := newAuthIssuerIDCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2179,11 +2211,11 @@ func TestAuthIssuerIDCommand(t *testing.T) {
 			t.Fatalf("StoreCredentialsConfigAt() error: %v", err)
 		}
 
-		cmd := AuthIssuerIDCommand()
+		cmd := newAuthIssuerIDCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--name", "second", "--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2214,11 +2246,11 @@ func TestAuthIssuerIDCommand(t *testing.T) {
 		t.Setenv("ASC_PRIVATE_KEY", "")
 		t.Setenv("ASC_PRIVATE_KEY_B64", "")
 
-		cmd := AuthIssuerIDCommand()
+		cmd := newAuthIssuerIDCommand(d)
 		if err := cmd.FlagSet.Parse([]string{"--output", "json"}); err != nil {
 			t.Fatalf("Parse() error: %v", err)
 		}
-		stdout, _ := captureAuthOutput(t, func() {
+		stdout, _ := captureAuthOutput(t, d, func() {
 			if err := cmd.Exec(context.Background(), []string{}); err != nil {
 				t.Fatalf("Exec() error: %v", err)
 			}
@@ -2236,22 +2268,6 @@ func TestAuthIssuerIDCommand(t *testing.T) {
 		}
 		if payload.Profile != "" {
 			t.Fatalf("expected empty profile for env credentials, got %q", payload.Profile)
-		}
-	})
-
-	t.Run("unexpected args rejected", func(t *testing.T) {
-		cmd := AuthIssuerIDCommand()
-		if err := cmd.FlagSet.Parse([]string{}); err != nil {
-			t.Fatalf("Parse() error: %v", err)
-		}
-		_, stderr := captureAuthOutput(t, func() {
-			err := cmd.Exec(context.Background(), []string{"extra"})
-			if !errors.Is(err, flag.ErrHelp) {
-				t.Fatalf("expected flag.ErrHelp, got %v", err)
-			}
-		})
-		if !strings.Contains(stderr, "unexpected argument") {
-			t.Fatalf("expected unexpected argument error, got %q", stderr)
 		}
 	})
 }
@@ -2307,52 +2323,25 @@ func clearResolvedAuthEnv(t *testing.T) {
 	t.Setenv("ASC_PRIVATE_KEY_B64", "")
 }
 
-func captureAuthOutput(t *testing.T, fn func()) (string, string) {
+// newAuthTestDeps returns deps with buffered streams, the process client
+// factory and the process timeouts.
+func newAuthTestDeps() *shared.Deps {
+	return &shared.Deps{
+		Client:  shared.GetASCClient,
+		IO:      &shared.IO{Out: &bytes.Buffer{}, ErrOut: &bytes.Buffer{}},
+		Now:     time.Now,
+		Timeout: shared.ContextWithTimeout,
+		Getwd:   os.Getwd,
+	}
+}
+
+// captureAuthOutput runs fn with fresh stdout and stderr buffers on d and
+// returns what commands built on d wrote to them.
+func captureAuthOutput(t *testing.T, d *shared.Deps, fn func()) (string, string) {
 	t.Helper()
 
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-
-	stdoutR, stdoutW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe(stdout) error: %v", err)
-	}
-	stderrR, stderrW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe(stderr) error: %v", err)
-	}
-
-	os.Stdout = stdoutW
-	os.Stderr = stderrW
-
-	outC := make(chan string)
-	errC := make(chan string)
-
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, stdoutR)
-		_ = stdoutR.Close()
-		outC <- buf.String()
-	}()
-
-	go func() {
-		var buf bytes.Buffer
-		_, _ = io.Copy(&buf, stderrR)
-		_ = stderrR.Close()
-		errC <- buf.String()
-	}()
-
-	defer func() {
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-		_ = stdoutW.Close()
-		_ = stderrW.Close()
-	}()
-
+	var stdout, stderr bytes.Buffer
+	d.IO = &shared.IO{Out: &stdout, ErrOut: &stderr}
 	fn()
-
-	_ = stdoutW.Close()
-	_ = stderrW.Close()
-
-	return <-outC, <-errC
+	return stdout.String(), stderr.String()
 }

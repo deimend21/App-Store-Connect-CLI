@@ -85,9 +85,9 @@ type testFlightSyncClient interface {
 	GetBetaGroupTesters(ctx context.Context, groupID string, opts ...asc.BetaGroupTestersOption) (*asc.BetaTestersResponse, error)
 }
 
-// TestFlightSyncCommand returns the testflight sync command group.
-func TestFlightSyncCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("sync", flag.ExitOnError)
+// newTestFlightSyncCommand returns the testflight sync command group.
+func newTestFlightSyncCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("sync", flag.ExitOnError)
 
 	return &ffcli.Command{
 		Name:       "sync",
@@ -98,9 +98,9 @@ func TestFlightSyncCommand() *ffcli.Command {
 Examples:
   asc testflight sync pull --app "APP_ID" --output "./testflight.yaml"`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Subcommands: []*ffcli.Command{
-			TestFlightSyncPullCommand(),
+			newTestFlightSyncPullCommand(d),
 		},
 		Exec: func(ctx context.Context, args []string) error {
 			return flag.ErrHelp
@@ -108,9 +108,9 @@ Examples:
 	}
 }
 
-// TestFlightSyncPullCommand exports TestFlight config to YAML.
-func TestFlightSyncPullCommand() *ffcli.Command {
-	fs := flag.NewFlagSet("pull", flag.ExitOnError)
+// newTestFlightSyncPullCommand exports TestFlight config to YAML.
+func newTestFlightSyncPullCommand(d *shared.Deps) *ffcli.Command {
+	fs := d.NewFlagSet("pull", flag.ExitOnError)
 
 	appID := fs.String("app", "", "App Store Connect app ID, bundle ID, or exact app name (or ASC_APP_ID env)")
 	output := fs.String("output", "", "Output file path for YAML (required)")
@@ -118,6 +118,7 @@ func TestFlightSyncPullCommand() *ffcli.Command {
 	includeTesters := fs.Bool("include-testers", false, "Include testers and group memberships")
 	groupFilter := shared.BindResourceIDFlag(fs, "group", "betaGroups", "Filter to a specific beta group (name or ID)")
 	buildFilter := fs.String("build-id", "", "Filter to build ID(s), comma-separated")
+	shared.BindFlagAlias(fs, "build", "build-id")
 	testerFilter := fs.String("tester", "", "Filter to tester ID(s) or emails, comma-separated")
 	pretty := shared.BindPrettyJSONFlag(fs)
 
@@ -132,42 +133,45 @@ Examples:
   asc testflight sync pull --app "APP_ID" --output "./testflight.yaml" --include-builds
   asc testflight sync pull --app "APP_ID" --output "./testflight.yaml" --include-builds --include-testers`,
 		FlagSet:   fs,
-		UsageFunc: shared.DefaultUsageFunc,
+		UsageFunc: d.DefaultUsageFunc,
 		Exec: func(ctx context.Context, args []string) error {
-			resolvedAppID := shared.ResolveAppID(*appID)
+			if err := d.RejectOutputFormatAsPath(*output, ""); err != nil {
+				return err
+			}
+			resolvedAppID := d.ResolveAppID(*appID)
 			if resolvedAppID == "" {
-				fmt.Fprintf(os.Stderr, "Error: --app is required (or set ASC_APP_ID)\n\n")
+				fmt.Fprintf(d.IO.ErrOut, "Error: --app is required (or set ASC_APP_ID)\n\n")
 				return shared.MissingRequiredUsageError("--app")
 			}
 
 			outputValue := strings.TrimSpace(*output)
 			if outputValue == "" {
-				fmt.Fprintf(os.Stderr, "Error: --output is required\n\n")
+				fmt.Fprintf(d.IO.ErrOut, "Error: --output is required\n\n")
 				return shared.MissingRequiredUsageError("--output")
 			}
 
 			buildFilters := shared.SplitCSV(*buildFilter)
 			testerFilters := shared.SplitCSV(*testerFilter)
 			if len(buildFilters) > 0 && !*includeBuilds {
-				fmt.Fprintf(os.Stderr, "Error: --build-id requires --include-builds\n\n")
+				fmt.Fprintf(d.IO.ErrOut, "Error: --build-id requires --include-builds\n\n")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--build-id")
 			}
 			if len(testerFilters) > 0 && !*includeTesters {
-				fmt.Fprintf(os.Stderr, "Error: --tester requires --include-testers\n\n")
+				fmt.Fprintf(d.IO.ErrOut, "Error: --tester requires --include-testers\n\n")
 				return shared.WithDiagnostic(flag.ErrHelp, shared.DiagnosticConflictingInput, "--tester")
 			}
 
-			resolvedOutputPath, err := resolveTestFlightOutputPath(outputValue)
+			resolvedOutputPath, err := resolveTestFlightOutputPath(d, outputValue)
 			if err != nil {
 				return fmt.Errorf("testflight sync pull: %w", err)
 			}
 
-			client, err := shared.GetASCClient()
+			client, err := d.Client()
 			if err != nil {
 				return fmt.Errorf("testflight sync pull: %w", err)
 			}
 
-			requestCtx, cancel := shared.ContextWithTimeout(ctx)
+			requestCtx, cancel := d.Timeout(ctx)
 			defer cancel()
 
 			resolvedAppID, err = shared.ResolveAppIDWithLookup(requestCtx, client, resolvedAppID)
@@ -200,7 +204,7 @@ Examples:
 				Testers: len(config.Testers),
 			}
 
-			return shared.PrintOutput(summary, "json", *pretty)
+			return d.PrintOutput(summary, "json", *pretty)
 		},
 	}
 }
@@ -220,7 +224,7 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 		appDone <- appResult{resp, err}
 	}()
 
-	groupFirstPage, groupErr := client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsLimit(200))
+	groupFirstPage, groupErr := client.GetBetaGroups(ctx, appID, asc.Limit[asc.BetaGroupsOption](200))
 	var groupResp *asc.BetaGroupsResponse
 	if groupErr == nil {
 		groupResp, groupErr = paginateBetaGroups(ctx, client, appID, groupFirstPage)
@@ -250,7 +254,7 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 	if opts.includeBuilds {
 		for i, group := range filteredGroups {
 			tasks = append(tasks, func(ctx context.Context) error {
-				firstPage, err := client.GetBetaGroupBuilds(ctx, group.ID, asc.WithBetaGroupBuildsLimit(200))
+				firstPage, err := client.GetBetaGroupBuilds(ctx, group.ID, asc.Limit[asc.BetaGroupBuildsOption](200))
 				if err != nil {
 					return err
 				}
@@ -263,7 +267,7 @@ func pullTestFlightConfig(ctx context.Context, client testFlightSyncClient, appI
 	if opts.includeTesters {
 		for i, group := range filteredGroups {
 			tasks = append(tasks, func(ctx context.Context) error {
-				firstPage, err := client.GetBetaGroupTesters(ctx, group.ID, asc.WithBetaGroupTestersLimit(200))
+				firstPage, err := client.GetBetaGroupTesters(ctx, group.ID, asc.Limit[asc.BetaGroupTestersOption](200))
 				if err != nil {
 					return err
 				}
@@ -414,7 +418,7 @@ func paginateBetaGroups(ctx context.Context, client testFlightSyncClient, appID 
 		return &asc.BetaGroupsResponse{}, nil
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaGroups(ctx, appID, asc.WithBetaGroupsNextURL(nextURL))
+		return client.GetBetaGroups(ctx, appID, asc.NextURL[asc.BetaGroupsOption](nextURL))
 	})
 	if err != nil {
 		return nil, err
@@ -434,7 +438,7 @@ func paginateBetaGroupBuilds(ctx context.Context, client testFlightSyncClient, g
 		return &asc.BuildsResponse{}, nil
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaGroupBuilds(ctx, groupID, asc.WithBetaGroupBuildsNextURL(nextURL))
+		return client.GetBetaGroupBuilds(ctx, groupID, asc.NextURL[asc.BetaGroupBuildsOption](nextURL))
 	})
 	if err != nil {
 		return nil, err
@@ -454,7 +458,7 @@ func paginateBetaGroupTesters(ctx context.Context, client testFlightSyncClient, 
 		return &asc.BetaTestersResponse{}, nil
 	}
 	allPages, err := asc.PaginateAll(ctx, firstPage, func(ctx context.Context, nextURL string) (asc.PaginatedResponse, error) {
-		return client.GetBetaGroupTesters(ctx, groupID, asc.WithBetaGroupTestersNextURL(nextURL))
+		return client.GetBetaGroupTesters(ctx, groupID, asc.NextURL[asc.BetaGroupTestersOption](nextURL))
 	})
 	if err != nil {
 		return nil, err
@@ -482,9 +486,14 @@ func filterBetaGroups(groups []asc.Resource[asc.BetaGroupAttributes], filter str
 	}
 
 	matches := make([]asc.Resource[asc.BetaGroupAttributes], 0, 1)
-	for _, group := range groups {
-		if strings.EqualFold(strings.TrimSpace(group.Attributes.Name), trimmed) {
-			matches = append(matches, group)
+	for _, normalize := range []func(string) string{strings.TrimSpace, shared.NormalizeBetaGroupName} {
+		for _, group := range groups {
+			if strings.EqualFold(normalize(group.Attributes.Name), normalize(trimmed)) {
+				matches = append(matches, group)
+			}
+		}
+		if len(matches) > 0 {
+			break
 		}
 	}
 
@@ -724,7 +733,7 @@ func formatTesterName(firstName, lastName string) string {
 	}
 }
 
-func resolveTestFlightOutputPath(outputPath string) (string, error) {
+func resolveTestFlightOutputPath(d *shared.Deps, outputPath string) (string, error) {
 	trimmed := strings.TrimSpace(outputPath)
 	if trimmed == "" {
 		return "", fmt.Errorf("output path is required")
@@ -733,7 +742,7 @@ func resolveTestFlightOutputPath(outputPath string) (string, error) {
 		return "", fmt.Errorf("output path must be a file")
 	}
 
-	cwd, err := os.Getwd()
+	cwd, err := d.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("resolve output path: %w", err)
 	}

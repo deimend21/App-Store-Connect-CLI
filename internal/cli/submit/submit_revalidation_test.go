@@ -3,9 +3,12 @@ package submit
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestSubmitResolvedVersionRejectsUnverifiedConflictSubmission(t *testing.T) {
@@ -69,7 +72,7 @@ func TestSubmitResolvedVersionRejectsUnverifiedConflictSubmission(t *testing.T) 
 		}
 	}))
 
-	result, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+	result, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 		AppID:     "app-1",
 		VersionID: "version-1",
 		Platform:  "IOS",
@@ -117,7 +120,7 @@ func TestSubmitResolvedVersionPreservesCreatedSubmissionAfterAmbiguousAddFailure
 		}
 	}))
 
-	result, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+	result, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 		AppID:     "app-1",
 		VersionID: "version-1",
 		Platform:  "IOS",
@@ -192,7 +195,7 @@ func TestSubmitResolvedVersionPreservesCreatedSubmissionAfterConflictRecovery(t 
 		}
 	}))
 
-	result, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+	result, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 		AppID:     "app-1",
 		VersionID: "version-1",
 		Platform:  "IOS",
@@ -263,7 +266,7 @@ func TestVerifyReviewSubmissionForSubmitRejectsWrongBinding(t *testing.T) {
 				}
 			}))
 
-			err := verifyReviewSubmissionForSubmit(
+			_, err := verifyReviewSubmissionForSubmit(
 				context.Background(),
 				client,
 				"submission-1",
@@ -336,7 +339,7 @@ func TestSubmitResolvedVersionReusesTargetOnlySubmissionWithoutVersionRelationsh
 		}
 	}))
 
-	result, err := SubmitResolvedVersion(context.Background(), client, SubmitResolvedVersionOptions{
+	result, err := SubmitResolvedVersionWith(context.Background(), shared.DefaultDeps(), client, SubmitResolvedVersionOptions{
 		AppID:     "app-1",
 		VersionID: "version-1",
 		Platform:  "IOS",
@@ -384,7 +387,7 @@ func TestPrepareReviewSubmissionForCreateNeverCancelsExistingSubmission(t *testi
 	}))
 
 	var messages []string
-	got, err := prepareReviewSubmissionForCreate(context.Background(), client, "app-1", "IOS", "version-1", func(message string) {
+	got, err := prepareReviewSubmissionForCreate(context.Background(), io.Discard, client, "app-1", "IOS", "version-1", func(message string) {
 		messages = append(messages, message)
 	})
 	if err != nil {

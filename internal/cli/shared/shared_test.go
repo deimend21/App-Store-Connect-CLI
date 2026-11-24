@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestDefaultOutputFormat_UnsetReturnsJSON(t *testing.T) {
 	setTerminalDetection(t, func(int) bool { return false })
 	t.Setenv("ASC_DEFAULT_OUTPUT", "")
 	os.Unsetenv("ASC_DEFAULT_OUTPUT")
-	if got := DefaultOutputFormat(); got != "json" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "json" {
 		t.Fatalf("expected json, got %q", got)
 	}
 }
@@ -134,7 +135,7 @@ func TestDefaultOutputFormat_UnsetReturnsTableWhenStdoutTTY(t *testing.T) {
 	t.Setenv("ASC_DEFAULT_OUTPUT", "")
 	os.Unsetenv("ASC_DEFAULT_OUTPUT")
 
-	if got := DefaultOutputFormat(); got != "table" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "table" {
 		t.Fatalf("expected table, got %q", got)
 	}
 }
@@ -167,7 +168,7 @@ func TestDefaultOutputFormat_UnsetReturnsJSONWhenStdoutTTYInCI(t *testing.T) {
 			os.Unsetenv("ASC_DEFAULT_OUTPUT")
 			t.Setenv(tt.key, tt.value)
 
-			if got := DefaultOutputFormat(); got != "json" {
+			if got := DefaultDeps().DefaultOutputFormat(); got != "json" {
 				t.Fatalf("DefaultOutputFormat() = %q, want json", got)
 			}
 		})
@@ -183,7 +184,7 @@ func TestDefaultOutputFormat_FalseCIMarkersKeepTTYTableDefault(t *testing.T) {
 	t.Setenv("CI", "false")
 	t.Setenv("GITHUB_ACTIONS", "0")
 
-	if got := DefaultOutputFormat(); got != "table" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "table" {
 		t.Fatalf("DefaultOutputFormat() = %q, want table", got)
 	}
 }
@@ -195,7 +196,7 @@ func TestDefaultOutputFormat_ExplicitEnvOverridesCI(t *testing.T) {
 	t.Setenv("CI", "true")
 	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
 
-	if got := DefaultOutputFormat(); got != "table" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "table" {
 		t.Fatalf("DefaultOutputFormat() = %q, want explicit table", got)
 	}
 }
@@ -294,7 +295,7 @@ func TestParseASCTerritoryValueCSVPropagatesTerritoryNormalizationErrors(t *test
 func TestDefaultOutputFormat_MD(t *testing.T) {
 	resetDefaultOutput(t)
 	t.Setenv("ASC_DEFAULT_OUTPUT", "md")
-	if got := DefaultOutputFormat(); got != "md" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "md" {
 		t.Fatalf("expected md, got %q", got)
 	}
 }
@@ -303,7 +304,7 @@ func TestDefaultOutputFormat_JSON(t *testing.T) {
 	resetDefaultOutput(t)
 	setTerminalDetection(t, func(int) bool { return true })
 	t.Setenv("ASC_DEFAULT_OUTPUT", "json")
-	if got := DefaultOutputFormat(); got != "json" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "json" {
 		t.Fatalf("expected json, got %q", got)
 	}
 }
@@ -313,7 +314,7 @@ func TestDefaultOutputFormat_CaseInsensitive(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			resetDefaultOutput(t)
 			t.Setenv("ASC_DEFAULT_OUTPUT", value)
-			got := DefaultOutputFormat()
+			got := DefaultDeps().DefaultOutputFormat()
 			expected := strings.ToLower(value)
 			if got != expected {
 				t.Fatalf("expected %q, got %q", expected, got)
@@ -325,7 +326,7 @@ func TestDefaultOutputFormat_CaseInsensitive(t *testing.T) {
 func TestDefaultOutputFormat_WhitespaceHandled(t *testing.T) {
 	resetDefaultOutput(t)
 	t.Setenv("ASC_DEFAULT_OUTPUT", "  table  ")
-	if got := DefaultOutputFormat(); got != "table" {
+	if got := DefaultDeps().DefaultOutputFormat(); got != "table" {
 		t.Fatalf("expected table, got %q", got)
 	}
 }
@@ -335,7 +336,7 @@ func TestDefaultOutputFormat_InvalidFallsBackToJSON(t *testing.T) {
 	setTerminalDetection(t, func(int) bool { return true })
 	t.Setenv("ASC_DEFAULT_OUTPUT", "xml")
 	stdout, stderr := captureOutput(t, func() {
-		got := DefaultOutputFormat()
+		got := DefaultDeps().DefaultOutputFormat()
 		if got != "json" {
 			t.Fatalf("expected json fallback, got %q", got)
 		}
@@ -353,7 +354,7 @@ func TestBindOutputFlagsUsesDefaultOutputFormat(t *testing.T) {
 	t.Setenv("ASC_DEFAULT_OUTPUT", "table")
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	output := BindOutputFlags(fs)
+	output := DefaultDeps().BindOutputFlags(fs)
 	if output.Output == nil || output.Pretty == nil {
 		t.Fatal("expected output flag pointers to be set")
 	}
@@ -373,7 +374,7 @@ func TestBindOutputFlagsUsesTTYAwareDefaultWhenEnvUnset(t *testing.T) {
 	os.Unsetenv("ASC_DEFAULT_OUTPUT")
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	output := BindOutputFlags(fs)
+	output := DefaultDeps().BindOutputFlags(fs)
 	if output.Output == nil {
 		t.Fatal("expected output flag pointer to be set")
 	}
@@ -387,7 +388,7 @@ func TestBindOutputFlagsParsesValues(t *testing.T) {
 	t.Setenv("ASC_DEFAULT_OUTPUT", "json")
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	output := BindOutputFlags(fs)
+	output := DefaultDeps().BindOutputFlags(fs)
 	if err := fs.Parse([]string{"--output", "markdown", "--pretty"}); err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -555,7 +556,7 @@ func TestValidateOutputFormatAllowed_EmptyAllowedFallsBackToDefaultSet(t *testin
 
 func TestPrintOutputWithRenderers_JSONPath(t *testing.T) {
 	stdout, _ := captureOutput(t, func() {
-		if err := PrintOutputWithRenderers(
+		if err := DefaultDeps().PrintOutputWithRenderers(
 			map[string]string{"status": "ok"},
 			"json",
 			false,
@@ -572,7 +573,7 @@ func TestPrintOutputWithRenderers_JSONPath(t *testing.T) {
 
 func TestPrintOutputWithRenderers_JSONPrettyPath(t *testing.T) {
 	stdout, _ := captureOutput(t, func() {
-		if err := PrintOutputWithRenderers(
+		if err := DefaultDeps().PrintOutputWithRenderers(
 			map[string]string{"status": "ok"},
 			"json",
 			true,
@@ -589,7 +590,7 @@ func TestPrintOutputWithRenderers_JSONPrettyPath(t *testing.T) {
 
 func TestPrintOutputWithRenderers_EmptyFormatDefaultsJSON(t *testing.T) {
 	stdout, _ := captureOutput(t, func() {
-		if err := PrintOutputWithRenderers(
+		if err := DefaultDeps().PrintOutputWithRenderers(
 			map[string]string{"status": "ok"},
 			"",
 			false,
@@ -608,7 +609,7 @@ func TestPrintOutputWithRenderers_TableAndMarkdownPaths(t *testing.T) {
 	tableCalls := 0
 	markdownCalls := 0
 
-	if err := PrintOutputWithRenderers(
+	if err := DefaultDeps().PrintOutputWithRenderers(
 		struct{}{},
 		"table",
 		false,
@@ -621,7 +622,7 @@ func TestPrintOutputWithRenderers_TableAndMarkdownPaths(t *testing.T) {
 		t.Fatalf("expected table=1 markdown=0, got table=%d markdown=%d", tableCalls, markdownCalls)
 	}
 
-	if err := PrintOutputWithRenderers(
+	if err := DefaultDeps().PrintOutputWithRenderers(
 		struct{}{},
 		"md",
 		false,
@@ -636,21 +637,21 @@ func TestPrintOutputWithRenderers_TableAndMarkdownPaths(t *testing.T) {
 }
 
 func TestPrintOutputWithRenderers_RejectsPrettyForNonJSON(t *testing.T) {
-	err := PrintOutputWithRenderers(struct{}{}, "table", true, func() error { return nil }, func() error { return nil })
+	err := DefaultDeps().PrintOutputWithRenderers(struct{}{}, "table", true, func() error { return nil }, func() error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "--pretty is only valid with JSON output") {
 		t.Fatalf("expected pretty validation error, got %v", err)
 	}
 }
 
 func TestPrintOutputWithRenderers_RequiresTableRenderer(t *testing.T) {
-	err := PrintOutputWithRenderers(struct{}{}, "table", false, nil, func() error { return nil })
+	err := DefaultDeps().PrintOutputWithRenderers(struct{}{}, "table", false, nil, func() error { return nil })
 	if err == nil || !strings.Contains(err.Error(), "table renderer is required") {
 		t.Fatalf("expected table renderer required error, got %v", err)
 	}
 }
 
 func TestPrintOutputWithRenderers_RequiresMarkdownRenderer(t *testing.T) {
-	err := PrintOutputWithRenderers(struct{}{}, "markdown", false, func() error { return nil }, nil)
+	err := DefaultDeps().PrintOutputWithRenderers(struct{}{}, "markdown", false, func() error { return nil }, nil)
 	if err == nil || !strings.Contains(err.Error(), "markdown renderer is required") {
 		t.Fatalf("expected markdown renderer required error, got %v", err)
 	}
@@ -679,91 +680,6 @@ func makeTruncatedTestPage(items int, next string, meta string) *asc.Response[te
 	return page
 }
 
-func TestPrintOutput_WarnsWithTotalWhenMorePagesExist(t *testing.T) {
-	page := makeTruncatedTestPage(2, "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc", `{"paging":{"total":7,"limit":2}}`)
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := PrintOutput(page, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	want := "Warning: showing 2 of 7 results; more pages exist (use --paginate or --next where supported)\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-	if !strings.Contains(stdout, `"item-0"`) || !strings.Contains(stdout, `"item-1"`) {
-		t.Fatalf("expected JSON payload on stdout, got %q", stdout)
-	}
-	if strings.Contains(stdout, "Warning") {
-		t.Fatalf("warning must not leak into stdout, got %q", stdout)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
-		t.Fatalf("stdout is no longer valid JSON: %v (%q)", err, stdout)
-	}
-}
-
-func TestPrintOutput_WarnsWithCountWhenTotalUnavailable(t *testing.T) {
-	page := makeTruncatedTestPage(3, "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc", "")
-
-	_, stderr := captureOutput(t, func() {
-		if err := PrintOutput(page, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	want := "Warning: showing 3 results; more pages exist (use --paginate or --next where supported)\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
-	}
-}
-
-func TestPrintOutput_NoWarningWhenNoNextLink(t *testing.T) {
-	// PaginateAll erases links.next on aggregated results, so this models a
-	// fully paginated response.
-	page := makeTruncatedTestPage(4, "", `{"paging":{"total":4,"limit":200}}`)
-
-	_, stderr := captureOutput(t, func() {
-		if err := PrintOutput(page, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected no warning for aggregated page, got %q", stderr)
-	}
-}
-
-func TestPrintOutput_NoWarningForNonPaginatedData(t *testing.T) {
-	_, stderr := captureOutput(t, func() {
-		if err := PrintOutput(map[string]string{"status": "ok"}, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected no warning for non-paginated data, got %q", stderr)
-	}
-}
-
-func TestPrintOutput_TypedNilPaginatedResponseDoesNotPanic(t *testing.T) {
-	var typedNil *asc.Response[testPageAttributes]
-
-	stdout, stderr := captureOutput(t, func() {
-		if err := PrintOutput(typedNil, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	if stderr != "" {
-		t.Fatalf("expected no warning for typed nil response, got %q", stderr)
-	}
-	if !strings.Contains(stdout, "null") {
-		t.Fatalf("expected null JSON output for typed nil, got %q", stdout)
-	}
-}
-
 // rawOnlyPage implements asc.PaginatedResponse without a countable item slice
 // to exercise the generic truncation notice.
 type rawOnlyPage struct {
@@ -774,21 +690,55 @@ type rawOnlyPage struct {
 func (r *rawOnlyPage) GetLinks() *asc.Links { return &r.links }
 func (r *rawOnlyPage) GetData() any         { return r.data }
 
-func TestPrintOutput_GenericWarningWhenCountUnavailable(t *testing.T) {
-	page := &rawOnlyPage{
-		links: asc.Links{Next: "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc"},
-		data:  json.RawMessage(`[{"id":"a"}]`),
-	}
+func TestPrintOutputTruncationWarning(t *testing.T) {
+	const nextURL = "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc"
+	for _, tt := range []struct {
+		name       string
+		data       any
+		wantStderr string
+		wantStdout []string
+	}{
+		{
+			name:       "total available",
+			data:       makeTruncatedTestPage(2, nextURL, `{"paging":{"total":7,"limit":2}}`),
+			wantStderr: "Warning: showing 2 of 7 results; more pages exist (use --paginate or --next where supported)\n",
+			wantStdout: []string{`"item-0"`, `"item-1"`},
+		},
+		{
+			name:       "count without total",
+			data:       makeTruncatedTestPage(3, nextURL, ""),
+			wantStderr: "Warning: showing 3 results; more pages exist (use --paginate or --next where supported)\n",
+		},
+		{
+			name:       "count unavailable",
+			data:       &rawOnlyPage{links: asc.Links{Next: nextURL}, data: json.RawMessage(`[{"id":"a"}]`)},
+			wantStderr: "Warning: more pages exist (use --paginate or --next where supported)\n",
+		},
+		// PaginateAll erases links.next on aggregated results, so this models a
+		// fully paginated response.
+		{name: "no next link", data: makeTruncatedTestPage(4, "", `{"paging":{"total":4,"limit":200}}`)},
+		{name: "non-paginated data", data: map[string]string{"status": "ok"}},
+		{name: "typed nil page", data: (*asc.Response[testPageAttributes])(nil), wantStdout: []string{"null"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, stderr := captureOutput(t, func() {
+				if err := DefaultDeps().PrintOutput(tt.data, "json", false); err != nil {
+					t.Errorf("PrintOutput() error = %v", err)
+				}
+			})
 
-	_, stderr := captureOutput(t, func() {
-		if err := PrintOutput(page, "json", false); err != nil {
-			t.Errorf("PrintOutput() error = %v", err)
-		}
-	})
-
-	want := "Warning: more pages exist (use --paginate or --next where supported)\n"
-	if stderr != want {
-		t.Fatalf("stderr = %q, want %q", stderr, want)
+			if stderr != tt.wantStderr {
+				t.Fatalf("stderr = %q, want %q", stderr, tt.wantStderr)
+			}
+			if !json.Valid([]byte(stdout)) {
+				t.Fatalf("stdout is not valid JSON: %q", stdout)
+			}
+			for _, want := range tt.wantStdout {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("stdout = %q, want it to contain %s", stdout, want)
+				}
+			}
+		})
 	}
 }
 
@@ -796,7 +746,7 @@ func TestPrintOutputWithRenderers_WarnsAfterTableRender(t *testing.T) {
 	page := makeTruncatedTestPage(1, "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc", `{"paging":{"total":9,"limit":1}}`)
 
 	_, stderr := captureOutput(t, func() {
-		if err := PrintOutputWithRenderers(
+		if err := DefaultDeps().PrintOutputWithRenderers(
 			page,
 			"table",
 			false,
@@ -817,7 +767,7 @@ func TestPrintOutputWithRenderers_NoWarningWhenRendererFails(t *testing.T) {
 	page := makeTruncatedTestPage(1, "https://api.appstoreconnect.apple.com/v1/apps?cursor=abc", "")
 
 	_, stderr := captureOutput(t, func() {
-		err := PrintOutputWithRenderers(
+		err := DefaultDeps().PrintOutputWithRenderers(
 			page,
 			"table",
 			false,
@@ -864,9 +814,13 @@ func TestBindMetadataOutputFlagsParsesValues(t *testing.T) {
 }
 
 func TestValidateNextURL_ValidAppStoreConnectURL(t *testing.T) {
-	err := validateNextURL("https://api.appstoreconnect.apple.com/v1/apps?cursor=abc")
-	if err != nil {
-		t.Fatalf("validateNextURL() error = %v", err)
+	for _, next := range []string{
+		"https://api.appstoreconnect.apple.com/v1/apps?cursor=abc",
+		"https://api.enterprise.developer.apple.com/v1/certificates?cursor=abc",
+	} {
+		if err := validateNextURL(next); err != nil {
+			t.Fatalf("validateNextURL(%q) error = %v", next, err)
+		}
 	}
 }
 
@@ -900,7 +854,7 @@ func TestProgressEnabled_RespectsNoProgressFlag(t *testing.T) {
 	isTerminal = func(int) bool { return true }
 	SetNoProgress(true)
 
-	if ProgressEnabled() {
+	if DefaultDeps().ProgressEnabled() {
 		t.Fatal("expected progress to be disabled when --no-progress is set")
 	}
 }
@@ -916,7 +870,7 @@ func TestProgressEnabled_DisabledWhenStderrNotTTY(t *testing.T) {
 	isTerminal = func(int) bool { return false }
 	SetNoProgress(false)
 
-	if ProgressEnabled() {
+	if DefaultDeps().ProgressEnabled() {
 		t.Fatal("expected progress to be disabled when stderr is not a TTY")
 	}
 }
@@ -932,156 +886,55 @@ func TestProgressEnabled_EnabledWhenTTYAndNotDisabled(t *testing.T) {
 	isTerminal = func(int) bool { return true }
 	SetNoProgress(false)
 
-	if !ProgressEnabled() {
+	if !DefaultDeps().ProgressEnabled() {
 		t.Fatal("expected progress to be enabled when stderr is a TTY and --no-progress is not set")
 	}
 }
 
-func TestResolvePrivateKeyPathPrefersPath(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "/tmp/AuthKey.p8")
-	t.Setenv("ASC_PRIVATE_KEY_B64", base64.StdEncoding.EncodeToString([]byte("ignored")))
-	t.Setenv("ASC_PRIVATE_KEY", "ignored")
-
-	path, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() error: %v", err)
-	}
-	if path != "/tmp/AuthKey.p8" {
-		t.Fatalf("expected path /tmp/AuthKey.p8, got %q", path)
-	}
-}
-
-func TestResolvePrivateKeyPathFromBase64(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY", "")
-
-	encoded := base64.StdEncoding.EncodeToString([]byte("key-data"))
-	t.Setenv("ASC_PRIVATE_KEY_B64", encoded)
-
-	path, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() error: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if string(data) != "key-data" {
-		t.Fatalf("expected key data %q, got %q", "key-data", string(data))
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("Stat() error: %v", err)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
-	}
-}
-
-func TestResolvePrivateKeyPathFromRawValue(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY_B64", "")
-
-	t.Setenv("ASC_PRIVATE_KEY", "line1\nline2\\nline3")
-	path, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() error: %v", err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile() error: %v", err)
-	}
-	if string(data) != "line1\nline2\nline3" {
-		t.Fatalf("expected newline expansion, got %q", string(data))
-	}
-}
-
-func TestResolvePrivateKeyPathRefreshesWhenRawValueChanges(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY_B64", "")
-
-	t.Setenv("ASC_PRIVATE_KEY", "account-a-key")
-	firstPath, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() first call error: %v", err)
-	}
-	firstData, err := os.ReadFile(firstPath)
-	if err != nil {
-		t.Fatalf("ReadFile(firstPath) error: %v", err)
-	}
-	if string(firstData) != "account-a-key" {
-		t.Fatalf("expected first key data %q, got %q", "account-a-key", string(firstData))
-	}
-
-	t.Setenv("ASC_PRIVATE_KEY", "account-b-key")
-	secondPath, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() second call error: %v", err)
-	}
-	secondData, err := os.ReadFile(secondPath)
-	if err != nil {
-		t.Fatalf("ReadFile(secondPath) error: %v", err)
-	}
-	if string(secondData) != "account-b-key" {
-		t.Fatalf("expected updated key data %q, got %q", "account-b-key", string(secondData))
-	}
-}
-
-func TestResolvePrivateKeyPathRefreshesWhenBase64ValueChanges(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY", "")
-
-	t.Setenv("ASC_PRIVATE_KEY_B64", base64.StdEncoding.EncodeToString([]byte("account-a-key")))
-	firstPath, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() first call error: %v", err)
-	}
-	firstData, err := os.ReadFile(firstPath)
-	if err != nil {
-		t.Fatalf("ReadFile(firstPath) error: %v", err)
-	}
-	if string(firstData) != "account-a-key" {
-		t.Fatalf("expected first key data %q, got %q", "account-a-key", string(firstData))
-	}
-
-	t.Setenv("ASC_PRIVATE_KEY_B64", base64.StdEncoding.EncodeToString([]byte("account-b-key")))
-	secondPath, err := resolvePrivateKeyPath()
-	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() second call error: %v", err)
-	}
-	secondData, err := os.ReadFile(secondPath)
-	if err != nil {
-		t.Fatalf("ReadFile(secondPath) error: %v", err)
-	}
-	if string(secondData) != "account-b-key" {
-		t.Fatalf("expected updated key data %q, got %q", "account-b-key", string(secondData))
+func TestResolveEnvKeyMaterial(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, raw, encoded, wantPath, wantPEM, wantErr string
+	}{
+		{name: "path takes precedence", path: "/tmp/AuthKey.p8", raw: "ignored", encoded: "invalid", wantPath: "/tmp/AuthKey.p8"},
+		{name: "base64 takes precedence", raw: "ignored", encoded: base64.StdEncoding.EncodeToString([]byte("key-data")), wantPEM: "key-data"},
+		{name: "inline newlines are expanded", raw: "line1\nline2\\nline3", wantPEM: "line1\nline2\nline3"},
+		{name: "invalid base64 does not fall back", raw: "ignored", encoded: "not-base64", wantErr: "ASC_PRIVATE_KEY_B64:"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ASC_PRIVATE_KEY_PATH", tc.path)
+			t.Setenv("ASC_PRIVATE_KEY", tc.raw)
+			t.Setenv("ASC_PRIVATE_KEY_B64", tc.encoded)
+			path, keyPEM, err := resolveEnvKeyMaterial()
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected %q error, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || path != tc.wantPath || keyPEM != tc.wantPEM {
+				t.Fatalf("unexpected path or key material: path=%q err=%v", path, err)
+			}
+		})
 	}
 }
 
 func TestCleanupTempPrivateKeysRemovesFile(t *testing.T) {
 	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY", "")
-
-	encoded := base64.StdEncoding.EncodeToString([]byte("key-data"))
-	t.Setenv("ASC_PRIVATE_KEY_B64", encoded)
-
-	path, err := resolvePrivateKeyPath()
+	path, err := AltoolPrivateKeyPath(ResolvedAuthCredentials{KeyPEM: "key-data"})
 	if err != nil {
-		t.Fatalf("resolvePrivateKeyPath() error: %v", err)
+		t.Fatalf("AltoolPrivateKeyPath() error: %v", err)
 	}
-	if _, err := os.Stat(path); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		t.Fatalf("expected temp key file to exist, got %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 && runtime.GOOS != "windows" {
+		t.Fatalf("expected 0600 permissions, got %v", info.Mode().Perm())
 	}
 
 	CleanupTempPrivateKeys()
 
-	if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected temp key file to be removed, got %v", err)
 	}
 	if privateKeyTempPath != "" {
@@ -1130,17 +983,6 @@ func TestFinalizeTempPrivateKeyRemovesFileOnWriteFailure(t *testing.T) {
 	}
 }
 
-func TestResolvePrivateKeyPathInvalidBase64(t *testing.T) {
-	resetPrivateKeyTemp(t)
-	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
-	t.Setenv("ASC_PRIVATE_KEY", "")
-	t.Setenv("ASC_PRIVATE_KEY_B64", "not-base64")
-
-	if _, err := resolvePrivateKeyPath(); err == nil {
-		t.Fatal("expected error for invalid base64")
-	}
-}
-
 func TestCheckMixedCredentialSourcesWarns(t *testing.T) {
 	previousStrict := strictAuth
 	strictAuth = false
@@ -1150,11 +992,11 @@ func TestCheckMixedCredentialSourcesWarns(t *testing.T) {
 	t.Setenv(strictAuthEnvVar, "")
 
 	stdout, stderr := captureOutput(t, func() {
-		if err := checkMixedCredentialSources(credentialSource{
+		if err := checkMixedCredentialSourcesForKeyType(credentialSource{
 			keyID:       "keychain",
 			issuerID:    "env",
 			keyMaterial: "env",
-		}); err != nil {
+		}, config.CredentialKeyTypeTeam); err != nil {
 			t.Fatalf("expected warning only, got %v", err)
 		}
 	})
@@ -1176,11 +1018,11 @@ func TestCheckMixedCredentialSourcesStrictErrors(t *testing.T) {
 	t.Setenv(strictAuthEnvVar, "")
 
 	stdout, stderr := captureOutput(t, func() {
-		if err := checkMixedCredentialSources(credentialSource{
+		if err := checkMixedCredentialSourcesForKeyType(credentialSource{
 			keyID:       "keychain",
 			issuerID:    "env",
 			keyMaterial: "env",
-		}); err == nil {
+		}, config.CredentialKeyTypeTeam); err == nil {
 			t.Fatal("expected error, got nil")
 		}
 	})
@@ -1202,12 +1044,13 @@ func TestCheckMixedCredentialSourcesStrictAuthEnvErrors(t *testing.T) {
 	t.Setenv(strictAuthEnvVar, "yes")
 
 	stdout, stderr := captureOutput(t, func() {
-		if err := checkMixedCredentialSources(credentialSource{
+		err := checkMixedCredentialSourcesForKeyType(credentialSource{
 			keyID:       "keychain",
 			issuerID:    "env",
 			keyMaterial: "env",
-		}); err == nil {
-			t.Fatal("expected error, got nil")
+		}, config.CredentialKeyTypeTeam)
+		if diagnostic, _ := DiagnosticFromError(err); !errors.Is(err, ErrMissingAuth) || diagnostic.Code != DiagnosticConflictingInput {
+			t.Fatalf("expected a conflicting-input authentication error, got %v", err)
 		}
 	})
 
@@ -1562,6 +1405,68 @@ func TestResolveCredentials_DefaultSelectionErrorFallsBackToEnv(t *testing.T) {
 	}
 	if creds.keyID != "ENVKEY" || creds.issuerID != "ENVISS" || creds.keyPath != envKeyPath {
 		t.Fatalf("expected env fallback after default-selection error, got %+v", creds)
+	}
+}
+
+func TestResolveCredentials_PartialEnvIDsDifferingFromStoredWarn(t *testing.T) {
+	t.Setenv("ASC_BYPASS_KEYCHAIN", "")
+	t.Setenv("ASC_PROFILE", "")
+	t.Setenv("ASC_ISSUER_ID", "")
+	t.Setenv("ASC_KEY_TYPE", "")
+	t.Setenv("ASC_PRIVATE_KEY_PATH", "")
+	t.Setenv("ASC_PRIVATE_KEY_B64", "")
+	t.Setenv("ASC_PRIVATE_KEY", "")
+	t.Setenv(strictAuthEnvVar, "")
+
+	previousProfile := selectedProfile
+	selectedProfile = ""
+	previousStrict := strictAuth
+	t.Cleanup(func() {
+		selectedProfile = previousProfile
+		strictAuth = previousStrict
+	})
+
+	previous := getCredentialsWithSourceFn
+	getCredentialsWithSourceFn = func(string) (*config.Config, string, error) {
+		return &config.Config{KeyID: "STOREDKEY", IssuerID: "STOREDISS", PrivateKeyPath: "/tmp/stored.p8", DefaultKeyName: "a"}, "keychain", nil
+	}
+	t.Cleanup(func() { getCredentialsWithSourceFn = previous })
+
+	const warning = "Warning: ASC_KEY_ID ignored because the environment credentials are incomplete; using keychain credentials\n"
+	tests := []struct {
+		envKeyID   string
+		envKeyPath string
+		strict     bool
+		wantStderr string
+		wantErr    bool
+	}{
+		{envKeyID: "STOREDKEY"},
+		{envKeyID: "ENVKEY", wantStderr: warning},
+		{envKeyID: "ENVKEY", envKeyPath: "/tmp/env.p8", wantStderr: warning},
+		{envKeyID: "ENVKEY", strict: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Setenv("ASC_KEY_ID", tt.envKeyID)
+		t.Setenv("ASC_PRIVATE_KEY_PATH", tt.envKeyPath)
+		strictAuth = tt.strict
+		_, stderr := captureOutput(t, func() {
+			creds, err := resolveCredentials()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "mixed authentication sources detected") {
+					t.Fatalf("expected strict-auth error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveCredentials() error: %v", err)
+			}
+			if creds.keyID != "STOREDKEY" {
+				t.Fatalf("expected stored credentials, got %+v", creds)
+			}
+		})
+		if stderr != tt.wantStderr {
+			t.Fatalf("ASC_KEY_ID=%s strict=%v: expected stderr %q, got %q", tt.envKeyID, tt.strict, tt.wantStderr, stderr)
+		}
 	}
 }
 
@@ -1960,7 +1865,7 @@ func TestGetASCClient_UsesStoredPEMWhenPathMissing(t *testing.T) {
 	}
 }
 
-func TestResolveCredentials_KeychainAccessDeniedStopsFallback(t *testing.T) {
+func TestResolveCredentials_KeychainFailureStopsFallback(t *testing.T) {
 	tempDir := t.TempDir()
 	keyPath := filepath.Join(tempDir, "AuthKey.p8")
 	writeECDSAPEM(t, keyPath)
@@ -1984,21 +1889,26 @@ func TestResolveCredentials_KeychainAccessDeniedStopsFallback(t *testing.T) {
 	t.Cleanup(func() { strictAuth = previousStrict })
 	t.Setenv(strictAuthEnvVar, "")
 
+	tests := []struct {
+		cause    error
+		wantCode DiagnosticCode
+	}{
+		{cause: auth.ErrKeychainAccessDenied},
+		{cause: auth.ErrKeychainReadFailed, wantCode: DiagnosticDependencyFailed},
+	}
 	previous := getCredentialsWithSourceFn
-	getCredentialsWithSourceFn = func(string) (*config.Config, string, error) {
-		return nil, "", fmt.Errorf("%w: denied", auth.ErrKeychainAccessDenied)
-	}
 	t.Cleanup(func() { getCredentialsWithSourceFn = previous })
+	for _, test := range tests {
+		getCredentialsWithSourceFn = func(string) (*config.Config, string, error) {
+			return nil, "", fmt.Errorf("%w: broken", test.cause)
+		}
 
-	_, err := resolveCredentials()
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !errors.Is(err, auth.ErrKeychainAccessDenied) {
-		t.Fatalf("expected ErrKeychainAccessDenied, got %v", err)
-	}
-	if !errors.Is(err, ErrMissingAuth) {
-		t.Fatalf("expected keychain denial to report missing authentication, got %v", err)
+		_, err := resolveCredentials()
+		diagnostic, _ := DiagnosticFromError(err)
+		if !errors.Is(err, test.cause) || !errors.Is(err, ErrMissingAuth) || diagnostic.Code != test.wantCode ||
+			!strings.Contains(err.Error(), "set ASC_BYPASS_KEYCHAIN=1 to bypass") {
+			t.Fatalf("resolveCredentials() error = %v with diagnostic %q, want missing authentication caused by %v with the bypass advice and diagnostic %q", err, diagnostic.Code, test.cause, test.wantCode)
+		}
 	}
 }
 

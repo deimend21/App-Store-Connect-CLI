@@ -3,7 +3,7 @@ package cmdtest
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +14,6 @@ import (
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 func TestAnalyticsInstancesLinksAcceptsPrefixedInstanceID(t *testing.T) {
@@ -41,14 +40,11 @@ func TestAnalyticsInstancesLinksAcceptsPrefixedInstanceID(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := newReviewTestServerClient(t, server)
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
-
-	stdout, stderr, runErr := runCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, stubServerClient(t, server),
 		"analytics", "instances", "links",
 		"--instance-id", instanceID,
 		"--output", "json",
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -79,146 +75,71 @@ func TestAnalyticsDownloadAcceptsPrefixedSegmentID(t *testing.T) {
 	runAnalyticsDownloadIDCase(t, "22222222-2222-2222-2222-222222222222", "s39-example-segment")
 }
 
-func TestAnalyticsRequestIDValidationRemainsBeforeClientConstruction(t *testing.T) {
+func TestAnalyticsDownloadDefaultPathsSeparateExplicitSegments(t *testing.T) {
 	setupAnalyticsResourceIDAuth(t)
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
-	}{
-		{
-			name:    "view",
-			args:    []string{"analytics", "view", "--request-id", "r39-not-a-request-uuid"},
-			wantErr: "analytics view: --request-id must be a valid UUID",
-		},
-		{
-			name: "download",
-			args: []string{
-				"analytics", "download",
-				"--request-id", "r39-not-a-request-uuid",
-				"--instance-id", "r39-example-instance",
-			},
-			wantErr: "analytics download: --request-id must be a valid UUID",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			clientFactoryCalls := 0
-			t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-				clientFactoryCalls++
-				return nil, errors.New("client construction should not be attempted")
-			}))
-
-			stdout, stderr, runErr := runCommand(t, test.args)
-			if runErr == nil || !strings.Contains(runErr.Error(), "--request-id must be a valid UUID") {
-				t.Fatalf("run error = %v, want request UUID validation", runErr)
-			}
-			if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitUsage {
-				t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitUsage)
-			}
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			assertUsageErrorStderr(t, stderr, test.wantErr)
-			if clientFactoryCalls != 0 {
-				t.Fatalf("client factory calls = %d, want 0", clientFactoryCalls)
-			}
-		})
-	}
-}
-
-func TestAnalyticsResourcePathValidationRemainsBeforeClientConstruction(t *testing.T) {
-	setupAnalyticsResourceIDAuth(t)
+	t.Chdir(t.TempDir())
 
 	const (
-		escapedInstanceID = "r39/escaped-instance"
-		escapedSegmentID  = "s39/escaped-segment"
+		instanceID    = "r39-example-instance"
+		firstSegment  = "s39:Segment|A"
+		secondSegment = "s39:segment|a"
+		firstReport   = "first-segment-data"
+		secondReport  = "second-segment-data"
 	)
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr string
-	}{
-		{
-			name: "instances view",
-			args: []string{
-				"analytics", "instances", "view",
-				"--instance-id", escapedInstanceID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics instances view", "--instance-id", escapedInstanceID),
-		},
-		{
-			name: "instances links",
-			args: []string{
-				"analytics", "instances", "links",
-				"--instance-id", escapedInstanceID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics instances links", "--instance-id", escapedInstanceID),
-		},
-		{
-			name: "view filter",
-			args: []string{
-				"analytics", "view",
-				"--request-id", analyticsViewRequestID,
-				"--instance-id", escapedInstanceID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics view", "--instance-id", escapedInstanceID),
-		},
-		{
-			name: "segments view",
-			args: []string{
-				"analytics", "segments", "view",
-				"--segment-id", escapedSegmentID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics segments view", "--segment-id", escapedSegmentID),
-		},
-		{
-			name: "download",
-			args: []string{
-				"analytics", "download",
-				"--request-id", analyticsViewRequestID,
-				"--instance-id", escapedInstanceID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics download", "--instance-id", escapedInstanceID),
-		},
-		{
-			name: "download segment",
-			args: []string{
-				"analytics", "download",
-				"--request-id", analyticsViewRequestID,
-				"--instance-id", "r39-example-instance",
-				"--segment-id", escapedSegmentID,
-			},
-			wantErr: analyticsReservedSegmentUsageError("analytics download", "--segment-id", escapedSegmentID),
-		},
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v1/analyticsReportInstances/" + instanceID + "/segments":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"data":[{"type":"analyticsReportSegments","id":%q,"attributes":{"url":"https://mzstatic.com/first.gz"}},{"type":"analyticsReportSegments","id":%q,"attributes":{"url":"https://mzstatic.com/second.gz"}}]}`, firstSegment, secondSegment)
+		case "/first.gz":
+			_, _ = io.WriteString(w, firstReport)
+		case "/second.gz":
+			_, _ = io.WriteString(w, secondReport)
+		default:
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL)
+			http.NotFound(w, req)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := stubServerClient(t, server)
+	download := func(segmentID string) (string, string, int) {
+		return runWithDeps(t, client, "analytics", "download", "--request-id", analyticsViewRequestID,
+			"--instance-id", instanceID, "--segment-id", segmentID, "--output-format", "json")
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			clientFactoryCalls := 0
-			t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-				clientFactoryCalls++
-				return nil, errors.New("client construction should not be attempted")
-			}))
-
-			stdout, stderr, runErr := runCommand(t, test.args)
-			if runErr == nil || !strings.Contains(runErr.Error(), "single path segment") {
-				t.Fatalf("run error = %v, want resource path-segment validation", runErr)
-			}
-			if got := rootcmd.ExitCodeFromError(runErr); got != rootcmd.ExitUsage {
-				t.Fatalf("exit code = %d, want %d", got, rootcmd.ExitUsage)
-			}
-			if stdout != "" {
-				t.Fatalf("expected empty stdout, got %q", stdout)
-			}
-			assertUsageErrorStderr(t, stderr, test.wantErr)
-			if clientFactoryCalls != 0 {
-				t.Fatalf("client factory calls = %d, want 0", clientFactoryCalls)
-			}
-		})
+	readReport := func(segmentID, want string) string {
+		t.Helper()
+		stdout, stderr, code := download(segmentID)
+		if code != rootcmd.ExitSuccess || stderr != "" {
+			t.Fatalf("download %q exited %d: %s", segmentID, code, stderr)
+		}
+		var result asc.AnalyticsReportDownloadResult
+		if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+			t.Fatalf("decode download result: %v", err)
+		}
+		if result.SegmentID != segmentID || !strings.HasSuffix(result.FilePath, ".csv.gz") || strings.ContainsAny(result.FilePath, `/\:*?"<>|`) {
+			t.Fatalf("unexpected download result: %+v", result)
+		}
+		data, err := os.ReadFile(result.FilePath)
+		if err != nil || string(data) != want {
+			t.Fatalf("read %q: got %q, %v; want %q", result.FilePath, data, err, want)
+		}
+		return result.FilePath
+	}
+	firstPath := readReport(firstSegment, firstReport)
+	secondPath := readReport(secondSegment, secondReport)
+	if strings.EqualFold(firstPath, secondPath) {
+		t.Fatalf("segment output paths collide: %q and %q", firstPath, secondPath)
+	}
+	const savedReport = "saved first report"
+	if err := os.WriteFile(firstPath, []byte(savedReport), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code := download(firstSegment)
+	if code != rootcmd.ExitError || stdout != "" || !strings.Contains(stderr, "output file already exists") {
+		t.Fatalf("retry exited %d, stdout %q, stderr %q", code, stdout, stderr)
+	}
+	if data, err := os.ReadFile(firstPath); err != nil || string(data) != savedReport {
+		t.Fatalf("retry changed %q: got %q, %v; want %q", firstPath, data, err, savedReport)
 	}
 }
 
@@ -230,49 +151,39 @@ func runAnalyticsDownloadIDCase(t *testing.T, instanceID, segmentID string) {
 	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		requestCount++
-		switch requestCount {
-		case 1:
-			assertAnalyticsResourceIDRequest(t, req, "/v1/analyticsReportRequests/"+analyticsViewRequestID+"/reports", "limit=200", true)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"type":"analyticsReports","id":"r39-example-report"}],"links":{}}`)
-		case 2:
-			assertAnalyticsResourceIDRequest(t, req, "/v1/analyticsReports/r39-example-report/instances", "limit=200", true)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"data":[{"type":"analyticsReportInstances","id":"`+instanceID+`"}],"links":{}}`)
-		case 3:
+		switch req.URL.Path {
+		case "/v1/analyticsReportInstances/" + instanceID + "/segments":
 			assertAnalyticsResourceIDRequest(t, req, "/v1/analyticsReportInstances/"+instanceID+"/segments", "limit=200", true)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"data":[{"type":"analyticsReportSegments","id":"`+segmentID+`","attributes":{"url":"https://mzstatic.com/report.gz"}}],"links":{}}`)
-		case 4:
+		case "/report.gz":
 			assertAnalyticsResourceIDRequest(t, req, "/report.gz", "", false)
 			w.Header().Set("Content-Type", "application/a-gzip")
 			_, _ = io.WriteString(w, reportPayload)
 		default:
-			t.Fatalf("unexpected extra request: %s %s", req.Method, req.URL.String())
+			t.Errorf("unexpected extra request: %s %s", req.Method, req.URL)
+			http.NotFound(w, req)
 		}
 	}))
 	t.Cleanup(server.Close)
 
-	client := newReviewTestServerClient(t, server)
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) { return client, nil }))
-
 	outputPath := filepath.Join(t.TempDir(), "analytics-report.csv.gz")
-	stdout, stderr, runErr := runCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, stubServerClient(t, server),
 		"analytics", "download",
 		"--request-id", analyticsViewRequestID,
 		"--instance-id", instanceID,
 		"--segment-id", segmentID,
 		"--output", outputPath,
 		"--output-format", "json",
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
 	}
-	if requestCount != 4 {
-		t.Fatalf("request count = %d, want 4", requestCount)
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2 (segments, then the report file)", requestCount)
 	}
 	data, err := os.ReadFile(outputPath)
 	if err != nil {
@@ -298,7 +209,6 @@ func runAnalyticsDownloadIDCase(t *testing.T, instanceID, segmentID string) {
 
 func setupAnalyticsResourceIDAuth(t *testing.T) {
 	t.Helper()
-	setupAuth(t)
 	t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 }

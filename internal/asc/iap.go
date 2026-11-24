@@ -3,7 +3,6 @@ package asc
 import (
 	"net/url"
 	"strconv"
-	"strings"
 )
 
 // InAppPurchaseType represents an App Store Connect in-app purchase type.
@@ -32,6 +31,8 @@ type InAppPurchaseV2Attributes struct {
 	FamilySharable            bool   `json:"familySharable,omitempty"`
 	ContentHosting            bool   `json:"contentHosting,omitempty"`
 	AvailableInAllTerritories bool   `json:"availableInAllTerritories,omitempty"`
+
+	api apiAttributes
 }
 
 // InAppPurchaseAttributes represents a legacy in-app purchase resource.
@@ -62,35 +63,6 @@ type InAppPurchaseV2UpdateAttributes struct {
 	AvailableInAllTerritories *bool   `json:"availableInAllTerritories,omitempty"`
 }
 
-// InAppPurchaseV2Relationships describes relationships for IAPs.
-type InAppPurchaseV2Relationships struct {
-	App *Relationship `json:"app"`
-}
-
-// InAppPurchaseV2CreateData is the data portion of an IAP create request.
-type InAppPurchaseV2CreateData struct {
-	Type          ResourceType                    `json:"type"`
-	Attributes    InAppPurchaseV2CreateAttributes `json:"attributes"`
-	Relationships *InAppPurchaseV2Relationships   `json:"relationships,omitempty"`
-}
-
-// InAppPurchaseV2CreateRequest is a request to create an IAP.
-type InAppPurchaseV2CreateRequest struct {
-	Data InAppPurchaseV2CreateData `json:"data"`
-}
-
-// InAppPurchaseV2UpdateData is the data portion of an IAP update request.
-type InAppPurchaseV2UpdateData struct {
-	Type       ResourceType                     `json:"type"`
-	ID         string                           `json:"id"`
-	Attributes *InAppPurchaseV2UpdateAttributes `json:"attributes,omitempty"`
-}
-
-// InAppPurchaseV2UpdateRequest is a request to update an IAP.
-type InAppPurchaseV2UpdateRequest struct {
-	Data InAppPurchaseV2UpdateData `json:"data"`
-}
-
 // InAppPurchaseLocalizationAttributes describes an IAP localization.
 type InAppPurchaseLocalizationAttributes struct {
 	Name        string `json:"name"`
@@ -102,17 +74,11 @@ type InAppPurchaseLocalizationAttributes struct {
 // InAppPurchasesV2Response is the response from in-app purchase list endpoints.
 type InAppPurchasesV2Response = Response[InAppPurchaseV2Attributes]
 
-// InAppPurchaseV2Response is the response from in-app purchase detail endpoints.
-type InAppPurchaseV2Response = SingleResponse[InAppPurchaseV2Attributes]
-
 // InAppPurchaseLocalizationsResponse is the response from localization endpoints.
 type InAppPurchaseLocalizationsResponse = Response[InAppPurchaseLocalizationAttributes]
 
 // InAppPurchasesResponse is the response from legacy in-app purchase list endpoints.
 type InAppPurchasesResponse = Response[InAppPurchaseAttributes]
-
-// InAppPurchaseResponse is the response from legacy in-app purchase detail endpoints.
-type InAppPurchaseResponse = SingleResponse[InAppPurchaseAttributes]
 
 // IAPOption is a functional option for GetInAppPurchasesV2.
 type IAPOption func(*inAppPurchasesQuery)
@@ -120,11 +86,9 @@ type IAPOption func(*inAppPurchasesQuery)
 // IAPGetOption is a functional option for GetInAppPurchaseV2.
 type IAPGetOption func(*inAppPurchaseGetQuery)
 
-// IAPLocalizationsOption is a functional option for GetInAppPurchaseLocalizations.
-type IAPLocalizationsOption func(*iapLocalizationsQuery)
-
 type inAppPurchasesQuery struct {
 	listQuery
+	includedFieldsQuery
 	productIDs          []string
 	names               []string
 	states              []string
@@ -137,34 +101,11 @@ type inAppPurchasesQuery struct {
 }
 
 type inAppPurchaseGetQuery struct {
+	includedFieldsQuery
 	fields              []string
 	include             []string
 	versionFields       []string
 	nestedVersionsLimit int
-}
-
-type iapLocalizationsQuery struct {
-	listQuery
-	iapFields []string
-	include   []string
-}
-
-// WithIAPLimit sets the max number of IAPs to return.
-func WithIAPLimit(limit int) IAPOption {
-	return func(q *inAppPurchasesQuery) {
-		if limit > 0 {
-			q.limit = limit
-		}
-	}
-}
-
-// WithIAPNextURL uses a next page URL directly.
-func WithIAPNextURL(next string) IAPOption {
-	return func(q *inAppPurchasesQuery) {
-		if strings.TrimSpace(next) != "" {
-			q.nextURL = strings.TrimSpace(next)
-		}
-	}
 }
 
 // WithIAPProductIDs filters in-app purchases by product ID.
@@ -250,34 +191,6 @@ func WithIAPGetNestedVersionsLimit(limit int) IAPGetOption {
 	}
 }
 
-// WithIAPLocalizationsLimit sets the max number of localizations to return.
-func WithIAPLocalizationsLimit(limit int) IAPLocalizationsOption {
-	return func(q *iapLocalizationsQuery) {
-		if limit > 0 {
-			q.limit = limit
-		}
-	}
-}
-
-// WithIAPLocalizationsNextURL uses a next page URL directly.
-func WithIAPLocalizationsNextURL(next string) IAPLocalizationsOption {
-	return func(q *iapLocalizationsQuery) {
-		if strings.TrimSpace(next) != "" {
-			q.nextURL = strings.TrimSpace(next)
-		}
-	}
-}
-
-// WithIAPLocalizationsIAPFields sets fields[inAppPurchases] for included IAPs.
-func WithIAPLocalizationsIAPFields(fields []string) IAPLocalizationsOption {
-	return func(q *iapLocalizationsQuery) { q.iapFields = normalizeUniqueList(fields) }
-}
-
-// WithIAPLocalizationsInclude sets the exact localization relationship include set.
-func WithIAPLocalizationsInclude(include []string) IAPLocalizationsOption {
-	return func(q *iapLocalizationsQuery) { q.include = normalizeUniqueList(include) }
-}
-
 func buildInAppPurchasesQuery(query *inAppPurchasesQuery) string {
 	values := url.Values{}
 	addLimit(values, query.limit)
@@ -292,6 +205,7 @@ func buildInAppPurchasesQuery(query *inAppPurchasesQuery) string {
 	if query.nestedVersionsLimit > 0 {
 		values.Set("limit[versions]", strconv.Itoa(query.nestedVersionsLimit))
 	}
+	query.includedFields.AddTo(values)
 	return values.Encode()
 }
 
@@ -303,13 +217,6 @@ func buildInAppPurchaseGetQuery(query *inAppPurchaseGetQuery) string {
 	if query.nestedVersionsLimit > 0 {
 		values.Set("limit[versions]", strconv.Itoa(query.nestedVersionsLimit))
 	}
-	return values.Encode()
-}
-
-func buildIAPLocalizationsQuery(query *iapLocalizationsQuery) string {
-	values := url.Values{}
-	addLimit(values, query.limit)
-	addCSV(values, "fields[inAppPurchases]", query.iapFields)
-	addCSV(values, "include", includeWhenFieldsSelected(query.include, "inAppPurchaseV2", query.iapFields))
+	query.includedFields.AddTo(values)
 	return values.Encode()
 }

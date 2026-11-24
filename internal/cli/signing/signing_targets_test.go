@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
@@ -52,13 +51,15 @@ func TestSigningSyncPushPreservesTargetsFilePathWhitespace(t *testing.T) {
 	t.Chdir(dir)
 
 	clientCalls := 0
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
+	clientFactory := func() (*asc.Client, error) {
 		clientCalls++
 		return nil, errors.New("client reached after manifest")
-	}))
+	}
 
 	t.Setenv(signingSyncPasswordEnvVar, "repository-password")
-	cmd := syncPushCommand()
+	d, _, _ := newSigningTestDeps()
+	d.Client = clientFactory
+	cmd := syncPushCommand(d)
 	cmd.FlagSet.SetOutput(io.Discard)
 	if err := cmd.Parse([]string{
 		"--targets-file", filename,
@@ -77,6 +78,10 @@ func TestSigningSyncPushPreservesTargetsFilePathWhitespace(t *testing.T) {
 }
 
 func TestReadSigningSyncTargetsFileRejectsUnsafeManifest(t *testing.T) {
+	tooManyTargets := make([]string, 33)
+	for index := range tooManyTargets {
+		tooManyTargets[index] = `{"bundleId":"com.example.target` + fmt.Sprint(index) + `"}`
+	}
 	tests := []struct {
 		name string
 		body string
@@ -96,6 +101,8 @@ func TestReadSigningSyncTargetsFileRejectsUnsafeManifest(t *testing.T) {
 		{name: "bidi character", body: "{\"schemaVersion\":1,\"targets\":[{\"bundleId\":\"com.example.\\u202eapp\"}]}", want: "bidi"},
 		{name: "duplicate case insensitive", body: `{"schemaVersion":1,"targets":[{"bundleId":"com.example.app"},{"bundleId":"COM.EXAMPLE.APP"}]}`, want: "duplicate"},
 		{name: "trailing JSON", body: `{"schemaVersion":1,"targets":[{"bundleId":"com.example.app"}]} {}`, want: "trailing"},
+		{name: "more than 32 targets", body: `{"schemaVersion":1,"targets":[` + strings.Join(tooManyTargets, ",") + `]}`, want: "between 1 and 32"},
+		{name: "oversize manifest", body: `{"schemaVersion":1,"targets":[{"bundleId":"com.example.app","padding":"` + strings.Repeat("x", 65536) + `"}]}`, want: "64 KiB"},
 	}
 
 	for _, tt := range tests {
@@ -108,31 +115,6 @@ func TestReadSigningSyncTargetsFileRejectsUnsafeManifest(t *testing.T) {
 				t.Fatalf("readSigningSyncTargetsFile() error = %v, want substring %q", err, tt.want)
 			}
 		})
-	}
-}
-
-func TestReadSigningSyncTargetsFileRejectsOversizeManifest(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "targets.json")
-	writeSigningSyncTargetsFile(t, path, `{"schemaVersion":1,"targets":[{"bundleId":"com.example.app","padding":"`+strings.Repeat("x", 65536)+`"}]}`, 0o600)
-	t.Chdir(dir)
-	if _, err := readSigningSyncTargetsFile("targets.json"); err == nil || !strings.Contains(err.Error(), "64 KiB") {
-		t.Fatalf("readSigningSyncTargetsFile() error = %v, want 64 KiB limit", err)
-	}
-}
-
-func TestReadSigningSyncTargetsFileRejectsMoreThanThirtyTwoTargets(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "targets.json")
-	entries := make([]string, 33)
-	for index := range entries {
-		entries[index] = `{"bundleId":"com.example.target` + fmt.Sprint(index) + `"}`
-	}
-	writeSigningSyncTargetsFile(t, path, `{"schemaVersion":1,"targets":[`+strings.Join(entries, ",")+`]}`, 0o644)
-	t.Chdir(dir)
-
-	if _, err := readSigningSyncTargetsFile("targets.json"); err == nil || !strings.Contains(err.Error(), "between 1 and 32") {
-		t.Fatalf("readSigningSyncTargetsFile() error = %v, want target-count limit", err)
 	}
 }
 

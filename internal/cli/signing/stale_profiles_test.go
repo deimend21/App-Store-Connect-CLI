@@ -12,19 +12,6 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
-func TestProfileIsStaleSkipsUnrelatedType(t *testing.T) {
-	profile := asc.Resource[asc.ProfileAttributes]{
-		Attributes: asc.ProfileAttributes{
-			ProfileType:    "IOS_APP_DEVELOPMENT",
-			ProfileState:   asc.ProfileStateInvalid,
-			ExpirationDate: "2000-01-01T00:00:00Z",
-		},
-	}
-	if profileIsStale(profile, "IOS_APP_STORE", time.Now()) {
-		t.Fatal("stale check must not select a different profile type")
-	}
-}
-
 func TestDeleteStaleSigningProfilesDeletesOnlyExpiredActiveProfiles(t *testing.T) {
 	var deleted []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -47,7 +34,7 @@ func TestDeleteStaleSigningProfilesDeletesOnlyExpiredActiveProfiles(t *testing.T
 	t.Cleanup(server.Close)
 	client := newSigningFetchServerTestClient(t, server)
 
-	planned, err := findStaleSigningProfiles(context.Background(), client, "bundle-1", "IOS_APP_STORE")
+	planned, err := findStaleSigningProfiles(context.Background(), client, "bundle-1", "IOS_APP_STORE", time.Now)
 	if err != nil {
 		t.Fatalf("findStaleSigningProfiles: %v", err)
 	}

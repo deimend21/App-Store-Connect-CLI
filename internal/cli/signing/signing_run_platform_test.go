@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -44,7 +45,7 @@ func TestParseKeychainSearchList(t *testing.T) {
 }
 
 func TestRunSigningRunChildPreservesExitCode(t *testing.T) {
-	err := runSigningRunChild(context.Background(), []string{"/bin/sh", "-c", "exit 42"})
+	err := runSigningRunChild(context.Background(), time.After, []string{"/bin/sh", "-c", "exit 42"})
 	if code, ok := shared.ProcessExitCode(err); !ok || code != 42 {
 		t.Fatalf("error = %v, want exit code 42", err)
 	}
@@ -54,7 +55,7 @@ func TestRunSigningRunChildRejectsPreCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	started := time.Now()
-	err := runSigningRunChild(ctx, []string{"/bin/sh", "-c", "sleep 30"})
+	err := runSigningRunChild(ctx, time.After, []string{"/bin/sh", "-c", "sleep 30"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context canceled before launch", err)
 	}
@@ -75,7 +76,7 @@ func TestRunSigningRunChildDoesNotSignalProcessGroupAfterWait(t *testing.T) {
 	}
 	t.Cleanup(func() { signingRunKillProcessGroupFn = previous })
 
-	if err := runSigningRunChild(context.Background(), []string{"/bin/sh", "-c", "exit 0"}); err != nil {
+	if err := runSigningRunChild(context.Background(), time.After, []string{"/bin/sh", "-c", "exit 0"}); err != nil {
 		t.Fatalf("runSigningRunChild() error: %v", err)
 	}
 	if len(signals) != 0 {
@@ -97,7 +98,7 @@ func TestRunSigningRunChildSignalsProcessGroupBeforeWaitOnCancellation(t *testin
 		cancel(&signingRunSignalCause{signal: syscall.SIGTERM})
 	})
 	defer timer.Stop()
-	err := runSigningRunChild(ctx, []string{"/bin/sleep", "30"})
+	err := runSigningRunChild(ctx, time.After, []string{"/bin/sleep", "30"})
 	if code, ok := shared.ProcessExitCode(err); !ok || code != 143 {
 		t.Fatalf("error = %v, want signal exit code 143", err)
 	}
@@ -134,29 +135,11 @@ func TestParseSigningRunCertificateFingerprints(t *testing.T) {
 	}
 }
 
-func TestUtilityFailureIncludesBoundedSanitizedDiagnostic(t *testing.T) {
-	wantErr := errors.New("exit status 1")
-	diagnostic := "security: keychain is locked\nsecond line should be rendered safely"
-	err := utilityFailure("import identity", []byte(diagnostic), wantErr)
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("error = %v, want wrapped process error", err)
-	}
-	if got := err.Error(); !strings.Contains(got, "keychain is locked") || !strings.Contains(got, "second line") || strings.ContainsAny(got, "\r\n") {
-		t.Fatalf("error = %q, want bounded terminal-safe diagnostic", got)
-	}
-
-	longDiagnostic := strings.Repeat("x", 1024)
-	err = utilityFailure("import identity", []byte(longDiagnostic), wantErr)
-	if got := err.Error(); len(got) > signingUtilityDiagnosticLimit+128 {
-		t.Fatalf("error length = %d, want bounded diagnostic", len(got))
-	}
-}
-
 func TestRunSigningRunChildDoesNotInheritSigningSecrets(t *testing.T) {
 	t.Setenv("ASC_PRIVATE_KEY", "secret")
 	t.Setenv("ASC_PRIVATE_KEY_B64", "secret")
 	t.Setenv("ASC_ISSUER_ID", "issuer")
-	err := runSigningRunChild(context.Background(), []string{
+	err := runSigningRunChild(context.Background(), time.After, []string{
 		"/bin/sh", "-c", "test -z \"$ASC_PRIVATE_KEY\" && test -z \"$ASC_PRIVATE_KEY_B64\" && test -z \"$ASC_ISSUER_ID\"",
 	})
 	if err != nil {
@@ -230,12 +213,6 @@ func TestActiveSigningRunXcodeUsesTrustedAbsolutePath(t *testing.T) {
 	}
 	if gotPath != signingRunXcodebuildPath || !filepath.IsAbs(gotPath) {
 		t.Fatalf("xcodebuild path = %q, want trusted absolute %q", gotPath, signingRunXcodebuildPath)
-	}
-}
-
-func TestSigningRunProfileInstallDirRejectsNilContext(t *testing.T) {
-	if _, err := signingRunProfileInstallDir(signingRunNilContext()); !strings.Contains(err.Error(), "context is required") {
-		t.Fatalf("error = %v, want required context", err)
 	}
 }
 
@@ -474,29 +451,19 @@ func TestRecoverSigningRunJournalDistinguishesPartialWriteFromReplacement(t *tes
 	}
 }
 
-func TestLimitedSigningBufferBoundsOutput(t *testing.T) {
-	buffer := &limitedSigningBuffer{limit: 4}
-	if written, err := buffer.Write([]byte("123456789")); err != nil || written != 9 {
-		t.Fatalf("Write() = %d, %v", written, err)
-	}
-	if got := string(buffer.Bytes()); got != "1234" {
-		t.Fatalf("buffer = %q", got)
-	}
-}
-
 func TestUtilityFailureIncludesSanitizedBoundedStderrAndRedactsSecrets(t *testing.T) {
 	secret := []byte("keychain-password")
 	cause := errors.New("exit status 1")
 	stderr := append([]byte("security: failed to unlock \x1b[31m"), secret...)
-	stderr = append(stderr, " encoded=6b6579636861696e2d70617373776f7264\n"...)
+	stderr = append(stderr, " encoded=6b6579636861696e2d70617373776f7264\nsecond line\n"...)
 
 	err := utilityFailure("restrict key partition list", stderr, cause, secret)
 	if !errors.Is(err, cause) {
 		t.Fatalf("utilityFailure() error = %v, want injected cause", err)
 	}
 	message := err.Error()
-	if !strings.Contains(message, "security: failed to unlock [31m[REDACTED]") {
-		t.Fatalf("utilityFailure() = %q, want sanitized stderr diagnostic", message)
+	if !strings.Contains(message, "security: failed to unlock [31m[REDACTED]") || !strings.Contains(message, "second line") {
+		t.Fatalf("utilityFailure() = %q, want sanitized multi-line stderr diagnostic", message)
 	}
 	if strings.Contains(message, string(secret)) {
 		t.Fatalf("utilityFailure() leaked secret: %q", message)
@@ -1217,5 +1184,92 @@ func TestSigningRunDisposableKeychainSmoke(t *testing.T) {
 	}
 	if !reflect.DeepEqual(after, original) {
 		t.Fatalf("keychain search list changed: before=%v after=%v", original, after)
+	}
+}
+
+func TestSigningRunLegacyImportDoesNotExpandChain(t *testing.T) {
+	if os.Getenv("ASC_SIGNING_RUN_LIVE_TEST") != "1" {
+		t.Skip("set ASC_SIGNING_RUN_LIVE_TEST=1 to exercise disposable macOS keychains")
+	}
+	ctx := context.Background()
+	unlock, err := acquireSigningRunLock(ctx, time.After)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := unlock(); err != nil {
+			t.Error(err)
+		}
+	})
+	before, err := keychainSearchList(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newSigningRunFixture(t, signingRunFixtureOptions{codeSigningLeaf: true})
+	identity, err := inspectSigningRunIdentity(fixture.identity, []byte(fixture.password), fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerKeychain := filepath.Join(directory, "issuer.keychain-db")
+	keychain := filepath.Join(directory, "identity.keychain-db")
+	issuer := filepath.Join(directory, "issuer.cer")
+	t.Cleanup(func() {
+		if err := setKeychainSearchList(ctx, before); err != nil {
+			t.Errorf("restore keychain search list: %v", err)
+		}
+		for _, path := range []string{keychain, issuerKeychain} {
+			if err := deleteSigningRunKeychain(ctx, path); err != nil {
+				t.Error(err)
+			}
+		}
+		after, err := keychainSearchList(ctx)
+		if err != nil || !reflect.DeepEqual(after, before) {
+			t.Errorf("keychain search list changed: before=%v after=%v error=%v", before, after, err)
+		}
+	})
+	keychainPassword := []byte("disposable-keychain-password")
+	if _, err := createPersistentSigningKeychain(ctx, issuerKeychain, keychainPassword, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := createSigningRunKeychain(ctx, keychain, keychainPassword); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(issuer, fixture.trustAnchor, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := runSigningUtility(ctx, nil, "import", issuer, "-k", issuerKeychain); err != nil {
+		t.Fatal(utilityFailure("install disposable issuer certificate", stderr, err))
+	}
+	if err := removeKeychainSearchEntry(ctx, keychain); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := keychainSearchList(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, issuerKeychain) {
+		if err := setKeychainSearchList(ctx, append(paths, issuerKeychain)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Use signing run's own importer so this also guards its routing. Its final
+	// codesign probe depends on trust for the synthetic issuer, which is not under
+	// test. The timeout keeps a terminal password prompt from outliving cleanup.
+	importCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	err = importSigningRunIdentity(importCtx, keychain, keychainPassword, fixture.identity, []byte(fixture.password), identity.CertificateSHA1)
+	if err != nil && !strings.HasPrefix(err.Error(), "verify imported signing identity") {
+		t.Fatal(err)
+	}
+	stdout, stderr, err := runSigningUtility(ctx, nil, "find-certificate", "-a", "-Z", keychain)
+	if err != nil {
+		t.Fatal(utilityFailure("read imported certificates", stderr, err))
+	}
+	if fingerprints := parseSigningRunCertificateFingerprints(stdout); !reflect.DeepEqual(fingerprints, []string{identity.CertificateSHA1}) {
+		t.Fatalf("signing run import expanded the certificate chain: %v", fingerprints)
 	}
 }

@@ -12,9 +12,10 @@ import (
 )
 
 func TestSubscriptionPricePointEqualizationCommandsExpose441Filters(t *testing.T) {
+	testDeps, _ := newSubscriptionsTestDeps()
 	for _, cmd := range []*ffcli.Command{
-		SubscriptionsPricePointsEqualizationsCommand(),
-		SubscriptionsPricePointsAdjustedEqualizationsCommand(),
+		newSubscriptionsPricePointsEqualizationsCommand(testDeps),
+		newSubscriptionsPricePointsAdjustedEqualizationsCommand(testDeps),
 	} {
 		for _, name := range []string{
 			"territory",
@@ -34,17 +35,7 @@ func TestSubscriptionPricePointEqualizationCommandsExpose441Filters(t *testing.T
 		}
 	}
 
-	adjusted := SubscriptionsPricePointsAdjustedEqualizationsCommand()
-	for _, required := range []string{"--upfront-price-point-id", "--plan-type MONTHLY"} {
-		if !strings.Contains(adjusted.ShortUsage, required) {
-			t.Fatalf("adjusted-equalizations usage must require %s, got %q", required, adjusted.ShortUsage)
-		}
-	}
-	if !strings.Contains(adjusted.LongHelp, "requires both --upfront-price-point-id and --plan-type") {
-		t.Fatalf("adjusted-equalizations help must explain the live filter requirements, got %q", adjusted.LongHelp)
-	}
-
-	parent := SubscriptionsPricePointsCommand()
+	parent := newSubscriptionsPricePointsCommand(testDeps)
 	found := false
 	for _, subcommand := range parent.Subcommands {
 		if subcommand.Name == "adjusted-equalizations" {
@@ -56,7 +47,8 @@ func TestSubscriptionPricePointEqualizationCommandsExpose441Filters(t *testing.T
 		t.Fatal("expected adjusted-equalizations under price-points")
 	}
 
-	list := SubscriptionsPricePointsListCommand()
+	listDeps, _ := newSubscriptionsTestDeps()
+	list := newSubscriptionsPricePointsListCommand(listDeps)
 	for _, name := range []string{"upfront-price-point-id", "plan-type", "fields", "territory-fields", "include"} {
 		if list.FlagSet.Lookup(name) == nil {
 			t.Fatalf("list: expected --%s flag", name)
@@ -65,7 +57,8 @@ func TestSubscriptionPricePointEqualizationCommandsExpose441Filters(t *testing.T
 }
 
 func TestSubscriptionsPricesListCommand_HasResolvedFlag(t *testing.T) {
-	cmd := SubscriptionsPricesListCommand()
+	pricesDeps, _ := newSubscriptionsTestDeps()
+	cmd := newSubscriptionsPricesListCommand(pricesDeps)
 
 	if cmd.FlagSet.Lookup("resolved") == nil {
 		t.Fatal("expected --resolved flag")

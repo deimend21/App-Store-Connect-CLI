@@ -13,13 +13,15 @@ import (
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/rootfs"
 )
 
-// ResolveVendorNumber resolves the vendor number for reports.
-func ResolveVendorNumber(value string) string {
+// ResolveVendorNumber resolves the vendor number for reports: value, then
+// ASC_VENDOR_NUMBER or ASC_ANALYTICS_VENDOR_NUMBER read through d, then the
+// config file.
+func (d *Deps) ResolveVendorNumber(value string) string {
 	if strings.TrimSpace(value) != "" {
 		return strings.TrimSpace(value)
 	}
-	vendorEnv, vendorSet := os.LookupEnv("ASC_VENDOR_NUMBER")
-	analyticsEnv, analyticsSet := os.LookupEnv("ASC_ANALYTICS_VENDOR_NUMBER")
+	vendorEnv, vendorSet := d.lookupEnv("ASC_VENDOR_NUMBER")
+	analyticsEnv, analyticsSet := d.lookupEnv("ASC_ANALYTICS_VENDOR_NUMBER")
 	if vendorSet || analyticsSet {
 		if env := strings.TrimSpace(vendorEnv); env != "" {
 			return env
@@ -59,38 +61,49 @@ func ResolveReportOutputPaths(outputPath, defaultCompressed, decompressedExt str
 
 // WriteStreamToFile writes a reader to a file securely.
 func WriteStreamToFile(path string, reader io.Reader) (int64, error) {
-	return createNewOutputFile(path, reader)
+	return createNewOutputFile(filepath.Abs, os.Getwd, path, reader)
 }
 
-// DecompressGzipFile inflates a gzip file to the destination path.
-func DecompressGzipFile(sourcePath, destPath string) (int64, error) {
-	in, err := rootfs.OpenFile(sourcePath)
+// WriteStreamToFile is WriteStreamToFile with a relative path resolved against
+// d's working directory.
+func (d *Deps) WriteStreamToFile(path string, reader io.Reader) (int64, error) {
+	return createNewOutputFile(d.Abs, d.Getwd, path, reader)
+}
+
+// DecompressGzipFile inflates a gzip file to the destination path, with
+// relative paths resolved against d's working directory.
+func (d *Deps) DecompressGzipFile(sourcePath, destPath string) (int64, error) {
+	workingDir, _ := d.Getwd()
+	in, err := rootfs.OpenFileIn(workingDir, d.OSPath(sourcePath))
 	if err != nil {
 		return 0, err
 	}
 	defer in.Close()
+	return decompressGzipTo(d.Abs, d.Getwd, in, destPath)
+}
 
+func decompressGzipTo(abs func(string) (string, error), getwd func() (string, error), in io.Reader, destPath string) (int64, error) {
 	reader, err := gzip.NewReader(in)
 	if err != nil {
 		return 0, err
 	}
 	defer reader.Close()
 
-	return createNewOutputFile(destPath, reader)
+	return createNewOutputFile(abs, getwd, destPath, reader)
 }
 
 // createNewOutputFile writes a complete stream below the filesystem root. The
 // rooted traversal rejects symlinks in every parent component, and atomic
 // no-replace publication keeps a failed stream from leaving a partial output.
-func createNewOutputFile(path string, reader io.Reader) (int64, error) {
-	absolute, err := filepath.Abs(path)
+func createNewOutputFile(abs func(string) (string, error), getwd func() (string, error), path string, reader io.Reader) (int64, error) {
+	absolute, err := abs(path)
 	if err != nil {
 		return 0, fmt.Errorf("resolve output path %q: %w", path, err)
 	}
 	rootPath := filepath.VolumeName(absolute) + string(filepath.Separator)
-	workingDir, _ := os.Getwd()
+	workingDir, _ := getwd()
 	for _, candidate := range []string{workingDir, os.TempDir()} {
-		candidate, err := filepath.Abs(candidate)
+		candidate, err := abs(candidate)
 		if err != nil {
 			continue
 		}

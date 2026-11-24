@@ -1,12 +1,14 @@
 package cmdtest
 
 import (
+	"errors"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
 )
 
 const analyticsUsageExitRequestID = "11111111-1111-1111-1111-111111111111"
@@ -24,6 +26,7 @@ func TestAnalyticsInputValidationReturnsUsageExitCode(t *testing.T) {
 		name    string
 		args    []string
 		wantErr string
+		appEnv  string
 	}{
 		{
 			name:    "requests limit above maximum",
@@ -39,6 +42,27 @@ func TestAnalyticsInputValidationReturnsUsageExitCode(t *testing.T) {
 			name:    "requests invalid next",
 			args:    []string{"analytics", "requests", "--next", "http://api.appstoreconnect.apple.com/v1/analyticsReportRequests"},
 			wantErr: "analytics requests: --next must be an App Store Connect URL",
+		},
+		{
+			name:    "requests next uses unsupported top-level collection",
+			args:    []string{"analytics", "requests", "--next", "https://api.appstoreconnect.apple.com/v1/analyticsReportRequests?limit=1"},
+			wantErr: "analytics requests: --next must point to an app's analytics report requests",
+		},
+		{
+			name:    "requests next points at unrelated resource",
+			args:    []string{"analytics", "requests", "--next", "https://api.appstoreconnect.apple.com/v1/apps?limit=1"},
+			wantErr: "analytics requests: --next must point to an app's analytics report requests",
+		},
+		{
+			name:    "requests app differs from cursor",
+			args:    []string{"analytics", "requests", "--app", "123456789", "--next", "https://api.appstoreconnect.apple.com/v1/apps/6759231657/analyticsReportRequests?limit=1"},
+			wantErr: "analytics requests: the selected app must match the app in --next",
+		},
+		{
+			name:    "requests environment app differs from cursor",
+			args:    []string{"analytics", "requests", "--next", "https://api.appstoreconnect.apple.com/v1/apps/6759231657/analyticsReportRequests?limit=1"},
+			wantErr: "analytics requests: the selected app must match the app in --next",
+			appEnv:  "123456789",
 		},
 		{
 			name:    "requests invalid request id",
@@ -69,6 +93,16 @@ func TestAnalyticsInputValidationReturnsUsageExitCode(t *testing.T) {
 			name:    "view invalid next",
 			args:    []string{"analytics", "view", "--next", "http://api.appstoreconnect.apple.com/v1/analyticsReportRequests/x/reports"},
 			wantErr: "analytics view: --next must be an App Store Connect URL",
+		},
+		{
+			name:    "view request id differs from cursor",
+			args:    []string{"analytics", "view", "--request-id", analyticsUsageExitRequestID, "--next", "https://api.appstoreconnect.apple.com/v1/analyticsReportRequests/22222222-2222-2222-2222-222222222222/reports?cursor=AQ"},
+			wantErr: "analytics view: --request-id must match the report request in --next",
+		},
+		{
+			name:    "view next points at request list",
+			args:    []string{"analytics", "view", "--next", "https://api.appstoreconnect.apple.com/v1/apps/6759231657/analyticsReportRequests?limit=1"},
+			wantErr: "analytics view: --next must point to an analytics report request's reports",
 		},
 		{
 			name:    "download invalid request id",
@@ -125,11 +159,79 @@ func TestAnalyticsInputValidationReturnsUsageExitCode(t *testing.T) {
 			args:    []string{"analytics", "segments", "view", "--segment-id", "bad/segment"},
 			wantErr: analyticsReservedSegmentUsageError("analytics segments view", "--segment-id", "bad/segment"),
 		},
+		{
+			name:    "reports get missing report id",
+			args:    []string{"analytics", "reports", "view"},
+			wantErr: "--report-id is required",
+		},
+		{
+			name:    "reports relationships missing report id",
+			args:    []string{"analytics", "reports", "links"},
+			wantErr: "--report-id is required",
+		},
+		{
+			name:    "instances get missing instance id",
+			args:    []string{"analytics", "instances", "view"},
+			wantErr: "--instance-id is required",
+		},
+		{
+			name:    "instances relationships missing instance id",
+			args:    []string{"analytics", "instances", "links"},
+			wantErr: "--instance-id is required",
+		},
+		{
+			name:    "segments get missing segment id",
+			args:    []string{"analytics", "segments", "view"},
+			wantErr: "--segment-id is required",
+		},
+		{
+			name:    "requests delete missing request id",
+			args:    []string{"analytics", "requests", "delete", "--confirm"},
+			wantErr: "--request-id is required",
+		},
+		{
+			name:    "requests delete missing confirm",
+			args:    []string{"analytics", "requests", "delete", "--request-id", "11111111-1111-1111-1111-111111111111"},
+			wantErr: "--confirm is required",
+		},
+		{
+			name:    "request reuse existing missing app",
+			args:    []string{"analytics", "request", "--access-type", "ONGOING", "--reuse-existing"},
+			wantErr: "--app is required (or set ASC_APP_ID)",
+		},
+		{
+			name:    "request reuse existing missing access type",
+			args:    []string{"analytics", "request", "--app", "APP_ID", "--reuse-existing"},
+			wantErr: "--access-type is required",
+		},
+		{
+			name:    "sales output given a format",
+			args:    []string{"analytics", "sales", "--output", "json"},
+			wantErr: "--output takes a path in this command, not an output format; use --output-format json to choose the format, or --output ./json to write to a path named json",
+		},
+		{
+			name:    "download output given a format",
+			args:    []string{"analytics", "download", "--output", "table"},
+			wantErr: "--output takes a path in this command, not an output format; use --output-format table to choose the format, or --output ./table to write to a path named table",
+		},
+		{
+			name:    "finance reports output given a format",
+			args:    []string{"finance", "reports", "--output", "markdown"},
+			wantErr: "--output takes a path in this command, not an output format; use --output-format markdown to choose the format, or --output ./markdown to write to a path named markdown",
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			stdout, stderr, runErr := runCommand(t, test.args)
+			if test.appEnv != "" {
+				t.Setenv("ASC_APP_ID", test.appEnv)
+			}
+			clientFactoryCalls := 0
+			client := func() (*asc.Client, error) {
+				clientFactoryCalls++
+				return nil, errors.New("client construction should not be attempted")
+			}
+			stdout, stderr, runErr := runRootWithDeps(t, client, test.args...)
 
 			if runErr == nil {
 				t.Fatal("expected error, got nil")
@@ -141,6 +243,9 @@ func TestAnalyticsInputValidationReturnsUsageExitCode(t *testing.T) {
 				t.Fatalf("expected empty stdout, got %q", stdout)
 			}
 			assertUsageErrorStderr(t, stderr, test.wantErr)
+			if clientFactoryCalls != 0 {
+				t.Fatalf("client factory calls = %d, want 0", clientFactoryCalls)
+			}
 		})
 	}
 }

@@ -113,7 +113,7 @@ func TestSubscriptionGroupVersionEndpoints(t *testing.T) {
 			responseBody: `{"data":[{"type":"subscriptionGroupVersions","id":"version-1","attributes":{"state":"READY_FOR_REVIEW"}}]}`,
 			query:        map[string]string{"filter[state]": "READY_FOR_REVIEW", "include": "subscriptionGroup,localizations", "limit": "3", "limit[localizations]": "2"},
 			call: func(c *Client) error {
-				_, err := c.GetSubscriptionGroupVersions(context.Background(), "group-1", WithSubscriptionGroupVersionsStates([]string{"READY_FOR_REVIEW"}), WithSubscriptionGroupVersionsInclude([]string{"subscriptionGroup", "localizations"}), WithSubscriptionGroupVersionsLimit(3), WithSubscriptionGroupVersionsLocalizationsLimit(2))
+				_, err := c.GetSubscriptionGroupVersions(context.Background(), "group-1", WithSubscriptionGroupVersionsStates([]string{"READY_FOR_REVIEW"}), WithSubscriptionGroupVersionsInclude([]string{"subscriptionGroup", "localizations"}), Limit[SubscriptionGroupVersionsOption](3), WithSubscriptionGroupVersionsLocalizationsLimit(2))
 				return err
 			},
 		},
@@ -121,7 +121,7 @@ func TestSubscriptionGroupVersionEndpoints(t *testing.T) {
 			name: "version linkages", method: http.MethodGet, path: "/v1/subscriptionGroups/group-1/relationships/versions", responseCode: http.StatusOK,
 			responseBody: `{"data":[{"type":"subscriptionGroupVersions","id":"version-1"}]}`, query: map[string]string{"limit": "4"},
 			call: func(c *Client) error {
-				_, err := c.GetSubscriptionGroupVersionsRelationships(context.Background(), "group-1", WithLinkagesLimit(4))
+				_, err := c.GetSubscriptionGroupVersionsRelationships(context.Background(), "group-1", Limit[LinkagesOption](4))
 				return err
 			},
 		},
@@ -130,7 +130,7 @@ func TestSubscriptionGroupVersionEndpoints(t *testing.T) {
 			responseBody: `{"data":[{"type":"subscriptionGroupLocalizations","id":"loc-1"}]}`,
 			query:        map[string]string{"include": "version", "fields[subscriptionGroupLocalizations]": "name,locale", "limit": "5"},
 			call: func(c *Client) error {
-				_, err := c.GetSubscriptionGroupVersionLocalizations(context.Background(), "version-1", WithSubscriptionGroupVersionLocalizationsInclude([]string{"version"}), WithSubscriptionGroupVersionLocalizationsFields([]string{"name", "locale"}), WithSubscriptionGroupVersionLocalizationsLimit(5))
+				_, err := c.GetSubscriptionGroupVersionLocalizations(context.Background(), "version-1", WithSubscriptionGroupVersionLocalizationsInclude([]string{"version"}), WithSubscriptionGroupVersionLocalizationsFields([]string{"name", "locale"}), Limit[SubscriptionGroupVersionLocalizationsOption](5))
 				return err
 			},
 		},
@@ -138,7 +138,7 @@ func TestSubscriptionGroupVersionEndpoints(t *testing.T) {
 			name: "localization linkages", method: http.MethodGet, path: "/v1/subscriptionGroupVersions/version-1/relationships/localizations", responseCode: http.StatusOK,
 			responseBody: `{"data":[{"type":"subscriptionGroupLocalizations","id":"loc-1"}]}`, query: map[string]string{"limit": "6"},
 			call: func(c *Client) error {
-				_, err := c.GetSubscriptionGroupVersionLocalizationsRelationships(context.Background(), "version-1", WithLinkagesLimit(6))
+				_, err := c.GetSubscriptionGroupVersionLocalizationsRelationships(context.Background(), "version-1", Limit[LinkagesOption](6))
 				return err
 			},
 		},
@@ -167,10 +167,6 @@ func TestSubscriptionGroupVersionEndpoints(t *testing.T) {
 				_, err := c.UpdateSubscriptionGroupLocalizationV2(context.Background(), "loc-1", SubscriptionGroupLocalizationV2UpdateAttributes{Name: &NullableString{Value: &updatedName}, CustomAppName: &cleared})
 				return err
 			},
-		},
-		{
-			name: "delete localization v2", method: http.MethodDelete, path: "/v2/subscriptionGroupLocalizations/loc-1", responseCode: http.StatusNoContent,
-			call: func(c *Client) error { return c.DeleteSubscriptionGroupLocalizationV2(context.Background(), "loc-1") },
 		},
 	}
 
@@ -248,99 +244,6 @@ func TestSubscriptionGroupGetEndpointsExposeVersionsQuerySurface(t *testing.T) {
 	}
 }
 
-func TestSubscriptionGroupVersionsDecodeAcrossSharedResponseShapes(t *testing.T) {
-	groupResource := `{"type":"subscriptionGroups","id":"group-1","attributes":{"referenceName":"Premium"},"relationships":{"versions":{"data":[{"type":"subscriptionGroupVersions","id":"version-1"}]}}}`
-	groupResponse := `{"data":` + groupResource + `}`
-	appResponse := `{"data":{"type":"apps","id":"app-1"},"included":[` + groupResource + `]}`
-	updatedName := "Updated"
-
-	decodeIncludedGroup := func(t *testing.T, included json.RawMessage) json.RawMessage {
-		t.Helper()
-		var groups []Resource[SubscriptionGroupAttributes]
-		if err := json.Unmarshal(included, &groups); err != nil {
-			t.Fatalf("decode included subscription groups: %v", err)
-		}
-		for _, group := range groups {
-			if group.Type == ResourceTypeSubscriptionGroups {
-				return group.Relationships
-			}
-		}
-		t.Fatal("included response did not contain a subscription group")
-		return nil
-	}
-
-	tests := []struct {
-		name         string
-		method       string
-		path         string
-		responseBody string
-		call         func(*testing.T, *Client) json.RawMessage
-	}{
-		{
-			name: "direct group", method: http.MethodGet, path: "/v1/subscriptionGroups/group-1", responseBody: groupResponse,
-			call: func(t *testing.T, c *Client) json.RawMessage {
-				resp, err := c.GetSubscriptionGroup(context.Background(), "group-1")
-				if err != nil {
-					t.Fatal(err)
-				}
-				return resp.Data.Relationships
-			},
-		},
-		{
-			name: "group create", method: http.MethodPost, path: "/v1/subscriptionGroups", responseBody: groupResponse,
-			call: func(t *testing.T, c *Client) json.RawMessage {
-				resp, err := c.CreateSubscriptionGroup(context.Background(), "app-1", SubscriptionGroupCreateAttributes{ReferenceName: "Premium"})
-				if err != nil {
-					t.Fatal(err)
-				}
-				return resp.Data.Relationships
-			},
-		},
-		{
-			name: "group update", method: http.MethodPatch, path: "/v1/subscriptionGroups/group-1", responseBody: groupResponse,
-			call: func(t *testing.T, c *Client) json.RawMessage {
-				resp, err := c.UpdateSubscriptionGroup(context.Background(), "group-1", SubscriptionGroupUpdateAttributes{ReferenceName: &updatedName})
-				if err != nil {
-					t.Fatal(err)
-				}
-				return resp.Data.Relationships
-			},
-		},
-		{
-			name: "app included group", method: http.MethodGet, path: "/v1/apps/app-1", responseBody: appResponse,
-			call: func(t *testing.T, c *Client) json.RawMessage {
-				resp, err := c.GetApp(context.Background(), "app-1")
-				if err != nil {
-					t.Fatal(err)
-				}
-				return decodeIncludedGroup(t, resp.Included)
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			client := newTestClient(t, func(req *http.Request) {
-				if req.Method != test.method || req.URL.Path != test.path {
-					t.Fatalf("expected %s %s, got %s %s", test.method, test.path, req.Method, req.URL.Path)
-				}
-			}, jsonResponse(http.StatusOK, test.responseBody))
-
-			var relationships SubscriptionGroupRelationships
-			if err := json.Unmarshal(test.call(t, client), &relationships); err != nil {
-				t.Fatalf("decode subscription group relationships: %v", err)
-			}
-			if relationships.Versions == nil || len(relationships.Versions.Data) != 1 {
-				t.Fatalf("versions relationship was not preserved: %#v", relationships.Versions)
-			}
-			version := relationships.Versions.Data[0]
-			if version.Type != ResourceTypeSubscriptionGroupVersions || version.ID != "version-1" {
-				t.Fatalf("unexpected version linkage: %#v", version)
-			}
-		})
-	}
-}
-
 func TestSubscriptionGroupVersionsUsesValidatedNextURL(t *testing.T) {
 	next := "https://api.appstoreconnect.apple.com/v1/subscriptionGroups/group-1/versions?cursor=next"
 	client := newTestClient(t, func(req *http.Request) {
@@ -371,8 +274,8 @@ func TestGetSubscriptionGroupRejectsCollectionOnlyOptionsBeforeHTTP(t *testing.T
 		option  SubscriptionGroupsOption
 		wantErr string
 	}{
-		{name: "limit", option: WithSubscriptionGroupsLimit(20), wantErr: "limit is only supported when listing subscription groups"},
-		{name: "next URL", option: WithSubscriptionGroupsNextURL("https://api.appstoreconnect.apple.com/v1/apps/app-1/subscriptionGroups?cursor=next"), wantErr: "next URL is only supported when listing subscription groups"},
+		{name: "limit", option: Limit[SubscriptionGroupsOption](20), wantErr: "limit is only supported when listing subscription groups"},
+		{name: "next URL", option: NextURL[SubscriptionGroupsOption]("https://api.appstoreconnect.apple.com/v1/apps/app-1/subscriptionGroups?cursor=next"), wantErr: "next URL is only supported when listing subscription groups"},
 	}
 
 	for _, test := range tests {
@@ -397,7 +300,7 @@ func TestSubscriptionGroupVersionDetailEndpointsRejectCollectionOnlyOptionsBefor
 		{
 			name: "version limit",
 			call: func(client *Client) error {
-				_, err := client.GetSubscriptionGroupVersion(context.Background(), "version-1", WithSubscriptionGroupVersionsLimit(20))
+				_, err := client.GetSubscriptionGroupVersion(context.Background(), "version-1", Limit[SubscriptionGroupVersionsOption](20))
 				return err
 			},
 			wantErr: "limit is only supported when listing subscription group versions",
@@ -421,7 +324,7 @@ func TestSubscriptionGroupVersionDetailEndpointsRejectCollectionOnlyOptionsBefor
 		{
 			name: "localization limit",
 			call: func(client *Client) error {
-				_, err := client.GetSubscriptionGroupLocalizationV2(context.Background(), "loc-1", WithSubscriptionGroupVersionLocalizationsLimit(20))
+				_, err := client.GetSubscriptionGroupLocalizationV2(context.Background(), "loc-1", Limit[SubscriptionGroupVersionLocalizationsOption](20))
 				return err
 			},
 			wantErr: "limit is only supported when listing subscription group version localizations",

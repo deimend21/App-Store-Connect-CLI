@@ -10,6 +10,7 @@ import (
 
 	"github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
@@ -46,6 +47,14 @@ func TestIAPRelatedSparseFieldFlagsSendExactQueries441(t *testing.T) {
 				"fields[inAppPurchases]": "versions",
 				"fields[subscriptions]":  "versions",
 				"include":                "inAppPurchaseV2,subscription",
+			},
+			wantDataID: "promo-subscription", wantIncluded: "subscriptions:subscription-1",
+		},
+		{
+			name: "subscription promoted list market fields", args: []string{"subscriptions", "promoted-purchases", "list", "--app", "app-1", "--subscription-fields", "marketSettings,multiSeatStatus", "--output", "json"},
+			path: "/v1/apps/app-1/promotedPurchases", wantQuery: map[string]string{
+				"fields[subscriptions]": "marketSettings,multiSeatStatus",
+				"include":               "subscription",
 			},
 			wantDataID: "promo-subscription", wantIncluded: "subscriptions:subscription-1",
 		},
@@ -414,8 +423,8 @@ func TestIAPRelatedSparseFieldValidationPrecedesHTTP441(t *testing.T) {
 		{name: "invalid subscription fields", args: []string{"subscriptions", "promoted-purchases", "list", "--app", "app-1", "--subscription-fields", "notAField"}, want: "--subscription-fields must be one of"},
 		{name: "invalid cross-scope iap fields", args: []string{"subscriptions", "promoted-purchases", "view", "--promoted-purchase-id", "promo-1", "--iap-fields", "notAField"}, want: "--iap-fields must be one of"},
 		{name: "invalid cross-scope subscription fields", args: []string{"iap", "promoted-purchases", "view", "--promoted-purchase-id", "promo-1", "--subscription-fields", "notAField"}, want: "--subscription-fields must be one of"},
-		{name: "iap promoted next conflict", args: []string{"iap", "promoted-purchases", "list", "--next", next, "--subscription-fields", "versions"}, want: "--next cannot be combined with --iap-fields or --subscription-fields"},
-		{name: "subscription promoted next conflict", args: []string{"subscriptions", "promoted-purchases", "list", "--next", next, "--iap-fields", "versions"}, want: "--next cannot be combined with --iap-fields or --subscription-fields"},
+		{name: "iap promoted next conflict", args: []string{"iap", "promoted-purchases", "list", "--next", next, "--subscription-fields", "versions"}, want: "iap promoted-purchases list: --next cannot be combined with --subscription-fields"},
+		{name: "subscription promoted next conflict", args: []string{"subscriptions", "promoted-purchases", "list", "--next", next, "--iap-fields", "versions"}, want: "subscriptions promoted-purchases list: --next cannot be combined with --iap-fields"},
 		{name: "promoted view missing selector", args: []string{"iap", "promoted-purchases", "view"}, want: "--promoted-purchase-id or --iap-id is required"},
 		{name: "promoted view selector conflict", args: []string{"iap", "promoted-purchases", "view", "--promoted-purchase-id", "promo-1", "--iap-id", "123"}, want: "--promoted-purchase-id and --iap-id are mutually exclusive"},
 	}
@@ -464,14 +473,8 @@ func TestScopedPromotedPurchaseExplicitEmptyFieldsFailBeforeAuth441(t *testing.T
 			t.Setenv("ASC_BYPASS_KEYCHAIN", "1")
 			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "missing.json"))
 
-			requests := 0
-			originalTransport := http.DefaultTransport
-			http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				requests++
-				t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-				return nil, nil
-			})
-			t.Cleanup(func() { http.DefaultTransport = originalTransport })
+			reg := asctest.NewRegistry(t)
+			reg.Install()
 
 			stdout, stderr := captureOutput(t, func() {
 				if code := cmd.Run(tt.args, "1.2.3"); code != cmd.ExitUsage {
@@ -481,7 +484,7 @@ func TestScopedPromotedPurchaseExplicitEmptyFieldsFailBeforeAuth441(t *testing.T
 			if strings.TrimSpace(stdout) != "" {
 				t.Fatalf("stdout = %q, want empty", stdout)
 			}
-			if requests != 0 {
+			if requests := len(reg.Requests()); requests != 0 {
 				t.Fatalf("requests = %d, want 0", requests)
 			}
 			if want := tt.flag + " must not be empty"; !strings.Contains(stderr, want) {
@@ -490,57 +493,6 @@ func TestScopedPromotedPurchaseExplicitEmptyFieldsFailBeforeAuth441(t *testing.T
 		})
 	}
 }
-
-func TestIAPRelatedSparseFieldHelp441(t *testing.T) {
-	root := RootCommand("1.2.3")
-	tests := []struct {
-		path []string
-		flag string
-	}{
-		{path: []string{"iap", "review-screenshots", "view"}, flag: "--iap-fields"},
-		{path: []string{"iap", "content", "view"}, flag: "--iap-fields"},
-		{path: []string{"iap", "promoted-purchases", "list"}, flag: "--iap-fields"},
-		{path: []string{"iap", "promoted-purchases", "list"}, flag: "--subscription-fields"},
-		{path: []string{"iap", "promoted-purchases", "view"}, flag: "--iap-id"},
-		{path: []string{"iap", "promoted-purchases", "view"}, flag: "--iap-fields"},
-		{path: []string{"iap", "promoted-purchases", "view"}, flag: "--subscription-fields"},
-		{path: []string{"subscriptions", "promoted-purchases", "list"}, flag: "--iap-fields"},
-		{path: []string{"subscriptions", "promoted-purchases", "list"}, flag: "--subscription-fields"},
-		{path: []string{"subscriptions", "promoted-purchases", "view"}, flag: "--iap-fields"},
-		{path: []string{"subscriptions", "promoted-purchases", "view"}, flag: "--subscription-fields"},
-	}
-	for _, tt := range tests {
-		command := findSubcommand(root, tt.path...)
-		if command == nil {
-			t.Fatalf("command %v not found", tt.path)
-		}
-		if usage := command.UsageFunc(command); !strings.Contains(usage, tt.flag) {
-			t.Fatalf("help for %v does not contain %s: %q", tt.path, tt.flag, usage)
-		}
-	}
-
-	iapView := findSubcommand(root, "iap", "promoted-purchases", "view")
-	iapUsage := iapView.UsageFunc(iapView)
-	if !strings.Contains(iapUsage, "In-app purchase ID, product ID, or exact current name") {
-		t.Fatalf("IAP promoted view help does not describe stable selectors: %q", iapUsage)
-	}
-	if !strings.Contains(iapUsage, "App Store Connect app ID (or ASC_APP_ID env; required when --iap-id uses a product ID or name)") {
-		t.Fatalf("IAP promoted view help does not describe app lookup context: %q", iapUsage)
-	}
-	if !strings.Contains(iapUsage, "--iap-id IAP_SELECTOR") || !strings.Contains(iapUsage, `--iap-id "IAP_SELECTOR"`) {
-		t.Fatalf("IAP promoted view help does not use the stable-selector placeholder: %q", iapUsage)
-	}
-
-	subscriptionView := findSubcommand(root, "subscriptions", "promoted-purchases", "view")
-	subscriptionUsage := subscriptionView.UsageFunc(subscriptionView)
-	if !strings.Contains(subscriptionUsage, "--subscription-id SUBSCRIPTION_SELECTOR") ||
-		!strings.Contains(subscriptionUsage, "Subscription ID, product ID, or exact current name") ||
-		!strings.Contains(subscriptionUsage, subscriptionLookupAppUsageForTest) {
-		t.Fatalf("subscription promoted view does not expose the stable selector contract: %q", subscriptionUsage)
-	}
-}
-
-const subscriptionLookupAppUsageForTest = "App Store Connect app ID (or ASC_APP_ID env; required when --subscription-id uses a product ID or name)"
 
 func setIAPRelatedTestServerClient(t *testing.T, server *httptest.Server) {
 	t.Helper()

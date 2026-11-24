@@ -11,71 +11,41 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asctest"
 )
 
-func TestScreenshotsUploadReplaceRequiresConfirm(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-	t.Setenv("ASC_APP_ID", "")
+func TestUploadReplaceRequiresConfirm(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		wantErr string
+	}{
+		{command: "screenshots", wantErr: "--confirm is required to delete existing screenshots with --replace"},
+		{command: "video-previews", wantErr: "--confirm is required to delete existing previews with --replace"},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			setupAuth(t)
+			t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("expected no requests before --confirm is validated, got %s %s", req.Method, req.URL.String())
-		return nil, nil
-	})
+			args := []string{
+				test.command, "upload",
+				"--version-localization", "LOC_123",
+				"--path", filepath.Join(t.TempDir(), "media"),
+				"--device-type", "IPHONE_65",
+				"--replace",
+			}
+			stdout, stderr, runErr := runRootWithDeps(t, stubClient(t, asctest.NewRegistry(t)), args...)
 
-	stdout, stderr, runErr := runRootCommand(t, []string{
-		"screenshots", "upload",
-		"--version-localization", "LOC_123",
-		"--path", filepath.Join(t.TempDir(), "screenshots"),
-		"--device-type", "IPHONE_65",
-		"--replace",
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "--confirm is required to delete existing screenshots with --replace") {
-		t.Fatalf("expected replace confirmation error, got %q", stderr)
-	}
-}
-
-func TestVideoPreviewsUploadReplaceRequiresConfirm(t *testing.T) {
-	setupAuth(t)
-	t.Setenv("ASC_CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.json"))
-	t.Setenv("ASC_APP_ID", "")
-
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		t.Fatalf("expected no requests before --confirm is validated, got %s %s", req.Method, req.URL.String())
-		return nil, nil
-	})
-
-	stdout, stderr, runErr := runRootCommand(t, []string{
-		"video-previews", "upload",
-		"--version-localization", "LOC_123",
-		"--path", filepath.Join(t.TempDir(), "previews"),
-		"--device-type", "IPHONE_65",
-		"--replace",
-	})
-
-	if stdout != "" {
-		t.Fatalf("expected empty stdout, got %q", stdout)
-	}
-	if !errors.Is(runErr, flag.ErrHelp) {
-		t.Fatalf("expected flag.ErrHelp, got %v", runErr)
-	}
-	if !strings.Contains(stderr, "--confirm is required to delete existing previews with --replace") {
-		t.Fatalf("expected replace confirmation error, got %q", stderr)
+			if stdout != "" {
+				t.Fatalf("expected empty stdout, got %q", stdout)
+			}
+			if !errors.Is(runErr, flag.ErrHelp) {
+				t.Fatalf("expected flag.ErrHelp, got %v", runErr)
+			}
+			if !strings.Contains(stderr, test.wantErr) {
+				t.Fatalf("expected replace confirmation error, got %q", stderr)
+			}
+		})
 	}
 }
 
@@ -87,21 +57,12 @@ func TestScreenshotsUploadReplaceDryRunDoesNotRequireConfirm(t *testing.T) {
 	pathDir := t.TempDir()
 	writePNG(t, filepath.Join(pathDir, "01-home.png"), 1284, 2778)
 
-	originalTransport := http.DefaultTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = originalTransport
-	})
-	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		switch {
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appStoreVersionLocalizations/LOC_123/appScreenshotSets":
-			return statusJSONResponse(`{"data":[{"type":"appScreenshotSets","id":"set-1","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`), nil
-		case req.Method == http.MethodGet && req.URL.Path == "/v1/appScreenshotSets/set-1/appScreenshots":
-			return statusJSONResponse(`{"data":[{"type":"appScreenshots","id":"old-1","attributes":{"fileName":"old.png"}}],"links":{}}`), nil
-		default:
-			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
-			return nil, nil
-		}
-	})
+	reg := asctest.NewRegistry(t)
+	reg.Install()
+	reg.Register(asctest.GET("/v1/appStoreVersionLocalizations/LOC_123/appScreenshotSets"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"appScreenshotSets","id":"set-1","attributes":{"screenshotDisplayType":"APP_IPHONE_65"}}],"links":{}}`))
+	reg.Register(asctest.GET("/v1/appScreenshotSets/set-1/appScreenshots"),
+		asctest.JSON(http.StatusOK, `{"data":[{"type":"appScreenshots","id":"old-1","attributes":{"fileName":"old.png"}}],"links":{}}`))
 
 	stdout, stderr, runErr := runRootCommand(t, []string{
 		"screenshots", "upload",

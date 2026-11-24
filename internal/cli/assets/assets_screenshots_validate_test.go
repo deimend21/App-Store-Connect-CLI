@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
@@ -19,7 +20,7 @@ func TestValidateScreenshotAssetsSortsEntriesAndKeepsHiddenWarningsNonBlocking(t
 	writeAssetsScreenshotValidatePNG(t, dir, "01-home.png", 1242, 2688, color.RGBA{R: 10, A: 255}, png.DefaultCompression)
 	writeAssetsScreenshotValidatePNG(t, dir, ".hidden.png", 1242, 2688, color.RGBA{R: 30, A: 255}, png.DefaultCompression)
 
-	result, err := validateScreenshotAssets(dir, "APP_IPHONE_65")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_IPHONE_65")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestValidateScreenshotAssetsMatchesUploadOrdering(t *testing.T) {
 		t.Fatalf("collectAssetFiles() error: %v", err)
 	}
 
-	result, err := validateScreenshotAssets(dir, "APP_IPHONE_65")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_IPHONE_65")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestValidateScreenshotAssetsMatchesUploadOrdering(t *testing.T) {
 	}
 }
 
-func TestValidateScreenshotAssetsReportsUnreadableDotfilesAndDimensionMismatch(t *testing.T) {
+func TestValidateScreenshotAssetsSkipsDotfilesAndReportsDimensionMismatch(t *testing.T) {
 	dir := t.TempDir()
 	writeAssetsTestPNGWithSize(t, dir, "01-home.png", 1242, 2688)
 	writeAssetsTestPNGWithSize(t, dir, "03-bad.png", 100, 100)
@@ -86,13 +87,13 @@ func TestValidateScreenshotAssetsReportsUnreadableDotfilesAndDimensionMismatch(t
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	result, err := validateScreenshotAssets(dir, "APP_IPHONE_65")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_IPHONE_65")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
 
-	if result.ErrorCount != 2 {
-		t.Fatalf("expected 2 errors, got %d", result.ErrorCount)
+	if result.ErrorCount != 1 {
+		t.Fatalf("expected 1 error, got %d", result.ErrorCount)
 	}
 	if result.WarningCount != 1 {
 		t.Fatalf("expected 1 warning, got %d", result.WarningCount)
@@ -101,11 +102,8 @@ func TestValidateScreenshotAssetsReportsUnreadableDotfilesAndDimensionMismatch(t
 		t.Fatalf("expected 1 ready file, got %d", result.ReadyFiles)
 	}
 
-	if !hasScreenshotValidateIssueWithSeverity(result.Issues, "hidden_file", screenshotValidateSeverityWarning, ".DS_Store") {
-		t.Fatalf("expected hidden-file warning, got %+v", result.Issues)
-	}
-	if !hasScreenshotValidateIssueWithSeverity(result.Issues, "read_failure", screenshotValidateSeverityError, ".DS_Store") {
-		t.Fatalf("expected read-failure error, got %+v", result.Issues)
+	if !hasScreenshotValidateIssueWithSeverity(result.Issues, "skipped_file", screenshotValidateSeverityWarning, ".DS_Store") {
+		t.Fatalf("expected skipped-file warning, got %+v", result.Issues)
 	}
 	if !hasScreenshotValidateIssueWithSeverity(result.Issues, "dimension_mismatch", screenshotValidateSeverityError, "03-bad.png") {
 		t.Fatalf("expected dimension mismatch error, got %+v", result.Issues)
@@ -118,7 +116,7 @@ func TestValidateScreenshotAssetsReportsFormatExtensionMismatch(t *testing.T) {
 	writeAssetsScreenshotValidateJPEG(t, dir, "02-details.png", 1242, 2688, color.RGBA{R: 20, G: 90, B: 140, A: 255})
 	writeAssetsScreenshotValidateJPEG(t, dir, "03-profile.jpg", 1242, 2688, color.RGBA{R: 200, G: 30, B: 40, A: 255})
 
-	result, err := validateScreenshotAssets(dir, "APP_IPHONE_65")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_IPHONE_65")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -160,7 +158,7 @@ func TestValidateScreenshotAssetsRemediationOnlySuggestsCollectableRenames(t *te
 	writeAssetsScreenshotValidateJPEG(t, dir, "01-home.png", 1242, 2688, color.RGBA{R: 20, G: 90, B: 140, A: 255})
 	writeAssetsScreenshotValidateGIF(t, dir, "02-details.png", 120, 200)
 
-	result, err := validateScreenshotAssets(dir, "APP_IPHONE_65")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_IPHONE_65")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -210,7 +208,7 @@ func TestValidateScreenshotAssetsReportsDecodedPixelDuplicatesDeterministically(
 		t.Fatal("expected differently encoded PNG files")
 	}
 
-	result, err := validateScreenshotAssets(dir, "APP_WATCH_SERIES_3")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_WATCH_SERIES_3")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -245,7 +243,7 @@ func TestValidateScreenshotAssetsPreserves16BitSamplesWhenDetectingDuplicates(t 
 	writeAssetsScreenshotValidatePNG64(t, dir, "01-first.png", 312, 390, color.NRGBA64{R: 0x1201, G: 0x3400, B: 0x5600, A: 0xffff})
 	writeAssetsScreenshotValidatePNG64(t, dir, "02-second.png", 312, 390, color.NRGBA64{R: 0x1202, G: 0x3400, B: 0x5600, A: 0xffff})
 
-	result, err := validateScreenshotAssets(dir, "APP_WATCH_SERIES_3")
+	result, err := validateScreenshotAssets(newAssetsUploadTestDeps(), dir, "APP_WATCH_SERIES_3")
 	if err != nil {
 		t.Fatalf("validateScreenshotAssets() error: %v", err)
 	}
@@ -269,11 +267,11 @@ func TestRenderScreenshotValidateResultSkipsRedundantAPIDisplayTypeRow(t *testin
 		WarningCount: 0,
 	}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := renderScreenshotValidateResult(result, false); err != nil {
-			t.Fatalf("renderScreenshotValidateResult() error: %v", err)
-		}
-	})
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+	if err := renderScreenshotValidateResult(d, result, false); err != nil {
+		t.Fatalf("renderScreenshotValidateResult() error: %v", err)
+	}
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -293,11 +291,11 @@ func TestRenderScreenshotValidateResultIncludesCanonicalAPIDisplayTypeRowWhenItD
 		Files:          []screenshotValidateFile{{Order: 1, FilePath: "/tmp/screenshots/01-home.png", FileName: "01-home.png", Width: 1290, Height: 2796, Status: "ok"}},
 	}
 
-	stdout, stderr := captureOutput(t, func() {
-		if err := renderScreenshotValidateResult(result, false); err != nil {
-			t.Fatalf("renderScreenshotValidateResult() error: %v", err)
-		}
-	})
+	d, stdoutBuf, stderrBuf := newAssetsTestDeps(nil)
+	if err := renderScreenshotValidateResult(d, result, false); err != nil {
+		t.Fatalf("renderScreenshotValidateResult() error: %v", err)
+	}
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 
 	if stderr != "" {
 		t.Fatalf("expected empty stderr, got %q", stderr)
@@ -333,6 +331,7 @@ func writeAssetsScreenshotValidatePNG(t *testing.T, dir, name string, width, hei
 
 	path := filepath.Join(dir, name)
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.Draw(img, img.Bounds(), image.Opaque, image.Point{}, draw.Src)
 	img.SetRGBA(0, 0, marker)
 
 	file, err := os.Create(path)
@@ -392,6 +391,7 @@ func writeAssetsScreenshotValidatePNG64(t *testing.T, dir, name string, width, h
 
 	path := filepath.Join(dir, name)
 	img := image.NewNRGBA64(image.Rect(0, 0, width, height))
+	draw.Draw(img, img.Bounds(), image.Opaque, image.Point{}, draw.Src)
 	img.SetNRGBA64(0, 0, marker)
 
 	file, err := os.Create(path)

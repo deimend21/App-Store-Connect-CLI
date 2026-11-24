@@ -10,10 +10,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	rootcmd "github.com/rudrankriyam/App-Store-Connect-CLI/cmd"
 	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/asc"
-	"github.com/rudrankriyam/App-Store-Connect-CLI/internal/cli/shared"
 )
 
 const analyticsTimeoutRequestDelay = 10 * time.Millisecond
@@ -27,17 +28,17 @@ func TestAnalyticsViewRefreshesTimeoutForEachRequest(t *testing.T) {
 		segmentsNextURL  = "https://api.appstoreconnect.apple.com/v1/analyticsReportInstances/instance-1/segments?cursor=segments-next"
 	)
 	var (
-		deadlines    []time.Time
-		requestCount int
-		requestMu    sync.Mutex
+		requestContexts []<-chan struct{}
+		requestCount    int
+		requestMu       sync.Mutex
 	)
 	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		requestMu.Lock()
 		requestCount++
 		requestMu.Unlock()
-		deadline := requireAnalyticsRequestDeadline(t, req)
+		requireAnalyticsRequestDeadline(t, req)
 		requestMu.Lock()
-		deadlines = append(deadlines, deadline)
+		requestContexts = append(requestContexts, req.Context().Done())
 		requestMu.Unlock()
 		if req.Header.Get("Authorization") == "" {
 			t.Fatal("expected App Store Connect request authorization")
@@ -89,15 +90,15 @@ func TestAnalyticsViewRefreshesTimeoutForEachRequest(t *testing.T) {
 			return nil, nil
 		}
 	})
-	setAnalyticsTimeoutTestClient(t, transport)
+	client := stubClient(t, transport)
 
-	stdout, stderr, runErr := runCommand(t, []string{
+	stdout, stderr, runErr := runAnalyticsOnFakeClock(t, client,
 		"analytics", "view",
 		"--request-id", analyticsViewRequestID,
 		"--include-segments",
 		"--paginate",
 		"--output", "json",
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -113,7 +114,7 @@ func TestAnalyticsViewRefreshesTimeoutForEachRequest(t *testing.T) {
 	if gotRequests != 8 {
 		t.Fatalf("request count = %d, want 8", gotRequests)
 	}
-	assertAnalyticsDeadlinesArePerRequest(t, deadlines)
+	assertAnalyticsRequestContextsArePerRequest(t, requestContexts)
 }
 
 func TestAnalyticsViewWarnsWhenReportsHaveAnotherPage(t *testing.T) {
@@ -138,13 +139,13 @@ func TestAnalyticsViewWarnsWhenReportsHaveAnotherPage(t *testing.T) {
 			return nil, nil
 		}
 	})
-	setAnalyticsTimeoutTestClient(t, transport)
+	client := stubClient(t, transport)
 
-	stdout, stderr, runErr := runCommand(t, []string{
+	stdout, stderr, runErr := runRootWithDeps(t, client,
 		"analytics", "view",
 		"--request-id", analyticsViewRequestID,
 		"--output", "json",
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -175,21 +176,13 @@ func TestAnalyticsDownloadRefreshesTimeoutThroughBodyTransfer(t *testing.T) {
 
 		switch requestCount {
 		case 1:
-			assertAnalyticsTimeoutRequest(t, req, "/v1/analyticsReportRequests/"+analyticsViewRequestID+"/reports", "limit=200")
-			requireAnalyticsRequestAuth(t, req, true)
-			return analyticsViewJSONResponse(`{"data":[{"type":"analyticsReports","id":"report-1"}],"links":{}}`), nil
-		case 2:
-			assertAnalyticsTimeoutRequest(t, req, "/v1/analyticsReports/report-1/instances", "limit=200")
-			requireAnalyticsRequestAuth(t, req, true)
-			return analyticsViewJSONResponse(`{"data":[{"type":"analyticsReportInstances","id":"instance-1"}],"links":{}}`), nil
-		case 3:
 			assertAnalyticsTimeoutRequest(t, req, "/v1/analyticsReportInstances/instance-1/segments", "limit=200")
 			requireAnalyticsRequestAuth(t, req, true)
 			return analyticsViewJSONResponse(`{
 				"data":[{"type":"analyticsReportSegments","id":"segment-1","attributes":{"url":"https://mzstatic.com/report.csv.gz"}}],
 				"links":{}
 			}`), nil
-		case 4:
+		case 2:
 			assertAnalyticsTimeoutRequest(t, req, "/report.csv.gz", "")
 			requireAnalyticsRequestAuth(t, req, false)
 			reportBody = &analyticsDeadlineBody{
@@ -207,17 +200,17 @@ func TestAnalyticsDownloadRefreshesTimeoutThroughBodyTransfer(t *testing.T) {
 			return nil, nil
 		}
 	})
-	setAnalyticsTimeoutTestClient(t, transport)
+	client := stubClient(t, transport)
 
 	outputPath := filepath.Join(t.TempDir(), "analytics-report.csv.gz")
-	stdout, stderr, runErr := runCommand(t, []string{
+	stdout, stderr, runErr := runAnalyticsOnFakeClock(t, client,
 		"analytics", "download",
 		"--request-id", analyticsViewRequestID,
 		"--instance-id", "instance-1",
 		"--segment-id", "segment-1",
 		"--output", outputPath,
 		"--output-format", "json",
-	})
+	)
 	if runErr != nil {
 		t.Fatalf("run error: %v", runErr)
 	}
@@ -240,10 +233,61 @@ func TestAnalyticsDownloadRefreshesTimeoutThroughBodyTransfer(t *testing.T) {
 	if reportBody.contextErr != nil {
 		t.Fatalf("report body context ended before transfer completed: %v", reportBody.contextErr)
 	}
-	if requestCount != 4 {
-		t.Fatalf("request count = %d, want 4", requestCount)
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount)
 	}
 	assertAnalyticsDeadlinesRefresh(t, deadlines)
+}
+
+func TestAnalyticsDownloadStopsSegmentPagingAfterExactMatch(t *testing.T) {
+	setupAnalyticsTimeoutTest(t)
+	const reportData = "selected analytics segment"
+	const targetURL = "https://mzstatic.com/selected.csv.gz"
+	segmentPages, downloads := 0, 0
+	client := stubClient(t, roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/v1/analyticsReportInstances/instance-1/segments":
+			segmentPages++
+			if req.URL.Query().Get("cursor") != "" {
+				return nil, io.ErrUnexpectedEOF
+			}
+			return analyticsViewJSONResponse(`{
+				"data":[
+					{"type":"analyticsReportSegments","id":"other-segment","attributes":{"url":"https://mzstatic.com/other.csv.gz"}},
+					{"type":"analyticsReportSegments","id":"segment-1","attributes":{"url":"` + targetURL + `"}}
+				],
+				"links":{"next":"https://api.appstoreconnect.apple.com/v1/analyticsReportInstances/instance-1/segments?cursor=next"}
+			}`), nil
+		case "/selected.csv.gz":
+			downloads++
+			requireAnalyticsRequestAuth(t, req, false)
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Body:          io.NopCloser(strings.NewReader(reportData)),
+				ContentLength: int64(len(reportData)),
+			}, nil
+		default:
+			t.Fatalf("unexpected request: %s %s", req.Method, req.URL.String())
+			return nil, nil
+		}
+	}))
+
+	outputPath := filepath.Join(t.TempDir(), "analytics-report.csv.gz")
+	stdout, _, runErr := runRootWithDeps(t, client,
+		"analytics", "download", "--request-id", analyticsViewRequestID,
+		"--instance-id", "instance-1", "--segment-id", "segment-1",
+		"--output", outputPath, "--output-format", "json",
+	)
+	if runErr != nil {
+		t.Fatalf("download failed after %d segment pages: %v", segmentPages, runErr)
+	}
+	if segmentPages != 1 || downloads != 1 || !strings.Contains(stdout, `"segmentId":"segment-1"`) {
+		t.Fatalf("segment pages=%d downloads=%d stdout=%s, want one segment page and one download of segment-1", segmentPages, downloads, stdout)
+	}
+	data, err := os.ReadFile(outputPath)
+	if err != nil || string(data) != reportData {
+		t.Fatalf("downloaded data=%q err=%v, want %q", data, err, reportData)
+	}
 }
 
 func TestAnalyticsViewFreshTimeoutsPreserveParentCancellation(t *testing.T) {
@@ -269,21 +313,19 @@ func TestAnalyticsViewFreshTimeoutsPreserveParentCancellation(t *testing.T) {
 		}
 		return nil, req.Context().Err()
 	})
-	setAnalyticsTimeoutTestClient(t, transport)
+	client := stubClient(t, transport)
 
-	root := RootCommand("1.2.3")
-	root.FlagSet.SetOutput(io.Discard)
-	var runErr error
-	stdout, stderr := captureOutput(t, func() {
-		if err := root.Parse([]string{
-			"analytics", "view",
-			"--request-id", analyticsViewRequestID,
-			"--output", "json",
-		}); err != nil {
-			t.Fatalf("parse error: %v", err)
-		}
-		runErr = root.Run(parentCtx)
-	})
+	d, stdoutBuf, stderrBuf := newTestDeps(t, client)
+	root := rootcmd.RootCommandWithDeps("1.2.3", d)
+	if err := root.Parse([]string{
+		"analytics", "view",
+		"--request-id", analyticsViewRequestID,
+		"--output", "json",
+	}); err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	runErr := root.Run(parentCtx)
+	stdout, stderr := stdoutBuf.String(), stderrBuf.String()
 	if !errors.Is(runErr, context.Canceled) {
 		t.Fatalf("run error = %v, want parent cancellation", runErr)
 	}
@@ -302,20 +344,19 @@ func setupAnalyticsTimeoutTest(t *testing.T) {
 	t.Setenv("ASC_TIMEOUT_SECONDS", "")
 }
 
-func setAnalyticsTimeoutTestClient(t *testing.T, transport http.RoundTripper) {
+// runAnalyticsOnFakeClock is runRootWithDeps with the command run inside a
+// synctest bubble, so request delays and deadlines use the fake clock.
+func runAnalyticsOnFakeClock(t *testing.T, client func() (*asc.Client, error), args ...string) (string, string, error) {
 	t.Helper()
-	client, err := asc.NewClientWithHTTPClient(
-		"TEST_KEY",
-		"TEST_ISSUER",
-		os.Getenv("ASC_PRIVATE_KEY_PATH"),
-		&http.Client{Transport: transport},
-	)
-	if err != nil {
-		t.Fatalf("new analytics timeout client: %v", err)
+
+	d, stdout, stderr := newTestDeps(t, client)
+	root := rootcmd.RootCommandWithDeps("1.2.3", d)
+	if err := root.Parse(args); err != nil {
+		t.Fatalf("parse error: %v", err)
 	}
-	t.Cleanup(shared.SetASCClientFactoryForTesting(func() (*asc.Client, error) {
-		return client, nil
-	}))
+	var runErr error
+	synctest.Test(t, func(*testing.T) { runErr = root.Run(context.Background()) })
+	return stdout.String(), stderr.String(), runErr
 }
 
 func requireAnalyticsRequestDeadline(t *testing.T, req *http.Request) time.Time {
@@ -348,20 +389,17 @@ func requireAnalyticsRequestAuth(t *testing.T, req *http.Request, want bool) {
 	}
 }
 
-func assertAnalyticsDeadlinesArePerRequest(t *testing.T, deadlines []time.Time) {
+func assertAnalyticsRequestContextsArePerRequest(t *testing.T, requestContexts []<-chan struct{}) {
 	t.Helper()
-	if len(deadlines) < 2 {
-		t.Fatalf("deadline count = %d, want at least 2", len(deadlines))
+	if len(requestContexts) < 2 {
+		t.Fatalf("request context count = %d, want at least 2", len(requestContexts))
 	}
-	seen := make(map[time.Time]int, len(deadlines))
-	for index, deadline := range deadlines {
-		if deadline.IsZero() {
-			t.Fatalf("request %d has no deadline", index+1)
+	seen := make(map[<-chan struct{}]int, len(requestContexts))
+	for index, done := range requestContexts {
+		if previous, ok := seen[done]; ok {
+			t.Fatalf("request %d reused timeout context from request %d", index+1, previous)
 		}
-		if previous, ok := seen[deadline]; ok {
-			t.Fatalf("request %d reused deadline from request %d (%s)", index+1, previous, deadline.Format(time.RFC3339Nano))
-		}
-		seen[deadline] = index + 1
+		seen[done] = index + 1
 	}
 }
 
